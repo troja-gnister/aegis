@@ -230,9 +230,19 @@ int main(int argc, char **argv) {
     if (results) {
         int ok = 0, warn = 0, fail = 0, skip = 0;
         for (int i = 0; i < result_count; i++) {
-            /* Find module name by index — hacky but works for run_all */
-            const char *name = (i < module_count) ? modules[i].name : "unknown";
-            print_result(name, &results[i], args.verbose);
+            /* Extract module name from message prefix (format: "name: ...") */
+            char name_buf[64] = "unknown";
+            if (results[i].message) {
+                const char *colon = strchr(results[i].message, ':');
+                if (colon) {
+                    size_t len = (size_t)(colon - results[i].message);
+                    if (len < sizeof(name_buf)) {
+                        memcpy(name_buf, results[i].message, len);
+                        name_buf[len] = '\0';
+                    }
+                }
+            }
+            print_result(name_buf, &results[i], args.verbose);
             switch (results[i].status) {
                 case AEGIS_OK: ok++; break;
                 case AEGIS_WARN: warn++; break;
@@ -245,6 +255,7 @@ int main(int argc, char **argv) {
         free(results);
     }
 
+    free(exec.ctx); /* Free SystemExecutor context */
     aegis_config_free(cfg);
     free((void *)args.selected_modules);
     return 0;

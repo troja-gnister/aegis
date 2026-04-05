@@ -145,7 +145,7 @@ static aegis_module_t all_modules[] = {
     {"usbguard",           100, aegis_usbguard_apply,           aegis_usbguard_status,           aegis_usbguard_verify},
     {"snapper",            100, aegis_snapper_apply,            aegis_snapper_status,            aegis_snapper_verify},
     {"secureboot",         100, aegis_secureboot_apply,         aegis_secureboot_status,         aegis_secureboot_verify},
-    {"malloc_hardened",    100, aegis_malloc_hardened_apply,    aegis_malloc_hardened_status,    aegis_malloc_hardened_verify},
+    {"malloc",            100, aegis_malloc_hardened_apply,    aegis_malloc_hardened_status,    aegis_malloc_hardened_verify},
     {"flatpak_hardening",  100, aegis_flatpak_hardening_apply,  aegis_flatpak_hardening_status,  aegis_flatpak_hardening_verify},
     {"dns",                100, aegis_dns_apply,                aegis_dns_status,                aegis_dns_verify},
     {"podman_rootless",    100, aegis_podman_rootless_apply,    aegis_podman_rootless_status,    aegis_podman_rootless_verify},
