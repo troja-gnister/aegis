@@ -1,0 +1,86 @@
+#define _POSIX_C_SOURCE 200809L
+#include <aegis/modules/kernel.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+aegis_result_t aegis_kernel_apply(const void *config, aegis_executor_t *exec) {
+    const aegis_kernel_config_t *cfg = config;
+    if (!cfg || !cfg->enabled)
+        return aegis_result_skip("kernel: disabled");
+
+    aegis_result_t res = aegis_result_ok("kernel: applied");
+
+    /* Install linux-hardened */
+    const char *install[] = {"pacman", "-S", "--noconfirm", "--needed", "linux-hardened", NULL};
+    aegis_exec_result_t r = exec->execute_sudo(install, exec->ctx);
+    aegis_exec_result_free(&r);
+    aegis_result_add_action(&res, "Ensured linux-hardened installed");
+
+    /* Set kernel lockdown mode in GRUB */
+    char param[128];
+    snprintf(param, sizeof(param),
+             "GRUB_CMDLINE_LINUX_DEFAULT=\"loglevel=3 quiet lockdown=%s\"",
+             cfg->lockdown ? cfg->lockdown : "integrity");
+
+    /* Read current grub config, replace or append lockdown param */
+    char *grub = exec->read_file("/etc/default/grub", exec->ctx);
+    char new_grub[4096] = {0};
+    if (grub) {
+        /* Simple approach: replace the GRUB_CMDLINE_LINUX_DEFAULT line */
+        char *line = strstr(grub, "GRUB_CMDLINE_LINUX_DEFAULT");
+        if (line) {
+            size_t pre_len = (size_t)(line - grub);
+            strncpy(new_grub, grub, pre_len);
+            strcat(new_grub, param);
+            strcat(new_grub, "\n");
+            char *next_line = strchr(line, '\n');
+            if (next_line) strcat(new_grub, next_line + 1);
+        } else {
+            snprintf(new_grub, sizeof(new_grub), "%s\n%s\n", grub, param);
+        }
+        free(grub);
+    } else {
+        snprintf(new_grub, sizeof(new_grub), "%s\n", param);
+    }
+
+    exec->write_file("/etc/default/grub", new_grub, true, exec->ctx);
+    aegis_result_add_action(&res, "Set kernel lockdown in GRUB config");
+
+    /* Regenerate GRUB config */
+    const char *mkconfig[] = {"grub-mkconfig", "-o", "/boot/grub/grub.cfg", NULL};
+    r = exec->execute_sudo(mkconfig, exec->ctx);
+    aegis_exec_result_free(&r);
+    aegis_result_add_action(&res, "Regenerated GRUB config");
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "kernel: linux-hardened with lockdown=%s",
+             cfg->lockdown ? cfg->lockdown : "integrity");
+    free(res.message);
+    res.message = strdup(msg);
+    return res;
+}
+
+aegis_result_t aegis_kernel_status(aegis_executor_t *exec) {
+    /* Check running kernel */
+    const char *uname[] = {"uname", "-r", NULL};
+    aegis_exec_result_t r = exec->execute(uname, exec->ctx);
+    bool hardened = (r.stdout_buf && strstr(r.stdout_buf, "hardened"));
+    aegis_exec_result_free(&r);
+
+    /* Check lockdown mode */
+    char *lockdown = exec->read_file("/sys/kernel/security/lockdown", exec->ctx);
+    bool locked = (lockdown && (strstr(lockdown, "[integrity]") || strstr(lockdown, "[confidentiality]")));
+    free(lockdown);
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "kernel: hardened=%s lockdown=%s",
+             hardened ? "yes" : "no", locked ? "active" : "none");
+    if (hardened && locked) return aegis_result_ok(msg);
+    if (hardened || locked) return aegis_result_warn(msg);
+    return aegis_result_fail(msg);
+}
+
+aegis_result_t aegis_kernel_verify(aegis_executor_t *exec) {
+    return aegis_kernel_status(exec);
+}

@@ -1,0 +1,84 @@
+[simple]
+enabled = true
+name = "test"
+count = 42
+
+[with_array]
+items = ["alpha", "bravo", "charlie"]
+
+[with_defaults]
+present = "yes"
+
+[sysctl]
+enabled = true
+profile = "standard"
+
+[kernel]
+enabled = false
+lockdown = "integrity"
+
+[mounts]
+enabled = true
+harden_tmp = true
+harden_dev_shm = true
+harden_proc = false
+
+[audit]
+enabled = true
+profile = "stig"
+
+[apparmor]
+enabled = true
+profiles = ["arch", "apparmord"]
+
+[firejail]
+enabled = true
+apps = ["firefox", "chromium"]
+aggressive = false
+
+[systemd_hardening]
+enabled = true
+auto_discover = true
+profiles = ["ssh"]
+
+[usbguard]
+enabled = false
+default_policy = "block"
+
+[snapper]
+enabled = true
+subvolumes = ["/", "/home"]
+
+[secureboot]
+enabled = false
+
+[malloc]
+enabled = true
+
+[flatpak_hardening]
+enabled = true
+policy = "strict"
+
+[dns]
+enabled = true
+dnssec = true
+dot = true
+
+[podman_rootless]
+enabled = true
+
+[dropbear]
+enabled = false
+
+[archaudit]
+enabled = true
+
+[aide]
+enabled = false
+
+[rkhunter]
+enabled = true
+
+[fail2ban]
+enabled = true
+profile = "standard"
