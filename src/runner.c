@@ -1,5 +1,6 @@
 #include <aegis/runner.h>
 #include <aegis/modules/sysctl.h>
+#include <aegis/modules/mounts.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -118,6 +119,7 @@ aegis_result_t *aegis_verify_selected(aegis_module_t *modules, int module_count,
 
 static aegis_module_t all_modules[] = {
     {"sysctl", 10, aegis_sysctl_apply, aegis_sysctl_status, aegis_sysctl_verify},
+    {"mounts", 10, aegis_mounts_apply, aegis_mounts_status, aegis_mounts_verify},
 };
 
 aegis_module_t *aegis_get_modules(int *out_count) {
