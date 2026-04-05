@@ -6,6 +6,14 @@
 #include <aegis/modules/apparmor.h>
 #include <aegis/modules/firejail.h>
 #include <aegis/modules/systemd_hardening.h>
+#include <aegis/modules/usbguard.h>
+#include <aegis/modules/snapper.h>
+#include <aegis/modules/secureboot.h>
+#include <aegis/modules/malloc_hardened.h>
+#include <aegis/modules/flatpak_hardening.h>
+#include <aegis/modules/dns.h>
+#include <aegis/modules/podman_rootless.h>
+#include <aegis/modules/dropbear.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -123,13 +131,21 @@ aegis_result_t *aegis_verify_selected(aegis_module_t *modules, int module_count,
 }
 
 static aegis_module_t all_modules[] = {
-    {"sysctl",             10, aegis_sysctl_apply,             aegis_sysctl_status,             aegis_sysctl_verify},
-    {"mounts",             10, aegis_mounts_apply,             aegis_mounts_status,             aegis_mounts_verify},
-    {"audit",              20, aegis_audit_apply,              aegis_audit_status,              aegis_audit_verify},
-    {"kernel",             20, aegis_kernel_apply,             aegis_kernel_status,             aegis_kernel_verify},
-    {"apparmor",           50, aegis_apparmor_apply,           aegis_apparmor_status,           aegis_apparmor_verify},
-    {"firejail",           60, aegis_firejail_apply,           aegis_firejail_status,           aegis_firejail_verify},
-    {"systemd_hardening",  60, aegis_systemd_hardening_apply,  aegis_systemd_hardening_status,  aegis_systemd_hardening_verify},
+    {"sysctl",             10,  aegis_sysctl_apply,             aegis_sysctl_status,             aegis_sysctl_verify},
+    {"mounts",             10,  aegis_mounts_apply,             aegis_mounts_status,             aegis_mounts_verify},
+    {"audit",              20,  aegis_audit_apply,              aegis_audit_status,              aegis_audit_verify},
+    {"kernel",             20,  aegis_kernel_apply,             aegis_kernel_status,             aegis_kernel_verify},
+    {"apparmor",           50,  aegis_apparmor_apply,           aegis_apparmor_status,           aegis_apparmor_verify},
+    {"firejail",           60,  aegis_firejail_apply,           aegis_firejail_status,           aegis_firejail_verify},
+    {"systemd_hardening",  60,  aegis_systemd_hardening_apply,  aegis_systemd_hardening_status,  aegis_systemd_hardening_verify},
+    {"usbguard",           100, aegis_usbguard_apply,           aegis_usbguard_status,           aegis_usbguard_verify},
+    {"snapper",            100, aegis_snapper_apply,            aegis_snapper_status,            aegis_snapper_verify},
+    {"secureboot",         100, aegis_secureboot_apply,         aegis_secureboot_status,         aegis_secureboot_verify},
+    {"malloc_hardened",    100, aegis_malloc_hardened_apply,    aegis_malloc_hardened_status,    aegis_malloc_hardened_verify},
+    {"flatpak_hardening",  100, aegis_flatpak_hardening_apply,  aegis_flatpak_hardening_status,  aegis_flatpak_hardening_verify},
+    {"dns",                100, aegis_dns_apply,                aegis_dns_status,                aegis_dns_verify},
+    {"podman_rootless",    100, aegis_podman_rootless_apply,    aegis_podman_rootless_status,    aegis_podman_rootless_verify},
+    {"dropbear",           100, aegis_dropbear_apply,           aegis_dropbear_status,           aegis_dropbear_verify},
 };
 
 aegis_module_t *aegis_get_modules(int *out_count) {
