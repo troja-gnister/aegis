@@ -1,0 +1,10 @@
+[simple]
+enabled = true
+name = "test"
+count = 42
+
+[with_array]
+items = ["alpha", "bravo", "charlie"]
+
+[with_defaults]
+present = "yes"
