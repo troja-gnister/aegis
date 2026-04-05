@@ -14,6 +14,10 @@
 #include <aegis/modules/dns.h>
 #include <aegis/modules/podman_rootless.h>
 #include <aegis/modules/dropbear.h>
+#include <aegis/modules/archaudit.h>
+#include <aegis/modules/aide.h>
+#include <aegis/modules/rkhunter.h>
+#include <aegis/modules/fail2ban.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -146,6 +150,10 @@ static aegis_module_t all_modules[] = {
     {"dns",                100, aegis_dns_apply,                aegis_dns_status,                aegis_dns_verify},
     {"podman_rootless",    100, aegis_podman_rootless_apply,    aegis_podman_rootless_status,    aegis_podman_rootless_verify},
     {"dropbear",           100, aegis_dropbear_apply,           aegis_dropbear_status,           aegis_dropbear_verify},
+    {"archaudit",          100, aegis_archaudit_apply,          aegis_archaudit_status,          aegis_archaudit_verify},
+    {"aide",               100, aegis_aide_apply,               aegis_aide_status,               aegis_aide_verify},
+    {"rkhunter",           100, aegis_rkhunter_apply,           aegis_rkhunter_status,           aegis_rkhunter_verify},
+    {"fail2ban",           100, aegis_fail2ban_apply,           aegis_fail2ban_status,           aegis_fail2ban_verify},
 };
 
 aegis_module_t *aegis_get_modules(int *out_count) {
