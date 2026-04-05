@@ -1,0 +1,76 @@
+# Aegis Security Hardening Configuration
+# Copy to /etc/aegis/aegis.toml and customize.
+
+[sysctl]
+enabled = true
+profile = "standard"       # minimal | standard | paranoid
+
+[kernel]
+enabled = false
+lockdown = "integrity"     # integrity | confidentiality
+
+[mounts]
+enabled = true
+harden_tmp = true
+harden_dev_shm = true
+harden_proc = true
+
+[audit]
+enabled = true
+profile = "standard"       # minimal | standard | stig
+
+[apparmor]
+enabled = false
+profiles = ["arch"]
+
+[firejail]
+enabled = false
+apps = ["firefox", "chromium"]
+aggressive = false
+
+[systemd_hardening]
+enabled = false
+auto_discover = true
+profiles = []
+
+[usbguard]
+enabled = false
+default_policy = "block"   # block | allow
+
+[snapper]
+enabled = false
+subvolumes = ["/"]
+
+[secureboot]
+enabled = false
+
+[malloc]
+enabled = false
+
+[flatpak_hardening]
+enabled = false
+policy = "strict"          # permissive | strict | lockdown
+
+[dns]
+enabled = true
+dnssec = true
+dot = true
+
+[podman_rootless]
+enabled = false
+
+[dropbear]
+enabled = false
+
+[archaudit]
+enabled = true
+
+[aide]
+enabled = false
+
+[rkhunter]
+enabled = false
+
+[fail2ban]
+enabled = false
+profile = "standard"       # minimal | standard | strict
