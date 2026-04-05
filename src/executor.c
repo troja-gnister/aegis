@@ -162,7 +162,12 @@ static char *sys_read_file(const char *path, void *ctx) {
 }
 
 static int sys_write_file(const char *path, const char *content, bool sudo, void *ctx) {
-    (void)ctx;
+    sys_ctx_t *sctx = ctx;
+    if (sctx && sctx->dry_run) {
+        printf("[dry-run] write_file %s%s (%zu bytes)\n",
+               sudo ? "[sudo] " : "", path, strlen(content));
+        return 0;
+    }
     if (sudo) {
         /* Use sudo tee to write as root */
         int in_pipe[2];
