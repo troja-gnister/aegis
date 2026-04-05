@@ -123,7 +123,51 @@ int main(int argc, char **argv) {
     }
 
     if (args.cmd == CMD_CONFIG_INIT) {
-        printf("TODO: Generate default config to %s\n", args.config_path);
+        /* Locate the example config: prefer installed path, fall back to source tree */
+        const char *example_paths[] = {
+            "/usr/share/aegis/aegis.toml.example",
+            "config/aegis.toml.example",
+            NULL
+        };
+        const char *src_path = NULL;
+        for (int i = 0; example_paths[i]; i++) {
+            FILE *probe = fopen(example_paths[i], "r");
+            if (probe) { fclose(probe); src_path = example_paths[i]; break; }
+        }
+        if (!src_path) {
+            fprintf(stderr, "Error: cannot find aegis.toml.example\n");
+            free((void *)args.selected_modules);
+            return 1;
+        }
+        /* Read the example config */
+        FILE *src = fopen(src_path, "r");
+        if (!src) {
+            fprintf(stderr, "Error: cannot open %s: ", src_path);
+            perror(NULL);
+            free((void *)args.selected_modules);
+            return 1;
+        }
+        fseek(src, 0, SEEK_END);
+        long len = ftell(src);
+        rewind(src);
+        char *buf = malloc((size_t)len + 1);
+        if (!buf) { fclose(src); free((void *)args.selected_modules); return 1; }
+        size_t n = fread(buf, 1, (size_t)len, src);
+        buf[n] = '\0';
+        fclose(src);
+        /* Write to destination path */
+        FILE *dst = fopen(args.config_path, "w");
+        if (!dst) {
+            fprintf(stderr, "Error: cannot write %s: ", args.config_path);
+            perror(NULL);
+            free(buf);
+            free((void *)args.selected_modules);
+            return 1;
+        }
+        fputs(buf, dst);
+        fclose(dst);
+        free(buf);
+        printf("Config written to %s\n", args.config_path);
         free((void *)args.selected_modules);
         return 0;
     }
