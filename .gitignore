@@ -1,7 +1,7 @@
 # C build artifacts
 *.o
 *.a
-aegis
+/aegis
 
 # IDE
 .idea/
