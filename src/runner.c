@@ -2,6 +2,7 @@
 #include <aegis/modules/sysctl.h>
 #include <aegis/modules/mounts.h>
 #include <aegis/modules/audit.h>
+#include <aegis/modules/kernel.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -122,6 +123,7 @@ static aegis_module_t all_modules[] = {
     {"sysctl", 10, aegis_sysctl_apply, aegis_sysctl_status, aegis_sysctl_verify},
     {"mounts", 10, aegis_mounts_apply, aegis_mounts_status, aegis_mounts_verify},
     {"audit",  20, aegis_audit_apply,  aegis_audit_status,  aegis_audit_verify},
+    {"kernel", 20, aegis_kernel_apply, aegis_kernel_status, aegis_kernel_verify},
 };
 
 aegis_module_t *aegis_get_modules(int *out_count) {
