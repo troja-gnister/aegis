@@ -7,7 +7,7 @@
 #define DEFAULT_CONFIG "/etc/aegis/aegis.toml"
 #define VERSION "0.1.0"
 
-typedef enum { CMD_NONE, CMD_HARDEN, CMD_STATUS, CMD_VERIFY, CMD_LIST,
+typedef enum { CMD_NONE, CMD_HELP, CMD_HARDEN, CMD_STATUS, CMD_VERIFY, CMD_LIST,
                CMD_CONFIG_VALIDATE, CMD_CONFIG_INIT, CMD_VERSION } command_t;
 
 typedef struct {
@@ -20,7 +20,7 @@ typedef struct {
 } cli_args_t;
 
 static void usage(void) {
-    fprintf(stderr,
+    printf(
         "Usage: aegis <command> [options] [modules...]\n\n"
         "Commands:\n"
         "  harden [modules...]   Apply security hardening\n"
@@ -31,6 +31,7 @@ static void usage(void) {
         "  config init           Generate default config\n"
         "  version               Print version\n\n"
         "Options:\n"
+        "  -h, --help            Show this help message and exit\n"
         "  --dry-run             Preview without applying\n"
         "  --verbose             Verbose output\n"
         "  --config PATH         Config file (default: %s)\n",
@@ -42,6 +43,14 @@ static cli_args_t parse_args(int argc, char **argv) {
     args.config_path = DEFAULT_CONFIG;
 
     if (argc < 2) { args.cmd = CMD_NONE; return args; }
+
+    /* Check for help flags before anything else */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            args.cmd = CMD_HELP;
+            return args;
+        }
+    }
 
     int i = 1;
     /* Parse command */
@@ -98,6 +107,7 @@ int main(int argc, char **argv) {
     cli_args_t args = parse_args(argc, argv);
 
     if (args.cmd == CMD_NONE) { usage(); return 1; }
+    if (args.cmd == CMD_HELP) { usage(); return 0; }
     if (args.cmd == CMD_VERSION) { printf("aegis %s\n", VERSION); return 0; }
 
     /* Load config for most commands */
