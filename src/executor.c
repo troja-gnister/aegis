@@ -7,6 +7,14 @@
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <signal.h>
+
+static volatile sig_atomic_t _timed_out = 0;
+
+static void alarm_handler(int sig) {
+    (void)sig;
+    _timed_out = 1;
+}
 
 typedef struct {
     bool dry_run;
@@ -76,7 +84,22 @@ static aegis_exec_result_t run_argv(const char **argv) {
     close(err_pipe[0]);
 
     int status = 0;
+    _timed_out = 0;
+    signal(SIGALRM, alarm_handler);
+    alarm(120);
     waitpid(pid, &status, 0);
+    alarm(0);
+
+    if (_timed_out) {
+        kill(pid, SIGKILL);
+        waitpid(pid, &status, 0);
+        if (!result.stdout_buf) result.stdout_buf = strdup("");
+        free(result.stderr_buf);
+        result.stderr_buf = strdup("command timed out after 120s");
+        result.exit_code = -1;
+        return result;
+    }
+
     result.exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 
     if (!result.stdout_buf) result.stdout_buf = strdup("");
