@@ -14,12 +14,22 @@ aegis_result_t aegis_apparmor_apply(const void *config, aegis_executor_t *exec) 
     /* Install apparmor package */
     const char *install[] = {"pacman", "-S", "--noconfirm", "--needed", "apparmor", NULL};
     aegis_exec_result_t r = exec->execute_sudo(install, exec->ctx);
+    if (r.exit_code != 0) {
+        aegis_result_free(&res);
+        aegis_exec_result_free(&r);
+        return aegis_result_fail("apparmor: pacman -S failed");
+    }
     aegis_exec_result_free(&r);
     aegis_result_add_action(&res, "Ensured apparmor package installed");
 
     /* Enable apparmor service */
     const char *enable[] = {"systemctl", "enable", "--now", "apparmor", NULL};
     r = exec->execute_sudo(enable, exec->ctx);
+    if (r.exit_code != 0) {
+        aegis_result_free(&res);
+        aegis_exec_result_free(&r);
+        return aegis_result_fail("apparmor: systemctl enable apparmor failed");
+    }
     aegis_exec_result_free(&r);
     aegis_result_add_action(&res, "Enabled apparmor service");
 

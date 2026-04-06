@@ -14,6 +14,11 @@ aegis_result_t aegis_firejail_apply(const void *config, aegis_executor_t *exec) 
     /* Install firejail package */
     const char *install[] = {"pacman", "-S", "--noconfirm", "--needed", "firejail", NULL};
     aegis_exec_result_t r = exec->execute_sudo(install, exec->ctx);
+    if (r.exit_code != 0) {
+        aegis_result_free(&res);
+        aegis_exec_result_free(&r);
+        return aegis_result_fail("firejail: pacman -S failed");
+    }
     aegis_exec_result_free(&r);
     aegis_result_add_action(&res, "Ensured firejail package installed");
 

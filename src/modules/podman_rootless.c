@@ -19,20 +19,34 @@ aegis_result_t aegis_podman_rootless_apply(const void *config, aegis_executor_t 
     const char *sysctl_argv[] = {"sysctl", "-w",
                                   "kernel.unprivileged_userns_clone=1", NULL};
     aegis_exec_result_t r = exec->execute_sudo(sysctl_argv, exec->ctx);
+    if (r.exit_code != 0) {
+        aegis_result_free(&res);
+        aegis_exec_result_free(&r);
+        return aegis_result_fail("podman_rootless: sysctl -w failed");
+    }
     aegis_exec_result_free(&r);
     aegis_result_add_action(&res, "Set kernel.unprivileged_userns_clone=1");
 
     /* Also persist via sysctl.d */
-    exec->write_file("/etc/sysctl.d/99-podman.conf",
-                     "kernel.unprivileged_userns_clone = 1\n", true, exec->ctx);
+    if (exec->write_file("/etc/sysctl.d/99-podman.conf",
+                         "kernel.unprivileged_userns_clone = 1\n", true, exec->ctx) != 0) {
+        aegis_result_free(&res);
+        return aegis_result_fail("podman_rootless: failed to write /etc/sysctl.d/99-podman.conf");
+    }
     aegis_result_add_action(&res, "Wrote /etc/sysctl.d/99-podman.conf");
 
     /* Configure /etc/subuid */
-    exec->write_file(SUBUID_PATH, SUBID_ENTRY, true, exec->ctx);
+    if (exec->write_file(SUBUID_PATH, SUBID_ENTRY, true, exec->ctx) != 0) {
+        aegis_result_free(&res);
+        return aegis_result_fail("podman_rootless: failed to write " SUBUID_PATH);
+    }
     aegis_result_add_action(&res, "Configured " SUBUID_PATH " for user namespaces");
 
     /* Configure /etc/subgid */
-    exec->write_file(SUBGID_PATH, SUBID_ENTRY, true, exec->ctx);
+    if (exec->write_file(SUBGID_PATH, SUBID_ENTRY, true, exec->ctx) != 0) {
+        aegis_result_free(&res);
+        return aegis_result_fail("podman_rootless: failed to write " SUBGID_PATH);
+    }
     aegis_result_add_action(&res, "Configured " SUBGID_PATH " for user namespaces");
 
     return res;

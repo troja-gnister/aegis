@@ -52,6 +52,11 @@ aegis_result_t aegis_dropbear_apply(const void *config, aegis_executor_t *exec) 
     /* Install dropbear */
     const char *install[] = {"pacman", "-S", "--noconfirm", "--needed", "dropbear", NULL};
     aegis_exec_result_t r = exec->execute_sudo(install, exec->ctx);
+    if (r.exit_code != 0) {
+        aegis_result_free(&res);
+        aegis_exec_result_free(&r);
+        return aegis_result_fail("dropbear: pacman -S failed");
+    }
     aegis_exec_result_free(&r);
     aegis_result_add_action(&res, "Ensured dropbear package installed");
 
@@ -65,7 +70,11 @@ aegis_result_t aegis_dropbear_apply(const void *config, aegis_executor_t *exec) 
     free(existing);
 
     if (updated) {
-        exec->write_file(MKINITCPIO_CONF, updated, true, exec->ctx);
+        if (exec->write_file(MKINITCPIO_CONF, updated, true, exec->ctx) != 0) {
+            free(updated);
+            aegis_result_free(&res);
+            return aegis_result_fail("dropbear: failed to write " MKINITCPIO_CONF);
+        }
         free(updated);
         aegis_result_add_action(&res, "Added dropbear hook to " MKINITCPIO_CONF);
     }
@@ -73,6 +82,11 @@ aegis_result_t aegis_dropbear_apply(const void *config, aegis_executor_t *exec) 
     /* Regenerate initramfs */
     const char *mkinitcpio[] = {"mkinitcpio", "-P", NULL};
     r = exec->execute_sudo(mkinitcpio, exec->ctx);
+    if (r.exit_code != 0) {
+        aegis_result_free(&res);
+        aegis_exec_result_free(&r);
+        return aegis_result_fail("dropbear: mkinitcpio -P failed");
+    }
     aegis_exec_result_free(&r);
     aegis_result_add_action(&res, "Regenerated initramfs with mkinitcpio -P");
 

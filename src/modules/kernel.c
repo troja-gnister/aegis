@@ -14,6 +14,11 @@ aegis_result_t aegis_kernel_apply(const void *config, aegis_executor_t *exec) {
     /* Install linux-hardened */
     const char *install[] = {"pacman", "-S", "--noconfirm", "--needed", "linux-hardened", NULL};
     aegis_exec_result_t r = exec->execute_sudo(install, exec->ctx);
+    if (r.exit_code != 0) {
+        aegis_result_free(&res);
+        aegis_exec_result_free(&r);
+        return aegis_result_fail("kernel: pacman -S linux-hardened failed");
+    }
     aegis_exec_result_free(&r);
     aegis_result_add_action(&res, "Ensured linux-hardened installed");
 
@@ -44,12 +49,20 @@ aegis_result_t aegis_kernel_apply(const void *config, aegis_executor_t *exec) {
         snprintf(new_grub, sizeof(new_grub), "%s\n", param);
     }
 
-    exec->write_file("/etc/default/grub", new_grub, true, exec->ctx);
+    if (exec->write_file("/etc/default/grub", new_grub, true, exec->ctx) != 0) {
+        aegis_result_free(&res);
+        return aegis_result_fail("kernel: failed to write /etc/default/grub");
+    }
     aegis_result_add_action(&res, "Set kernel lockdown in GRUB config");
 
     /* Regenerate GRUB config */
     const char *mkconfig[] = {"grub-mkconfig", "-o", "/boot/grub/grub.cfg", NULL};
     r = exec->execute_sudo(mkconfig, exec->ctx);
+    if (r.exit_code != 0) {
+        aegis_result_free(&res);
+        aegis_exec_result_free(&r);
+        return aegis_result_fail("kernel: grub-mkconfig failed");
+    }
     aegis_exec_result_free(&r);
     aegis_result_add_action(&res, "Regenerated GRUB config");
 

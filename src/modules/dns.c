@@ -33,6 +33,11 @@ aegis_result_t aegis_dns_apply(const void *config, aegis_executor_t *exec) {
     /* Restart systemd-resolved */
     const char *restart[] = {"systemctl", "restart", "systemd-resolved", NULL};
     aegis_exec_result_t r = exec->execute_sudo(restart, exec->ctx);
+    if (r.exit_code != 0) {
+        aegis_result_free(&res);
+        aegis_exec_result_free(&r);
+        return aegis_result_fail("dns: systemctl restart systemd-resolved failed");
+    }
     aegis_exec_result_free(&r);
     aegis_result_add_action(&res, "Restarted systemd-resolved");
 

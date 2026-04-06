@@ -56,23 +56,41 @@ aegis_result_t aegis_audit_apply(const void *config, aegis_executor_t *exec) {
     /* Install auditd */
     const char *install[] = {"pacman", "-S", "--noconfirm", "--needed", "audit", NULL};
     aegis_exec_result_t r = exec->execute_sudo(install, exec->ctx);
+    if (r.exit_code != 0) {
+        aegis_result_free(&res);
+        aegis_exec_result_free(&r);
+        return aegis_result_fail("audit: pacman -S failed");
+    }
     aegis_exec_result_free(&r);
     aegis_result_add_action(&res, "Ensured audit package installed");
 
     /* Write rules */
     const char *rules = get_rules(cfg->profile);
-    exec->write_file("/etc/audit/rules.d/aegis.rules", rules, true, exec->ctx);
+    if (exec->write_file("/etc/audit/rules.d/aegis.rules", rules, true, exec->ctx) != 0) {
+        aegis_result_free(&res);
+        return aegis_result_fail("audit: failed to write /etc/audit/rules.d/aegis.rules");
+    }
     aegis_result_add_action(&res, "Wrote /etc/audit/rules.d/aegis.rules");
 
     /* Load rules */
     const char *load[] = {"augenrules", "--load", NULL};
     r = exec->execute_sudo(load, exec->ctx);
+    if (r.exit_code != 0) {
+        aegis_result_free(&res);
+        aegis_exec_result_free(&r);
+        return aegis_result_fail("audit: augenrules --load failed");
+    }
     aegis_exec_result_free(&r);
     aegis_result_add_action(&res, "Loaded audit rules");
 
     /* Enable service */
     const char *enable[] = {"systemctl", "enable", "--now", "auditd", NULL};
     r = exec->execute_sudo(enable, exec->ctx);
+    if (r.exit_code != 0) {
+        aegis_result_free(&res);
+        aegis_exec_result_free(&r);
+        return aegis_result_fail("audit: systemctl enable auditd failed");
+    }
     aegis_exec_result_free(&r);
     aegis_result_add_action(&res, "Enabled auditd service");
 

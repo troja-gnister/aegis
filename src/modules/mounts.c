@@ -31,9 +31,17 @@ aegis_result_t aegis_mounts_apply(const void *config, aegis_executor_t *exec) {
     aegis_result_t res = aegis_result_ok("mounts: hardened");
 
     if (cfg->harden_tmp) {
-        exec->write_file("/etc/systemd/system/tmp.mount", TMP_MOUNT_UNIT, true, exec->ctx);
+        if (exec->write_file("/etc/systemd/system/tmp.mount", TMP_MOUNT_UNIT, true, exec->ctx) != 0) {
+            aegis_result_free(&res);
+            return aegis_result_fail("mounts: failed to write /etc/systemd/system/tmp.mount");
+        }
         const char *enable[] = {"systemctl", "enable", "--now", "tmp.mount", NULL};
         aegis_exec_result_t r = exec->execute_sudo(enable, exec->ctx);
+        if (r.exit_code != 0) {
+            aegis_result_free(&res);
+            aegis_exec_result_free(&r);
+            return aegis_result_fail("mounts: systemctl enable tmp.mount failed");
+        }
         aegis_exec_result_free(&r);
         aegis_result_add_action(&res, "Hardened /tmp (noexec,nodev,nosuid via tmp.mount)");
     }
@@ -45,7 +53,11 @@ aegis_result_t aegis_mounts_apply(const void *config, aegis_executor_t *exec) {
             char new_fstab[8192] = {0};
             if (fstab) strncpy(new_fstab, fstab, sizeof(new_fstab) - 256);
             strcat(new_fstab, DEV_SHM_FSTAB);
-            exec->write_file("/etc/fstab", new_fstab, true, exec->ctx);
+            if (exec->write_file("/etc/fstab", new_fstab, true, exec->ctx) != 0) {
+                free(fstab);
+                aegis_result_free(&res);
+                return aegis_result_fail("mounts: failed to write /etc/fstab");
+            }
         }
         free(fstab);
         const char *remount[] = {"mount", "-o", "remount", "/dev/shm", NULL};
@@ -60,7 +72,11 @@ aegis_result_t aegis_mounts_apply(const void *config, aegis_executor_t *exec) {
             char new_fstab[8192] = {0};
             if (fstab) strncpy(new_fstab, fstab, sizeof(new_fstab) - 256);
             strcat(new_fstab, PROC_FSTAB);
-            exec->write_file("/etc/fstab", new_fstab, true, exec->ctx);
+            if (exec->write_file("/etc/fstab", new_fstab, true, exec->ctx) != 0) {
+                free(fstab);
+                aegis_result_free(&res);
+                return aegis_result_fail("mounts: failed to write /etc/fstab");
+            }
         }
         free(fstab);
         const char *remount[] = {"mount", "-o", "remount", "/proc", NULL};

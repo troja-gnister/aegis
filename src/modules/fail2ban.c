@@ -49,6 +49,11 @@ aegis_result_t aegis_fail2ban_apply(const void *config, aegis_executor_t *exec) 
     /* Install fail2ban */
     const char *install[] = {"pacman", "-S", "--noconfirm", "--needed", "fail2ban", NULL};
     aegis_exec_result_t r = exec->execute_sudo(install, exec->ctx);
+    if (r.exit_code != 0) {
+        aegis_result_free(&res);
+        aegis_exec_result_free(&r);
+        return aegis_result_fail("fail2ban: pacman -S failed");
+    }
     aegis_exec_result_free(&r);
     aegis_result_add_action(&res, "Ensured fail2ban package installed");
 
@@ -63,7 +68,10 @@ aegis_result_t aegis_fail2ban_apply(const void *config, aegis_executor_t *exec) 
         jail_content = JAIL_STANDARD;
     }
 
-    exec->write_file(FAIL2BAN_JAIL_CONF, jail_content, true, exec->ctx);
+    if (exec->write_file(FAIL2BAN_JAIL_CONF, jail_content, true, exec->ctx) != 0) {
+        aegis_result_free(&res);
+        return aegis_result_fail("fail2ban: failed to write " FAIL2BAN_JAIL_CONF);
+    }
 
     char action_msg[128];
     snprintf(action_msg, sizeof(action_msg),
@@ -73,6 +81,11 @@ aegis_result_t aegis_fail2ban_apply(const void *config, aegis_executor_t *exec) 
     /* Enable fail2ban service */
     const char *enable[] = {"systemctl", "enable", "--now", "fail2ban", NULL};
     r = exec->execute_sudo(enable, exec->ctx);
+    if (r.exit_code != 0) {
+        aegis_result_free(&res);
+        aegis_exec_result_free(&r);
+        return aegis_result_fail("fail2ban: systemctl enable fail2ban failed");
+    }
     aegis_exec_result_free(&r);
     aegis_result_add_action(&res, "Enabled fail2ban service");
 

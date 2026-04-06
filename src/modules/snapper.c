@@ -49,6 +49,11 @@ aegis_result_t aegis_snapper_apply(const void *config, aegis_executor_t *exec) {
     /* Install snapper + snap-pac */
     const char *install[] = {"pacman", "-S", "--noconfirm", "--needed", "snapper", "snap-pac", NULL};
     aegis_exec_result_t r = exec->execute_sudo(install, exec->ctx);
+    if (r.exit_code != 0) {
+        aegis_result_free(&res);
+        aegis_exec_result_free(&r);
+        return aegis_result_fail("snapper: pacman -S failed");
+    }
     aegis_exec_result_free(&r);
     aegis_result_add_action(&res, "Ensured snapper and snap-pac packages installed");
 
@@ -65,7 +70,10 @@ aegis_result_t aegis_snapper_apply(const void *config, aegis_executor_t *exec) {
     }
 
     /* Install pacman hook */
-    exec->write_file("/etc/pacman.d/hooks/snap-pac.hook", pacman_hook, true, exec->ctx);
+    if (exec->write_file("/etc/pacman.d/hooks/snap-pac.hook", pacman_hook, true, exec->ctx) != 0) {
+        aegis_result_free(&res);
+        return aegis_result_fail("snapper: failed to write /etc/pacman.d/hooks/snap-pac.hook");
+    }
     aegis_result_add_action(&res, "Installed snap-pac pacman hook");
 
     char msg[128];

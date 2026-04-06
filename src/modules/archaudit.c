@@ -14,6 +14,11 @@ aegis_result_t aegis_archaudit_apply(const void *config, aegis_executor_t *exec)
     /* Install arch-audit */
     const char *install[] = {"pacman", "-S", "--noconfirm", "--needed", "arch-audit", NULL};
     aegis_exec_result_t r = exec->execute_sudo(install, exec->ctx);
+    if (r.exit_code != 0) {
+        aegis_result_free(&res);
+        aegis_exec_result_free(&r);
+        return aegis_result_fail("archaudit: pacman -S failed");
+    }
     aegis_exec_result_free(&r);
     aegis_result_add_action(&res, "Ensured arch-audit package installed");
 

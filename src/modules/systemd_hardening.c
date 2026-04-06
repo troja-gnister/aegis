@@ -11,8 +11,8 @@ static const char *hardening_dropin =
     "NoNewPrivileges=yes\n"
     "PrivateTmp=yes\n";
 
-static void write_dropin_for_service(const char *service, aegis_executor_t *exec,
-                                      aegis_result_t *res) {
+static int write_dropin_for_service(const char *service, aegis_executor_t *exec,
+                                     aegis_result_t *res) {
     /* Create directory /etc/systemd/system/<service>.service.d/ */
     char dir_path[256];
     snprintf(dir_path, sizeof(dir_path),
@@ -27,11 +27,13 @@ static void write_dropin_for_service(const char *service, aegis_executor_t *exec
     snprintf(conf_path, sizeof(conf_path),
              "/etc/systemd/system/%s.service.d/hardening.conf", service);
 
-    exec->write_file(conf_path, hardening_dropin, true, exec->ctx);
+    if (exec->write_file(conf_path, hardening_dropin, true, exec->ctx) != 0)
+        return -1;
 
     char action[384];
     snprintf(action, sizeof(action), "Wrote hardening drop-in: %s", conf_path);
     aegis_result_add_action(res, action);
+    return 0;
 }
 
 aegis_result_t aegis_systemd_hardening_apply(const void *config, aegis_executor_t *exec) {
@@ -52,12 +54,23 @@ aegis_result_t aegis_systemd_hardening_apply(const void *config, aegis_executor_
     /* Write drop-in for each service in profiles list */
     for (int i = 0; i < cfg->profile_count; i++) {
         if (!cfg->profiles[i]) continue;
-        write_dropin_for_service(cfg->profiles[i], exec, &res);
+        if (write_dropin_for_service(cfg->profiles[i], exec, &res) != 0) {
+            char errmsg[384];
+            snprintf(errmsg, sizeof(errmsg),
+                     "systemd_hardening: failed to write drop-in for %s", cfg->profiles[i]);
+            aegis_result_free(&res);
+            return aegis_result_fail(errmsg);
+        }
     }
 
     /* Reload systemd daemon */
     const char *daemon_reload[] = {"systemctl", "daemon-reload", NULL};
     aegis_exec_result_t r = exec->execute_sudo(daemon_reload, exec->ctx);
+    if (r.exit_code != 0) {
+        aegis_result_free(&res);
+        aegis_exec_result_free(&r);
+        return aegis_result_fail("systemd_hardening: systemctl daemon-reload failed");
+    }
     aegis_exec_result_free(&r);
     aegis_result_add_action(&res, "Reloaded systemd daemon");
 
