@@ -19,20 +19,34 @@ aegis_result_t aegis_podman_rootless_apply(const void *config, aegis_executor_t 
     const char *sysctl_argv[] = {"sysctl", "-w",
                                   "kernel.unprivileged_userns_clone=1", NULL};
     aegis_exec_result_t r = exec->execute_sudo(sysctl_argv, exec->ctx);
+    if (r.exit_code != 0) {
+        aegis_result_free(&res);
+        aegis_exec_result_free(&r);
+        return aegis_result_fail("podman_rootless: sysctl -w failed");
+    }
     aegis_exec_result_free(&r);
     aegis_result_add_action(&res, "Set kernel.unprivileged_userns_clone=1");
 
     /* Also persist via sysctl.d */
-    exec->write_file("/etc/sysctl.d/99-podman.conf",
-                     "kernel.unprivileged_userns_clone = 1\n", true, exec->ctx);
+    if (exec->write_file("/etc/sysctl.d/99-podman.conf",
+                         "kernel.unprivileged_userns_clone = 1\n", true, exec->ctx) != 0) {
+        aegis_result_free(&res);
+        return aegis_result_fail("podman_rootless: failed to write /etc/sysctl.d/99-podman.conf");
+    }
     aegis_result_add_action(&res, "Wrote /etc/sysctl.d/99-podman.conf");
 
     /* Configure /etc/subuid */
-    exec->write_file(SUBUID_PATH, SUBID_ENTRY, true, exec->ctx);
+    if (exec->write_file(SUBUID_PATH, SUBID_ENTRY, true, exec->ctx) != 0) {
+        aegis_result_free(&res);
+        return aegis_result_fail("podman_rootless: failed to write " SUBUID_PATH);
+    }
     aegis_result_add_action(&res, "Configured " SUBUID_PATH " for user namespaces");
 
     /* Configure /etc/subgid */
-    exec->write_file(SUBGID_PATH, SUBID_ENTRY, true, exec->ctx);
+    if (exec->write_file(SUBGID_PATH, SUBID_ENTRY, true, exec->ctx) != 0) {
+        aegis_result_free(&res);
+        return aegis_result_fail("podman_rootless: failed to write " SUBGID_PATH);
+    }
     aegis_result_add_action(&res, "Configured " SUBGID_PATH " for user namespaces");
 
     return res;
@@ -61,5 +75,56 @@ aegis_result_t aegis_podman_rootless_status(aegis_executor_t *exec) {
 }
 
 aegis_result_t aegis_podman_rootless_verify(aegis_executor_t *exec) {
-    return aegis_podman_rootless_status(exec);
+    /* Per-item compliance: userns enabled, subuid/subgid configured */
+    aegis_result_t res = aegis_result_ok("podman_rootless: all checks passed");
+    int total = 0, passed = 0;
+
+    /* Check 1: kernel.unprivileged_userns_clone = 1 */
+    total++;
+    const char *sysctl_argv[] = {"sysctl", "kernel.unprivileged_userns_clone", NULL};
+    aegis_exec_result_t r = exec->execute(sysctl_argv, exec->ctx);
+    bool userns_ok = false;
+    if (r.exit_code == 0 && r.stdout_buf) {
+        char *eq = strstr(r.stdout_buf, "= ");
+        if (eq && strncmp(eq + 2, "1", 1) == 0) userns_ok = true;
+    }
+    aegis_exec_result_free(&r);
+    aegis_result_add_action(&res, userns_ok
+        ? "PASS: kernel.unprivileged_userns_clone = 1"
+        : "FAIL: kernel.unprivileged_userns_clone != 1 (expected 1)");
+    if (userns_ok) passed++;
+
+    /* Check 2: /etc/subuid exists and contains containers entry */
+    total++;
+    char *subuid = exec->read_file(SUBUID_PATH, exec->ctx);
+    bool subuid_ok = (subuid && strstr(subuid, "containers") != NULL);
+    free(subuid);
+    aegis_result_add_action(&res, subuid_ok
+        ? "PASS: " SUBUID_PATH " contains containers entry"
+        : "FAIL: " SUBUID_PATH " missing or no containers entry");
+    if (subuid_ok) passed++;
+
+    /* Check 3: /etc/subgid exists and contains containers entry */
+    total++;
+    char *subgid = exec->read_file(SUBGID_PATH, exec->ctx);
+    bool subgid_ok = (subgid && strstr(subgid, "containers") != NULL);
+    free(subgid);
+    aegis_result_add_action(&res, subgid_ok
+        ? "PASS: " SUBGID_PATH " contains containers entry"
+        : "FAIL: " SUBGID_PATH " missing or no containers entry");
+    if (subgid_ok) passed++;
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "podman_rootless: %d/%d checks passed", passed, total);
+    free(res.message);
+    res.message = strdup(msg);
+
+    if (passed == total) {
+        res.status = AEGIS_OK;
+    } else if (passed > 0) {
+        res.status = AEGIS_WARN;
+    } else {
+        res.status = AEGIS_FAIL;
+    }
+    return res;
 }

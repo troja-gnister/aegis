@@ -79,7 +79,10 @@ static int test_apparmor_verify(void) {
         "apparmor module is loaded.\n34 profiles are loaded.\n");
 
     aegis_result_t res = aegis_apparmor_verify(&exec);
-    TEST_ASSERT(res.status == AEGIS_OK || res.status == AEGIS_FAIL);
+    /* verify now returns OK / WARN / FAIL depending on per-item pass rate */
+    TEST_ASSERT(res.status == AEGIS_OK || res.status == AEGIS_WARN || res.status == AEGIS_FAIL);
+    /* verify must produce per-item actions */
+    TEST_ASSERT(res.action_count > 0);
 
     aegis_result_free(&res);
     aegis_mock_ctx_free(&mock);

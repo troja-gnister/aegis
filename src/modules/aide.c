@@ -47,22 +47,40 @@ aegis_result_t aegis_aide_apply(const void *config, aegis_executor_t *exec) {
     /* Install aide */
     const char *install[] = {"pacman", "-S", "--noconfirm", "--needed", "aide", NULL};
     aegis_exec_result_t r = exec->execute_sudo(install, exec->ctx);
+    if (r.exit_code != 0) {
+        aegis_result_free(&res);
+        aegis_exec_result_free(&r);
+        return aegis_result_fail("aide: pacman -S failed");
+    }
     aegis_exec_result_free(&r);
     aegis_result_add_action(&res, "Ensured aide package installed");
 
     /* Write default aide.conf */
-    exec->write_file(AIDE_CONF, DEFAULT_AIDE_CONF, true, exec->ctx);
+    if (exec->write_file(AIDE_CONF, DEFAULT_AIDE_CONF, true, exec->ctx) != 0) {
+        aegis_result_free(&res);
+        return aegis_result_fail("aide: failed to write " AIDE_CONF);
+    }
     aegis_result_add_action(&res, "Wrote default " AIDE_CONF);
 
     /* Initialize database */
     const char *init_argv[] = {"aide", "--init", NULL};
     r = exec->execute_sudo(init_argv, exec->ctx);
+    if (r.exit_code != 0) {
+        aegis_result_free(&res);
+        aegis_exec_result_free(&r);
+        return aegis_result_fail("aide: aide --init failed");
+    }
     aegis_exec_result_free(&r);
     aegis_result_add_action(&res, "Initialized aide database with --init");
 
     /* Copy new db to expected location */
     const char *cp_argv[] = {"cp", AIDE_DB_NEW, AIDE_DB, NULL};
     r = exec->execute_sudo(cp_argv, exec->ctx);
+    if (r.exit_code != 0) {
+        aegis_result_free(&res);
+        aegis_exec_result_free(&r);
+        return aegis_result_fail("aide: cp database failed");
+    }
     aegis_exec_result_free(&r);
     aegis_result_add_action(&res, "Copied " AIDE_DB_NEW " to " AIDE_DB);
 

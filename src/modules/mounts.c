@@ -31,9 +31,17 @@ aegis_result_t aegis_mounts_apply(const void *config, aegis_executor_t *exec) {
     aegis_result_t res = aegis_result_ok("mounts: hardened");
 
     if (cfg->harden_tmp) {
-        exec->write_file("/etc/systemd/system/tmp.mount", TMP_MOUNT_UNIT, true, exec->ctx);
+        if (exec->write_file("/etc/systemd/system/tmp.mount", TMP_MOUNT_UNIT, true, exec->ctx) != 0) {
+            aegis_result_free(&res);
+            return aegis_result_fail("mounts: failed to write /etc/systemd/system/tmp.mount");
+        }
         const char *enable[] = {"systemctl", "enable", "--now", "tmp.mount", NULL};
         aegis_exec_result_t r = exec->execute_sudo(enable, exec->ctx);
+        if (r.exit_code != 0) {
+            aegis_result_free(&res);
+            aegis_exec_result_free(&r);
+            return aegis_result_fail("mounts: systemctl enable tmp.mount failed");
+        }
         aegis_exec_result_free(&r);
         aegis_result_add_action(&res, "Hardened /tmp (noexec,nodev,nosuid via tmp.mount)");
     }
@@ -42,10 +50,23 @@ aegis_result_t aegis_mounts_apply(const void *config, aegis_executor_t *exec) {
         /* Append to fstab if not already present */
         char *fstab = exec->read_file("/etc/fstab", exec->ctx);
         if (!fstab || !strstr(fstab, "/dev/shm")) {
-            char new_fstab[8192] = {0};
-            if (fstab) strncpy(new_fstab, fstab, sizeof(new_fstab) - 256);
-            strcat(new_fstab, DEV_SHM_FSTAB);
-            exec->write_file("/etc/fstab", new_fstab, true, exec->ctx);
+            size_t fstab_len = fstab ? strlen(fstab) : 0;
+            size_t entry_len = strlen(DEV_SHM_FSTAB);
+            char *new_fstab = malloc(fstab_len + entry_len + 1);
+            if (!new_fstab) {
+                free(fstab);
+                aegis_result_free(&res);
+                return aegis_result_fail("mounts: malloc failed");
+            }
+            if (fstab) memcpy(new_fstab, fstab, fstab_len);
+            memcpy(new_fstab + fstab_len, DEV_SHM_FSTAB, entry_len + 1);
+            if (exec->write_file("/etc/fstab", new_fstab, true, exec->ctx) != 0) {
+                free(new_fstab);
+                free(fstab);
+                aegis_result_free(&res);
+                return aegis_result_fail("mounts: failed to write /etc/fstab");
+            }
+            free(new_fstab);
         }
         free(fstab);
         const char *remount[] = {"mount", "-o", "remount", "/dev/shm", NULL};
@@ -57,10 +78,23 @@ aegis_result_t aegis_mounts_apply(const void *config, aegis_executor_t *exec) {
     if (cfg->harden_proc) {
         char *fstab = exec->read_file("/etc/fstab", exec->ctx);
         if (!fstab || !strstr(fstab, "hidepid")) {
-            char new_fstab[8192] = {0};
-            if (fstab) strncpy(new_fstab, fstab, sizeof(new_fstab) - 256);
-            strcat(new_fstab, PROC_FSTAB);
-            exec->write_file("/etc/fstab", new_fstab, true, exec->ctx);
+            size_t fstab_len = fstab ? strlen(fstab) : 0;
+            size_t entry_len = strlen(PROC_FSTAB);
+            char *new_fstab = malloc(fstab_len + entry_len + 1);
+            if (!new_fstab) {
+                free(fstab);
+                aegis_result_free(&res);
+                return aegis_result_fail("mounts: malloc failed");
+            }
+            if (fstab) memcpy(new_fstab, fstab, fstab_len);
+            memcpy(new_fstab + fstab_len, PROC_FSTAB, entry_len + 1);
+            if (exec->write_file("/etc/fstab", new_fstab, true, exec->ctx) != 0) {
+                free(new_fstab);
+                free(fstab);
+                aegis_result_free(&res);
+                return aegis_result_fail("mounts: failed to write /etc/fstab");
+            }
+            free(new_fstab);
         }
         free(fstab);
         const char *remount[] = {"mount", "-o", "remount", "/proc", NULL};
@@ -92,5 +126,53 @@ aegis_result_t aegis_mounts_status(aegis_executor_t *exec) {
 }
 
 aegis_result_t aegis_mounts_verify(aegis_executor_t *exec) {
-    return aegis_mounts_status(exec);
+    /* Per-mount-point compliance check */
+    aegis_result_t res = aegis_result_ok("mounts: all hardening checks passed");
+    int total = 0, passed = 0;
+
+    const char *argv[] = {"mount", NULL};
+    aegis_exec_result_t r = exec->execute(argv, exec->ctx);
+    const char *out = r.stdout_buf ? r.stdout_buf : "";
+
+    /* Check /tmp: must have noexec, nodev, nosuid */
+    total++;
+    bool tmp_ok = (strstr(out, "/tmp") && strstr(out, "noexec") &&
+                   strstr(out, "nodev") && strstr(out, "nosuid"));
+    aegis_result_add_action(&res, tmp_ok
+        ? "PASS: /tmp mounted with noexec,nodev,nosuid"
+        : "FAIL: /tmp missing one or more of noexec,nodev,nosuid");
+    if (tmp_ok) passed++;
+
+    /* Check /dev/shm: must have noexec, nodev, nosuid */
+    total++;
+    bool shm_ok = (strstr(out, "/dev/shm") && strstr(out, "noexec") &&
+                   strstr(out, "nodev") && strstr(out, "nosuid"));
+    aegis_result_add_action(&res, shm_ok
+        ? "PASS: /dev/shm mounted with noexec,nodev,nosuid"
+        : "FAIL: /dev/shm missing one or more of noexec,nodev,nosuid");
+    if (shm_ok) passed++;
+
+    /* Check /proc: must have hidepid */
+    total++;
+    bool proc_ok = (strstr(out, "/proc") && strstr(out, "hidepid"));
+    aegis_result_add_action(&res, proc_ok
+        ? "PASS: /proc mounted with hidepid"
+        : "FAIL: /proc not mounted with hidepid");
+    if (proc_ok) passed++;
+
+    aegis_exec_result_free(&r);
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "mounts: %d/%d hardened", passed, total);
+    free(res.message);
+    res.message = strdup(msg);
+
+    if (passed == total) {
+        res.status = AEGIS_OK;
+    } else if (passed > 0) {
+        res.status = AEGIS_WARN;
+    } else {
+        res.status = AEGIS_FAIL;
+    }
+    return res;
 }

@@ -14,6 +14,11 @@ aegis_result_t aegis_kernel_apply(const void *config, aegis_executor_t *exec) {
     /* Install linux-hardened */
     const char *install[] = {"pacman", "-S", "--noconfirm", "--needed", "linux-hardened", NULL};
     aegis_exec_result_t r = exec->execute_sudo(install, exec->ctx);
+    if (r.exit_code != 0) {
+        aegis_result_free(&res);
+        aegis_exec_result_free(&r);
+        return aegis_result_fail("kernel: pacman -S linux-hardened failed");
+    }
     aegis_exec_result_free(&r);
     aegis_result_add_action(&res, "Ensured linux-hardened installed");
 
@@ -25,31 +30,52 @@ aegis_result_t aegis_kernel_apply(const void *config, aegis_executor_t *exec) {
 
     /* Read current grub config, replace or append lockdown param */
     char *grub = exec->read_file("/etc/default/grub", exec->ctx);
-    char new_grub[4096] = {0};
+    size_t grub_len  = grub ? strlen(grub) : 0;
+    size_t param_len = strlen(param);
+    /* Allocate enough for grub + param + separators + NUL */
+    size_t new_cap = grub_len + param_len + 4;
+    char *new_grub = malloc(new_cap);
+    if (!new_grub) {
+        free(grub);
+        aegis_result_free(&res);
+        return aegis_result_fail("kernel: malloc failed");
+    }
+    new_grub[0] = '\0';
     if (grub) {
         /* Simple approach: replace the GRUB_CMDLINE_LINUX_DEFAULT line */
         char *line = strstr(grub, "GRUB_CMDLINE_LINUX_DEFAULT");
         if (line) {
             size_t pre_len = (size_t)(line - grub);
-            strncpy(new_grub, grub, pre_len);
+            memcpy(new_grub, grub, pre_len);
+            new_grub[pre_len] = '\0';
             strcat(new_grub, param);
             strcat(new_grub, "\n");
             char *next_line = strchr(line, '\n');
             if (next_line) strcat(new_grub, next_line + 1);
         } else {
-            snprintf(new_grub, sizeof(new_grub), "%s\n%s\n", grub, param);
+            snprintf(new_grub, new_cap, "%s\n%s\n", grub, param);
         }
         free(grub);
     } else {
-        snprintf(new_grub, sizeof(new_grub), "%s\n", param);
+        snprintf(new_grub, new_cap, "%s\n", param);
     }
 
-    exec->write_file("/etc/default/grub", new_grub, true, exec->ctx);
+    if (exec->write_file("/etc/default/grub", new_grub, true, exec->ctx) != 0) {
+        free(new_grub);
+        aegis_result_free(&res);
+        return aegis_result_fail("kernel: failed to write /etc/default/grub");
+    }
+    free(new_grub);
     aegis_result_add_action(&res, "Set kernel lockdown in GRUB config");
 
     /* Regenerate GRUB config */
     const char *mkconfig[] = {"grub-mkconfig", "-o", "/boot/grub/grub.cfg", NULL};
     r = exec->execute_sudo(mkconfig, exec->ctx);
+    if (r.exit_code != 0) {
+        aegis_result_free(&res);
+        aegis_exec_result_free(&r);
+        return aegis_result_fail("kernel: grub-mkconfig failed");
+    }
     aegis_exec_result_free(&r);
     aegis_result_add_action(&res, "Regenerated GRUB config");
 
@@ -82,5 +108,49 @@ aegis_result_t aegis_kernel_status(aegis_executor_t *exec) {
 }
 
 aegis_result_t aegis_kernel_verify(aegis_executor_t *exec) {
-    return aegis_kernel_status(exec);
+    /* Per-item compliance: uname -r must contain "hardened", lockdown must be active */
+    aegis_result_t res = aegis_result_ok("kernel: all checks passed");
+    int total = 0, passed = 0;
+
+    /* Check 1: hardened kernel running */
+    total++;
+    const char *uname[] = {"uname", "-r", NULL};
+    aegis_exec_result_t r = exec->execute(uname, exec->ctx);
+    bool hardened = (r.stdout_buf && strstr(r.stdout_buf, "hardened"));
+    aegis_exec_result_free(&r);
+    aegis_result_add_action(&res, hardened
+        ? "PASS: uname -r contains \"hardened\""
+        : "FAIL: uname -r does not contain \"hardened\" — not running linux-hardened");
+    if (hardened) passed++;
+
+    /* Check 2: lockdown mode active */
+    total++;
+    char *lockdown = exec->read_file("/sys/kernel/security/lockdown", exec->ctx);
+    bool locked = (lockdown && (strstr(lockdown, "[integrity]") ||
+                                strstr(lockdown, "[confidentiality]")));
+    char lockdown_action[256];
+    snprintf(lockdown_action, sizeof(lockdown_action),
+             "%s: /sys/kernel/security/lockdown mode=%s",
+             locked ? "PASS" : "FAIL",
+             lockdown ? lockdown : "(not readable)");
+    /* Strip trailing newline for readability */
+    char *nl = strchr(lockdown_action, '\n');
+    if (nl) *nl = '\0';
+    aegis_result_add_action(&res, lockdown_action);
+    free(lockdown);
+    if (locked) passed++;
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "kernel: %d/%d checks passed", passed, total);
+    free(res.message);
+    res.message = strdup(msg);
+
+    if (passed == total) {
+        res.status = AEGIS_OK;
+    } else if (passed > 0) {
+        res.status = AEGIS_WARN;
+    } else {
+        res.status = AEGIS_FAIL;
+    }
+    return res;
 }

@@ -95,12 +95,12 @@ Library + CLI model. Core logic lives in `libaegis.a`, CLI is a thin consumer.
 
 ## Known Limitations / Follow-ups
 
-- [ ] Module `apply` functions do not check return values from `write_file`/`execute_sudo` — failures are silently ignored
-- [ ] SystemExecutor has no subprocess timeout (the 120s timeout from the spec is not implemented)
-- [ ] Some modules use fixed-size stack buffers for config file generation — should switch to dynamic allocation for large configs
-- [ ] `verify` is identical to `status` in all modules — a stricter per-parameter compliance check is planned
-- [ ] Convention directories (`/etc/aegis/rules.d/`, `/etc/aegis/profiles.d/`) are not yet read by modules
-- [ ] No `--help` / `-h` flag (use `aegis` with no args for usage)
+- [x] ~~Module `apply` functions do not check return values~~ — error checking added to all modules
+- [x] ~~SystemExecutor has no subprocess timeout~~ — 120s timeout via SIGALRM implemented
+- [x] ~~Fixed-size stack buffers~~ — replaced with dynamic allocation in sysctl, mounts, kernel
+- [x] ~~`verify` identical to `status`~~ — per-parameter compliance checks implemented for all modules
+- [x] ~~Convention directories not read~~ — usbguard, fail2ban, flatpak, systemd modules read from `/etc/aegis/rules.d/` and `/etc/aegis/profiles.d/`
+- [x] ~~No `--help` flag~~ — `-h` / `--help` added
 
 ## License
 

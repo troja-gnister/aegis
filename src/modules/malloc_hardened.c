@@ -44,5 +44,39 @@ aegis_result_t aegis_malloc_hardened_status(aegis_executor_t *exec) {
 }
 
 aegis_result_t aegis_malloc_hardened_verify(aegis_executor_t *exec) {
-    return aegis_malloc_hardened_status(exec);
+    /* Per-item compliance: ld.so.preload exists and contains libhardened_malloc.so */
+    aegis_result_t res = aegis_result_ok("malloc_hardened: all checks passed");
+    int total = 0, passed = 0;
+
+    /* Check 1: preload file exists */
+    total++;
+    bool preload_exists = exec->file_exists(PRELOAD_PATH, exec->ctx);
+    aegis_result_add_action(&res, preload_exists
+        ? "PASS: " PRELOAD_PATH " present"
+        : "FAIL: " PRELOAD_PATH " missing — hardened_malloc not configured");
+    if (preload_exists) passed++;
+
+    /* Check 2: libhardened_malloc.so listed in preload file */
+    total++;
+    char *content = preload_exists ? exec->read_file(PRELOAD_PATH, exec->ctx) : NULL;
+    bool configured = (content && strstr(content, "libhardened_malloc.so") != NULL);
+    free(content);
+    aegis_result_add_action(&res, configured
+        ? "PASS: libhardened_malloc.so listed in " PRELOAD_PATH
+        : "FAIL: libhardened_malloc.so not found in " PRELOAD_PATH);
+    if (configured) passed++;
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "malloc_hardened: %d/%d checks passed", passed, total);
+    free(res.message);
+    res.message = strdup(msg);
+
+    if (passed == total) {
+        res.status = AEGIS_OK;
+    } else if (passed > 0) {
+        res.status = AEGIS_WARN;
+    } else {
+        res.status = AEGIS_FAIL;
+    }
+    return res;
 }
