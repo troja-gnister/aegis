@@ -30,29 +30,42 @@ aegis_result_t aegis_kernel_apply(const void *config, aegis_executor_t *exec) {
 
     /* Read current grub config, replace or append lockdown param */
     char *grub = exec->read_file("/etc/default/grub", exec->ctx);
-    char new_grub[4096] = {0};
+    size_t grub_len  = grub ? strlen(grub) : 0;
+    size_t param_len = strlen(param);
+    /* Allocate enough for grub + param + separators + NUL */
+    size_t new_cap = grub_len + param_len + 4;
+    char *new_grub = malloc(new_cap);
+    if (!new_grub) {
+        free(grub);
+        aegis_result_free(&res);
+        return aegis_result_fail("kernel: malloc failed");
+    }
+    new_grub[0] = '\0';
     if (grub) {
         /* Simple approach: replace the GRUB_CMDLINE_LINUX_DEFAULT line */
         char *line = strstr(grub, "GRUB_CMDLINE_LINUX_DEFAULT");
         if (line) {
             size_t pre_len = (size_t)(line - grub);
-            strncpy(new_grub, grub, pre_len);
+            memcpy(new_grub, grub, pre_len);
+            new_grub[pre_len] = '\0';
             strcat(new_grub, param);
             strcat(new_grub, "\n");
             char *next_line = strchr(line, '\n');
             if (next_line) strcat(new_grub, next_line + 1);
         } else {
-            snprintf(new_grub, sizeof(new_grub), "%s\n%s\n", grub, param);
+            snprintf(new_grub, new_cap, "%s\n%s\n", grub, param);
         }
         free(grub);
     } else {
-        snprintf(new_grub, sizeof(new_grub), "%s\n", param);
+        snprintf(new_grub, new_cap, "%s\n", param);
     }
 
     if (exec->write_file("/etc/default/grub", new_grub, true, exec->ctx) != 0) {
+        free(new_grub);
         aegis_result_free(&res);
         return aegis_result_fail("kernel: failed to write /etc/default/grub");
     }
+    free(new_grub);
     aegis_result_add_action(&res, "Set kernel lockdown in GRUB config");
 
     /* Regenerate GRUB config */

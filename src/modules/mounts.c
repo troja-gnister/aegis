@@ -50,14 +50,23 @@ aegis_result_t aegis_mounts_apply(const void *config, aegis_executor_t *exec) {
         /* Append to fstab if not already present */
         char *fstab = exec->read_file("/etc/fstab", exec->ctx);
         if (!fstab || !strstr(fstab, "/dev/shm")) {
-            char new_fstab[8192] = {0};
-            if (fstab) strncpy(new_fstab, fstab, sizeof(new_fstab) - 256);
-            strcat(new_fstab, DEV_SHM_FSTAB);
+            size_t fstab_len = fstab ? strlen(fstab) : 0;
+            size_t entry_len = strlen(DEV_SHM_FSTAB);
+            char *new_fstab = malloc(fstab_len + entry_len + 1);
+            if (!new_fstab) {
+                free(fstab);
+                aegis_result_free(&res);
+                return aegis_result_fail("mounts: malloc failed");
+            }
+            if (fstab) memcpy(new_fstab, fstab, fstab_len);
+            memcpy(new_fstab + fstab_len, DEV_SHM_FSTAB, entry_len + 1);
             if (exec->write_file("/etc/fstab", new_fstab, true, exec->ctx) != 0) {
+                free(new_fstab);
                 free(fstab);
                 aegis_result_free(&res);
                 return aegis_result_fail("mounts: failed to write /etc/fstab");
             }
+            free(new_fstab);
         }
         free(fstab);
         const char *remount[] = {"mount", "-o", "remount", "/dev/shm", NULL};
@@ -69,14 +78,23 @@ aegis_result_t aegis_mounts_apply(const void *config, aegis_executor_t *exec) {
     if (cfg->harden_proc) {
         char *fstab = exec->read_file("/etc/fstab", exec->ctx);
         if (!fstab || !strstr(fstab, "hidepid")) {
-            char new_fstab[8192] = {0};
-            if (fstab) strncpy(new_fstab, fstab, sizeof(new_fstab) - 256);
-            strcat(new_fstab, PROC_FSTAB);
+            size_t fstab_len = fstab ? strlen(fstab) : 0;
+            size_t entry_len = strlen(PROC_FSTAB);
+            char *new_fstab = malloc(fstab_len + entry_len + 1);
+            if (!new_fstab) {
+                free(fstab);
+                aegis_result_free(&res);
+                return aegis_result_fail("mounts: malloc failed");
+            }
+            if (fstab) memcpy(new_fstab, fstab, fstab_len);
+            memcpy(new_fstab + fstab_len, PROC_FSTAB, entry_len + 1);
             if (exec->write_file("/etc/fstab", new_fstab, true, exec->ctx) != 0) {
+                free(new_fstab);
                 free(fstab);
                 aegis_result_free(&res);
                 return aegis_result_fail("mounts: failed to write /etc/fstab");
             }
+            free(new_fstab);
         }
         free(fstab);
         const char *remount[] = {"mount", "-o", "remount", "/proc", NULL};
