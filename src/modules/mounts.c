@@ -106,15 +106,36 @@ aegis_result_t aegis_mounts_apply(const void *config, aegis_executor_t *exec) {
     return res;
 }
 
+/* Check if a specific flag appears on the mount line for a given mount point.
+ * This avoids false positives where a flag on /dev/shm matches when checking /tmp. */
+static bool check_mount_flags(const char *mount_output, const char *mount_point,
+                               const char *flag) {
+    const char *line = mount_output;
+    while (line) {
+        if (strstr(line, mount_point)) {
+            /* Check if flag appears on THIS line only */
+            const char *eol = strchr(line, '\n');
+            size_t line_len = eol ? (size_t)(eol - line) : strlen(line);
+            char *line_copy = strndup(line, line_len);
+            bool found = line_copy && strstr(line_copy, flag) != NULL;
+            free(line_copy);
+            return found;
+        }
+        line = strchr(line, '\n');
+        if (line) line++;
+    }
+    return false;
+}
+
 aegis_result_t aegis_mounts_status(aegis_executor_t *exec) {
     const char *argv[] = {"mount", NULL};
     aegis_exec_result_t r = exec->execute(argv, exec->ctx);
-    /* Parse mount output for hardening flags */
+    /* Parse mount output for hardening flags — line-by-line to avoid false positives */
     int hardened = 0;
     if (r.stdout_buf) {
-        if (strstr(r.stdout_buf, "/tmp") && strstr(r.stdout_buf, "noexec")) hardened++;
-        if (strstr(r.stdout_buf, "/dev/shm") && strstr(r.stdout_buf, "noexec")) hardened++;
-        if (strstr(r.stdout_buf, "/proc") && strstr(r.stdout_buf, "hidepid")) hardened++;
+        if (check_mount_flags(r.stdout_buf, "/tmp", "noexec")) hardened++;
+        if (check_mount_flags(r.stdout_buf, "/dev/shm", "noexec")) hardened++;
+        if (check_mount_flags(r.stdout_buf, "/proc", "hidepid")) hardened++;
     }
     aegis_exec_result_free(&r);
 
@@ -134,27 +155,29 @@ aegis_result_t aegis_mounts_verify(aegis_executor_t *exec) {
     aegis_exec_result_t r = exec->execute(argv, exec->ctx);
     const char *out = r.stdout_buf ? r.stdout_buf : "";
 
-    /* Check /tmp: must have noexec, nodev, nosuid */
+    /* Check /tmp: must have noexec, nodev, nosuid — checked per-line */
     total++;
-    bool tmp_ok = (strstr(out, "/tmp") && strstr(out, "noexec") &&
-                   strstr(out, "nodev") && strstr(out, "nosuid"));
+    bool tmp_ok = (check_mount_flags(out, "/tmp", "noexec") &&
+                   check_mount_flags(out, "/tmp", "nodev") &&
+                   check_mount_flags(out, "/tmp", "nosuid"));
     aegis_result_add_action(&res, tmp_ok
         ? "PASS: /tmp mounted with noexec,nodev,nosuid"
         : "FAIL: /tmp missing one or more of noexec,nodev,nosuid");
     if (tmp_ok) passed++;
 
-    /* Check /dev/shm: must have noexec, nodev, nosuid */
+    /* Check /dev/shm: must have noexec, nodev, nosuid — checked per-line */
     total++;
-    bool shm_ok = (strstr(out, "/dev/shm") && strstr(out, "noexec") &&
-                   strstr(out, "nodev") && strstr(out, "nosuid"));
+    bool shm_ok = (check_mount_flags(out, "/dev/shm", "noexec") &&
+                   check_mount_flags(out, "/dev/shm", "nodev") &&
+                   check_mount_flags(out, "/dev/shm", "nosuid"));
     aegis_result_add_action(&res, shm_ok
         ? "PASS: /dev/shm mounted with noexec,nodev,nosuid"
         : "FAIL: /dev/shm missing one or more of noexec,nodev,nosuid");
     if (shm_ok) passed++;
 
-    /* Check /proc: must have hidepid */
+    /* Check /proc: must have hidepid — checked per-line */
     total++;
-    bool proc_ok = (strstr(out, "/proc") && strstr(out, "hidepid"));
+    bool proc_ok = check_mount_flags(out, "/proc", "hidepid");
     aegis_result_add_action(&res, proc_ok
         ? "PASS: /proc mounted with hidepid"
         : "FAIL: /proc not mounted with hidepid");

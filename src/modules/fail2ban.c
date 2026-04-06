@@ -31,11 +31,16 @@ static void apply_convention_dir_fail2ban(aegis_executor_t *exec, aegis_result_t
             snprintf(dst_path, sizeof(dst_path), "%s/%s", FAIL2BAN_JAIL_D, tok);
             char *content = exec->read_file(src_path, exec->ctx);
             if (content) {
-                exec->write_file(dst_path, content, true, exec->ctx);
-                free(content);
                 char action[1088];
-                snprintf(action, sizeof(action),
-                         "Installed convention jail config %s -> %s", src_path, dst_path);
+                if (exec->write_file(dst_path, content, true, exec->ctx) != 0) {
+                    snprintf(action, sizeof(action),
+                             "WARNING: failed to install convention jail config %s -> %s",
+                             src_path, dst_path);
+                } else {
+                    snprintf(action, sizeof(action),
+                             "Installed convention jail config %s -> %s", src_path, dst_path);
+                }
+                free(content);
                 aegis_result_add_action(res, action);
             }
         }

@@ -14,24 +14,44 @@ aegis_result_t aegis_secureboot_apply(const void *config, aegis_executor_t *exec
     /* Install sbctl */
     const char *install[] = {"pacman", "-S", "--noconfirm", "--needed", "sbctl", NULL};
     aegis_exec_result_t r = exec->execute_sudo(install, exec->ctx);
+    if (r.exit_code != 0) {
+        aegis_result_free(&res);
+        aegis_exec_result_free(&r);
+        return aegis_result_fail("secureboot: pacman -S sbctl failed");
+    }
     aegis_exec_result_free(&r);
     aegis_result_add_action(&res, "Ensured sbctl package installed");
 
     /* Create keys */
     const char *create_keys[] = {"sbctl", "create-keys", NULL};
     r = exec->execute_sudo(create_keys, exec->ctx);
+    if (r.exit_code != 0) {
+        aegis_result_free(&res);
+        aegis_exec_result_free(&r);
+        return aegis_result_fail("secureboot: sbctl create-keys failed");
+    }
     aegis_exec_result_free(&r);
     aegis_result_add_action(&res, "Created secure boot keys");
 
     /* Enroll keys with Microsoft certificates */
     const char *enroll[] = {"sbctl", "enroll-keys", "--microsoft", NULL};
     r = exec->execute_sudo(enroll, exec->ctx);
+    if (r.exit_code != 0) {
+        aegis_result_free(&res);
+        aegis_exec_result_free(&r);
+        return aegis_result_fail("secureboot: sbctl enroll-keys failed");
+    }
     aegis_exec_result_free(&r);
     aegis_result_add_action(&res, "Enrolled keys with --microsoft");
 
     /* Sign all registered files */
     const char *sign_all[] = {"sbctl", "sign-all", NULL};
     r = exec->execute_sudo(sign_all, exec->ctx);
+    if (r.exit_code != 0) {
+        aegis_result_free(&res);
+        aegis_exec_result_free(&r);
+        return aegis_result_fail("secureboot: sbctl sign-all failed");
+    }
     aegis_exec_result_free(&r);
     aegis_result_add_action(&res, "Signed all registered EFI binaries");
 

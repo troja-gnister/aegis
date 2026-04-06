@@ -62,7 +62,8 @@ static aegis_exec_result_t run_argv(const char **argv) {
     }
 
     if (pid == 0) {
-        /* Child */
+        /* Child: put self in its own process group to avoid PID-reuse race */
+        setpgid(0, 0);
         close(out_pipe[0]);
         close(err_pipe[0]);
         dup2(out_pipe[1], STDOUT_FILENO);
@@ -78,32 +79,37 @@ static aegis_exec_result_t run_argv(const char **argv) {
     close(out_pipe[1]);
     close(err_pipe[1]);
 
-    result.stdout_buf = read_fd(out_pipe[0]);
-    result.stderr_buf = read_fd(err_pipe[0]);
+    /* Set timeout BEFORE reading — covers both I/O and waitpid */
+    _timed_out = 0;
+    struct sigaction sa = {0};
+    sa.sa_handler = alarm_handler;
+    sa.sa_flags = 0; /* Don't use SA_RESTART — let read/waitpid be interrupted */
+    sigaction(SIGALRM, &sa, NULL);
+    alarm(120);
+
+    char *out_buf = read_fd(out_pipe[0]);
+    char *err_buf = read_fd(err_pipe[0]);
     close(out_pipe[0]);
     close(err_pipe[0]);
 
-    int status = 0;
-    _timed_out = 0;
-    signal(SIGALRM, alarm_handler);
-    alarm(120);
-    waitpid(pid, &status, 0);
-    alarm(0);
+    int status;
+    pid_t w = waitpid(pid, &status, 0);
 
-    if (_timed_out) {
-        kill(pid, SIGKILL);
-        waitpid(pid, &status, 0);
-        if (!result.stdout_buf) result.stdout_buf = strdup("");
-        free(result.stderr_buf);
-        result.stderr_buf = strdup("command timed out after 120s");
+    alarm(0); /* Cancel alarm */
+
+    if (_timed_out || w < 0) {
+        kill(-pid, SIGKILL); /* Kill entire process group */
+        waitpid(pid, &status, WNOHANG); /* Reap without blocking */
+        free(out_buf); free(err_buf);
         result.exit_code = -1;
+        result.stdout_buf = strdup("");
+        result.stderr_buf = strdup("command timed out after 120s");
         return result;
     }
 
+    result.stdout_buf = out_buf ? out_buf : strdup("");
+    result.stderr_buf = err_buf ? err_buf : strdup("");
     result.exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-
-    if (!result.stdout_buf) result.stdout_buf = strdup("");
-    if (!result.stderr_buf) result.stderr_buf = strdup("");
 
     return result;
 }

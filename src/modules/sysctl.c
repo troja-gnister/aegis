@@ -109,8 +109,14 @@ aegis_result_t aegis_sysctl_apply(const void *config, aegis_executor_t *exec) {
     /* Reload sysctl */
     const char *reload[] = {"sysctl", "--system", NULL};
     aegis_exec_result_t r = exec->execute_sudo(reload, exec->ctx);
+    if (r.exit_code != 0) {
+        /* Config was written but not loaded — downgrade to WARN */
+        res.status = AEGIS_WARN;
+        aegis_result_add_action(&res, "WARNING: sysctl --system failed; config written but not loaded");
+    } else {
+        aegis_result_add_action(&res, "Reloaded sysctl");
+    }
     aegis_exec_result_free(&r);
-    aegis_result_add_action(&res, "Reloaded sysctl");
 
     char msg[128];
     snprintf(msg, sizeof(msg), "sysctl: applied %s profile", cfg->profile ? cfg->profile : "standard");

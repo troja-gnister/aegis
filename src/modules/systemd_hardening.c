@@ -49,12 +49,16 @@ static void apply_convention_dir_systemd(aegis_executor_t *exec, aegis_result_t 
                 char dst_path[512];
                 snprintf(dst_path, sizeof(dst_path),
                          "/etc/systemd/system/%s.service.d/aegis-custom.conf", service);
-                exec->write_file(dst_path, content, true, exec->ctx);
-                free(content);
-
                 char action[1088];
-                snprintf(action, sizeof(action),
-                         "Installed convention drop-in %s -> %s", src_path, dst_path);
+                if (exec->write_file(dst_path, content, true, exec->ctx) != 0) {
+                    snprintf(action, sizeof(action),
+                             "WARNING: failed to install convention drop-in %s -> %s",
+                             src_path, dst_path);
+                } else {
+                    snprintf(action, sizeof(action),
+                             "Installed convention drop-in %s -> %s", src_path, dst_path);
+                }
+                free(content);
                 aegis_result_add_action(res, action);
             }
         }

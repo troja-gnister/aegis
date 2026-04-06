@@ -16,18 +16,33 @@ aegis_result_t aegis_rkhunter_apply(const void *config, aegis_executor_t *exec) 
     /* Install rkhunter */
     const char *install[] = {"pacman", "-S", "--noconfirm", "--needed", "rkhunter", NULL};
     aegis_exec_result_t r = exec->execute_sudo(install, exec->ctx);
+    if (r.exit_code != 0) {
+        aegis_result_free(&res);
+        aegis_exec_result_free(&r);
+        return aegis_result_fail("rkhunter: pacman -S rkhunter failed");
+    }
     aegis_exec_result_free(&r);
     aegis_result_add_action(&res, "Ensured rkhunter package installed");
 
     /* Update rkhunter data files */
     const char *update_argv[] = {"rkhunter", "--update", NULL};
     r = exec->execute_sudo(update_argv, exec->ctx);
+    if (r.exit_code != 0) {
+        aegis_result_free(&res);
+        aegis_exec_result_free(&r);
+        return aegis_result_fail("rkhunter: rkhunter --update failed");
+    }
     aegis_exec_result_free(&r);
     aegis_result_add_action(&res, "Updated rkhunter data files with --update");
 
     /* Update system file properties database */
     const char *propupd_argv[] = {"rkhunter", "--propupd", NULL};
     r = exec->execute_sudo(propupd_argv, exec->ctx);
+    if (r.exit_code != 0) {
+        aegis_result_free(&res);
+        aegis_exec_result_free(&r);
+        return aegis_result_fail("rkhunter: rkhunter --propupd failed");
+    }
     aegis_exec_result_free(&r);
     aegis_result_add_action(&res, "Updated rkhunter file properties database with --propupd");
 

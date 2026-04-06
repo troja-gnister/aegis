@@ -56,7 +56,9 @@ static void apply_convention_dir_usbguard(aegis_executor_t *exec, aegis_result_t
     free(listing);
 
     if (current) {
-        exec->write_file(USBGUARD_RULES, current, true, exec->ctx);
+        if (exec->write_file(USBGUARD_RULES, current, true, exec->ctx) != 0) {
+            aegis_result_add_action(res, "WARNING: failed to write merged rules to " USBGUARD_RULES);
+        }
         free(current);
     }
 }

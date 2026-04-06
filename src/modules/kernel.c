@@ -32,7 +32,7 @@ aegis_result_t aegis_kernel_apply(const void *config, aegis_executor_t *exec) {
     char *grub = exec->read_file("/etc/default/grub", exec->ctx);
     size_t grub_len  = grub ? strlen(grub) : 0;
     size_t param_len = strlen(param);
-    /* Allocate enough for grub + param + separators + NUL */
+    /* Allocate enough for grub + param + two newlines + NUL */
     size_t new_cap = grub_len + param_len + 4;
     char *new_grub = malloc(new_cap);
     if (!new_grub) {
@@ -40,18 +40,29 @@ aegis_result_t aegis_kernel_apply(const void *config, aegis_executor_t *exec) {
         aegis_result_free(&res);
         return aegis_result_fail("kernel: malloc failed");
     }
-    new_grub[0] = '\0';
     if (grub) {
-        /* Simple approach: replace the GRUB_CMDLINE_LINUX_DEFAULT line */
+        /* Replace the GRUB_CMDLINE_LINUX_DEFAULT line using snprintf with explicit sizes */
         char *line = strstr(grub, "GRUB_CMDLINE_LINUX_DEFAULT");
         if (line) {
             size_t pre_len = (size_t)(line - grub);
-            memcpy(new_grub, grub, pre_len);
-            new_grub[pre_len] = '\0';
-            strcat(new_grub, param);
-            strcat(new_grub, "\n");
             char *next_line = strchr(line, '\n');
-            if (next_line) strcat(new_grub, next_line + 1);
+            size_t pos = 0;
+            /* Copy everything before the matched line */
+            memcpy(new_grub, grub, pre_len);
+            pos += pre_len;
+            /* Write the new param line */
+            int n = snprintf(new_grub + pos, new_cap - pos, "%s\n", param);
+            pos += (size_t)(n > 0 ? n : 0);
+            /* Copy everything after the original line */
+            if (next_line && pos < new_cap) {
+                size_t rest_len = strlen(next_line + 1);
+                if (pos + rest_len + 1 <= new_cap)
+                    memcpy(new_grub + pos, next_line + 1, rest_len + 1);
+                else
+                    new_grub[pos] = '\0';
+            } else {
+                new_grub[pos] = '\0';
+            }
         } else {
             snprintf(new_grub, new_cap, "%s\n%s\n", grub, param);
         }

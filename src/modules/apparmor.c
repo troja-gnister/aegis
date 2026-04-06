@@ -38,10 +38,15 @@ aegis_result_t aegis_apparmor_apply(const void *config, aegis_executor_t *exec) 
         if (!cfg->profiles[i]) continue;
         const char *enforce[] = {"aa-enforce", cfg->profiles[i], NULL};
         r = exec->execute_sudo(enforce, exec->ctx);
-        aegis_exec_result_free(&r);
-
         char action[256];
-        snprintf(action, sizeof(action), "Enforced profile: %s", cfg->profiles[i]);
+        if (r.exit_code != 0) {
+            snprintf(action, sizeof(action),
+                     "WARNING: aa-enforce failed for profile: %s", cfg->profiles[i]);
+            res.status = AEGIS_WARN;
+        } else {
+            snprintf(action, sizeof(action), "Enforced profile: %s", cfg->profiles[i]);
+        }
+        aegis_exec_result_free(&r);
         aegis_result_add_action(&res, action);
     }
 
