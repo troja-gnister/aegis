@@ -4,6 +4,63 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define USBGUARD_CONV_DIR "/etc/aegis/rules.d/usbguard"
+#define USBGUARD_RULES    "/etc/usbguard/rules.conf"
+
+/* Append any *.rules files from the convention directory to rules.conf */
+static void apply_convention_dir_usbguard(aegis_executor_t *exec, aegis_result_t *res) {
+    const char *ls_argv[] = {"ls", USBGUARD_CONV_DIR, NULL};
+    aegis_exec_result_t r = exec->execute(ls_argv, exec->ctx);
+    if (r.exit_code != 0 || !r.stdout_buf || !r.stdout_buf[0]) {
+        aegis_exec_result_free(&r);
+        return; /* directory missing or empty — not an error */
+    }
+
+    /* Parse newline-separated filenames, apply only *.rules */
+    char *listing = strdup(r.stdout_buf);
+    aegis_exec_result_free(&r);
+    if (!listing) return;
+
+    /* Read current rules.conf to append to */
+    char *current = exec->read_file(USBGUARD_RULES, exec->ctx);
+    size_t cur_len = current ? strlen(current) : 0;
+
+    char *tok = strtok(listing, "\n");
+    while (tok) {
+        /* Only process *.rules files */
+        size_t flen = strlen(tok);
+        if (flen > 6 && strcmp(tok + flen - 6, ".rules") == 0) {
+            char path[512];
+            snprintf(path, sizeof(path), "%s/%s", USBGUARD_CONV_DIR, tok);
+            char *extra = exec->read_file(path, exec->ctx);
+            if (extra) {
+                size_t extra_len = strlen(extra);
+                char *merged = malloc(cur_len + extra_len + 2);
+                if (merged) {
+                    if (current) memcpy(merged, current, cur_len);
+                    merged[cur_len] = '\n';
+                    memcpy(merged + cur_len + 1, extra, extra_len + 1);
+                    free(current);
+                    current = merged;
+                    cur_len = cur_len + 1 + extra_len;
+                }
+                free(extra);
+                char action[600];
+                snprintf(action, sizeof(action),
+                         "Appended convention rules from %s to " USBGUARD_RULES, path);
+                aegis_result_add_action(res, action);
+            }
+        }
+        tok = strtok(NULL, "\n");
+    }
+    free(listing);
+
+    if (current) {
+        exec->write_file(USBGUARD_RULES, current, true, exec->ctx);
+        free(current);
+    }
+}
+
 aegis_result_t aegis_usbguard_apply(const void *config, aegis_executor_t *exec) {
     const aegis_usbguard_config_t *cfg = config;
     if (!cfg || !cfg->enabled)
@@ -33,6 +90,9 @@ aegis_result_t aegis_usbguard_apply(const void *config, aegis_executor_t *exec) 
     }
     aegis_exec_result_free(&r);
     aegis_result_add_action(&res, "Generated and wrote /etc/usbguard/rules.conf");
+
+    /* Append any custom rules from convention directory */
+    apply_convention_dir_usbguard(exec, &res);
 
     /* Set ImplicitPolicyTarget in daemon config */
     const char *policy = (cfg->default_policy && strcmp(cfg->default_policy, "allow") == 0)

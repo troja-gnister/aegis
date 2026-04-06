@@ -4,6 +4,65 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define SYSTEMD_CONV_DIR "/etc/aegis/profiles.d/systemd"
+
+/* Read *.conf files from the convention directory and install them as additional
+ * drop-in configs.  File name format: <service>.conf
+ * The content is written as /etc/systemd/system/<service>.service.d/aegis-custom.conf
+ */
+static void apply_convention_dir_systemd(aegis_executor_t *exec, aegis_result_t *res) {
+    const char *ls_argv[] = {"ls", SYSTEMD_CONV_DIR, NULL};
+    aegis_exec_result_t r = exec->execute(ls_argv, exec->ctx);
+    if (r.exit_code != 0 || !r.stdout_buf || !r.stdout_buf[0]) {
+        aegis_exec_result_free(&r);
+        return;
+    }
+
+    char *listing = strdup(r.stdout_buf);
+    aegis_exec_result_free(&r);
+    if (!listing) return;
+
+    char *tok = strtok(listing, "\n");
+    while (tok) {
+        size_t flen = strlen(tok);
+        if (flen > 5 && strcmp(tok + flen - 5, ".conf") == 0) {
+            /* Derive service name: strip .conf suffix */
+            char service[256];
+            size_t slen = flen - 5;
+            if (slen >= sizeof(service)) slen = sizeof(service) - 1;
+            strncpy(service, tok, slen);
+            service[slen] = '\0';
+
+            char src_path[512];
+            snprintf(src_path, sizeof(src_path), "%s/%s", SYSTEMD_CONV_DIR, tok);
+            char *content = exec->read_file(src_path, exec->ctx);
+            if (content) {
+                /* Ensure drop-in directory exists */
+                char dir_path[512];
+                snprintf(dir_path, sizeof(dir_path),
+                         "/etc/systemd/system/%s.service.d", service);
+                const char *mkdir[] = {"mkdir", "-p", dir_path, NULL};
+                aegis_exec_result_t rm = exec->execute_sudo(mkdir, exec->ctx);
+                aegis_exec_result_free(&rm);
+
+                /* Write drop-in */
+                char dst_path[512];
+                snprintf(dst_path, sizeof(dst_path),
+                         "/etc/systemd/system/%s.service.d/aegis-custom.conf", service);
+                exec->write_file(dst_path, content, true, exec->ctx);
+                free(content);
+
+                char action[1088];
+                snprintf(action, sizeof(action),
+                         "Installed convention drop-in %s -> %s", src_path, dst_path);
+                aegis_result_add_action(res, action);
+            }
+        }
+        tok = strtok(NULL, "\n");
+    }
+    free(listing);
+}
+
 static const char *hardening_dropin =
     "[Service]\n"
     "ProtectSystem=strict\n"
@@ -62,6 +121,9 @@ aegis_result_t aegis_systemd_hardening_apply(const void *config, aegis_executor_
             return aegis_result_fail(errmsg);
         }
     }
+
+    /* Install any custom drop-ins from convention directory */
+    apply_convention_dir_systemd(exec, &res);
 
     /* Reload systemd daemon */
     const char *daemon_reload[] = {"systemctl", "daemon-reload", NULL};
