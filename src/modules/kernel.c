@@ -108,5 +108,49 @@ aegis_result_t aegis_kernel_status(aegis_executor_t *exec) {
 }
 
 aegis_result_t aegis_kernel_verify(aegis_executor_t *exec) {
-    return aegis_kernel_status(exec);
+    /* Per-item compliance: uname -r must contain "hardened", lockdown must be active */
+    aegis_result_t res = aegis_result_ok("kernel: all checks passed");
+    int total = 0, passed = 0;
+
+    /* Check 1: hardened kernel running */
+    total++;
+    const char *uname[] = {"uname", "-r", NULL};
+    aegis_exec_result_t r = exec->execute(uname, exec->ctx);
+    bool hardened = (r.stdout_buf && strstr(r.stdout_buf, "hardened"));
+    aegis_exec_result_free(&r);
+    aegis_result_add_action(&res, hardened
+        ? "PASS: uname -r contains \"hardened\""
+        : "FAIL: uname -r does not contain \"hardened\" — not running linux-hardened");
+    if (hardened) passed++;
+
+    /* Check 2: lockdown mode active */
+    total++;
+    char *lockdown = exec->read_file("/sys/kernel/security/lockdown", exec->ctx);
+    bool locked = (lockdown && (strstr(lockdown, "[integrity]") ||
+                                strstr(lockdown, "[confidentiality]")));
+    char lockdown_action[256];
+    snprintf(lockdown_action, sizeof(lockdown_action),
+             "%s: /sys/kernel/security/lockdown mode=%s",
+             locked ? "PASS" : "FAIL",
+             lockdown ? lockdown : "(not readable)");
+    /* Strip trailing newline for readability */
+    char *nl = strchr(lockdown_action, '\n');
+    if (nl) *nl = '\0';
+    aegis_result_add_action(&res, lockdown_action);
+    free(lockdown);
+    if (locked) passed++;
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "kernel: %d/%d checks passed", passed, total);
+    free(res.message);
+    res.message = strdup(msg);
+
+    if (passed == total) {
+        res.status = AEGIS_OK;
+    } else if (passed > 0) {
+        res.status = AEGIS_WARN;
+    } else {
+        res.status = AEGIS_FAIL;
+    }
+    return res;
 }

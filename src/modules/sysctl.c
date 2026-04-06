@@ -149,6 +149,49 @@ aegis_result_t aegis_sysctl_status(aegis_executor_t *exec) {
 }
 
 aegis_result_t aegis_sysctl_verify(aegis_executor_t *exec) {
-    /* Verify is the same as status for sysctl */
-    return aegis_sysctl_status(exec);
+    /* Per-parameter compliance check — distinct from status() */
+    const sysctl_param_t *params = profile_standard;
+    int total = 0, passed = 0;
+    aegis_result_t res = aegis_result_ok("sysctl: all parameters compliant");
+
+    for (const sysctl_param_t *p = params; p->key; p++) {
+        total++;
+        const char *argv[] = {"sysctl", p->key, NULL};
+        aegis_exec_result_t r = exec->execute(argv, exec->ctx);
+
+        bool ok = false;
+        if (r.exit_code == 0 && r.stdout_buf) {
+            char *eq = strstr(r.stdout_buf, "= ");
+            if (eq) {
+                eq += 2;
+                char *nl = strchr(eq, '\n');
+                if (nl) *nl = '\0';
+                ok = (strcmp(eq, p->value) == 0);
+            }
+        }
+        aegis_exec_result_free(&r);
+
+        char action[256];
+        if (ok) {
+            snprintf(action, sizeof(action), "PASS: %s = %s", p->key, p->value);
+            passed++;
+        } else {
+            snprintf(action, sizeof(action), "FAIL: %s (expected %s)", p->key, p->value);
+        }
+        aegis_result_add_action(&res, action);
+    }
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "sysctl: %d/%d parameters compliant", passed, total);
+    free(res.message);
+    res.message = strdup(msg);
+
+    if (passed == total) {
+        res.status = AEGIS_OK;
+    } else if (passed > total / 2) {
+        res.status = AEGIS_WARN;
+    } else {
+        res.status = AEGIS_FAIL;
+    }
+    return res;
 }

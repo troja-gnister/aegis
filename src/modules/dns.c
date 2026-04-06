@@ -65,5 +65,50 @@ aegis_result_t aegis_dns_status(aegis_executor_t *exec) {
 }
 
 aegis_result_t aegis_dns_verify(aegis_executor_t *exec) {
-    return aegis_dns_status(exec);
+    /* Per-item compliance: service active, config file present with expected keys */
+    aegis_result_t res = aegis_result_ok("dns: all checks passed");
+    int total = 0, passed = 0;
+
+    /* Check 1: systemd-resolved service active */
+    total++;
+    const char *svc_argv[] = {"systemctl", "is-active", "systemd-resolved", NULL};
+    aegis_exec_result_t r = exec->execute(svc_argv, exec->ctx);
+    bool active = (r.exit_code == 0);
+    aegis_exec_result_free(&r);
+    aegis_result_add_action(&res, active
+        ? "PASS: systemd-resolved service is active"
+        : "FAIL: systemd-resolved service is not active");
+    if (active) passed++;
+
+    /* Check 2: resolved.conf present */
+    total++;
+    bool conf_exists = exec->file_exists(RESOLVED_CONF_PATH, exec->ctx);
+    aegis_result_add_action(&res, conf_exists
+        ? "PASS: " RESOLVED_CONF_PATH " present"
+        : "FAIL: " RESOLVED_CONF_PATH " missing");
+    if (conf_exists) passed++;
+
+    /* Check 3: DNSSEC configured in file */
+    total++;
+    char *content = conf_exists ? exec->read_file(RESOLVED_CONF_PATH, exec->ctx) : NULL;
+    bool dnssec_set = (content && strstr(content, "DNSSEC=") != NULL);
+    aegis_result_add_action(&res, dnssec_set
+        ? "PASS: DNSSEC configured in " RESOLVED_CONF_PATH
+        : "FAIL: DNSSEC not configured in " RESOLVED_CONF_PATH);
+    free(content);
+    if (dnssec_set) passed++;
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "dns: %d/%d checks passed", passed, total);
+    free(res.message);
+    res.message = strdup(msg);
+
+    if (passed == total) {
+        res.status = AEGIS_OK;
+    } else if (passed > 0) {
+        res.status = AEGIS_WARN;
+    } else {
+        res.status = AEGIS_FAIL;
+    }
+    return res;
 }

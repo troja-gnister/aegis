@@ -91,5 +91,48 @@ aegis_result_t aegis_usbguard_status(aegis_executor_t *exec) {
 }
 
 aegis_result_t aegis_usbguard_verify(aegis_executor_t *exec) {
-    return aegis_usbguard_status(exec);
+    /* Per-item compliance: service active, config files present */
+    aegis_result_t res = aegis_result_ok("usbguard: all checks passed");
+    int total = 0, passed = 0;
+
+    /* Check 1: service is active */
+    total++;
+    const char *svc_argv[] = {"systemctl", "is-active", "usbguard", NULL};
+    aegis_exec_result_t r = exec->execute(svc_argv, exec->ctx);
+    bool active = (r.exit_code == 0);
+    aegis_exec_result_free(&r);
+    aegis_result_add_action(&res, active
+        ? "PASS: usbguard service is active"
+        : "FAIL: usbguard service is not active");
+    if (active) passed++;
+
+    /* Check 2: rules.conf present */
+    total++;
+    bool rules_exist = exec->file_exists("/etc/usbguard/rules.conf", exec->ctx);
+    aegis_result_add_action(&res, rules_exist
+        ? "PASS: /etc/usbguard/rules.conf present"
+        : "FAIL: /etc/usbguard/rules.conf missing");
+    if (rules_exist) passed++;
+
+    /* Check 3: daemon config present */
+    total++;
+    bool daemon_conf_exists = exec->file_exists("/etc/usbguard/usbguard-daemon.conf", exec->ctx);
+    aegis_result_add_action(&res, daemon_conf_exists
+        ? "PASS: /etc/usbguard/usbguard-daemon.conf present"
+        : "FAIL: /etc/usbguard/usbguard-daemon.conf missing");
+    if (daemon_conf_exists) passed++;
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "usbguard: %d/%d checks passed", passed, total);
+    free(res.message);
+    res.message = strdup(msg);
+
+    if (passed == total) {
+        res.status = AEGIS_OK;
+    } else if (passed > total / 2) {
+        res.status = AEGIS_WARN;
+    } else {
+        res.status = AEGIS_FAIL;
+    }
+    return res;
 }

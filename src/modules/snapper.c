@@ -93,5 +93,48 @@ aegis_result_t aegis_snapper_status(aegis_executor_t *exec) {
 }
 
 aegis_result_t aegis_snapper_verify(aegis_executor_t *exec) {
-    return aegis_snapper_status(exec);
+    /* Per-item compliance: hook present, snapper binary available, configs listed */
+    aegis_result_t res = aegis_result_ok("snapper: all checks passed");
+    int total = 0, passed = 0;
+
+    /* Check 1: snap-pac hook present */
+    total++;
+    bool hook_exists = exec->file_exists("/etc/pacman.d/hooks/snap-pac.hook", exec->ctx);
+    aegis_result_add_action(&res, hook_exists
+        ? "PASS: /etc/pacman.d/hooks/snap-pac.hook present"
+        : "FAIL: /etc/pacman.d/hooks/snap-pac.hook missing");
+    if (hook_exists) passed++;
+
+    /* Check 2: snapper binary present */
+    total++;
+    bool snapper_installed = exec->file_exists("/usr/bin/snapper", exec->ctx);
+    aegis_result_add_action(&res, snapper_installed
+        ? "PASS: /usr/bin/snapper present"
+        : "FAIL: /usr/bin/snapper not found — snapper not installed");
+    if (snapper_installed) passed++;
+
+    /* Check 3: snapper can list configs */
+    total++;
+    const char *list_argv[] = {"snapper", "list-configs", NULL};
+    aegis_exec_result_t r = exec->execute_sudo(list_argv, exec->ctx);
+    bool configs_ok = (r.exit_code == 0);
+    aegis_exec_result_free(&r);
+    aegis_result_add_action(&res, configs_ok
+        ? "PASS: snapper list-configs succeeded"
+        : "FAIL: snapper list-configs failed — no configs or not on btrfs");
+    if (configs_ok) passed++;
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "snapper: %d/%d checks passed", passed, total);
+    free(res.message);
+    res.message = strdup(msg);
+
+    if (passed == total) {
+        res.status = AEGIS_OK;
+    } else if (passed > 0) {
+        res.status = AEGIS_WARN;
+    } else {
+        res.status = AEGIS_FAIL;
+    }
+    return res;
 }

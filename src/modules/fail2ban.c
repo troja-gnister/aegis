@@ -124,5 +124,51 @@ aegis_result_t aegis_fail2ban_status(aegis_executor_t *exec) {
 }
 
 aegis_result_t aegis_fail2ban_verify(aegis_executor_t *exec) {
-    return check_fail2ban(exec);
+    /* Per-item compliance: service active, aegis config file present, jails loaded */
+    aegis_result_t res = aegis_result_ok("fail2ban: all checks passed");
+    int total = 0, passed = 0;
+
+    /* Check 1: service active */
+    total++;
+    const char *svc_argv[] = {"systemctl", "is-active", "fail2ban", NULL};
+    aegis_exec_result_t r = exec->execute(svc_argv, exec->ctx);
+    bool active = (r.exit_code == 0);
+    aegis_exec_result_free(&r);
+    aegis_result_add_action(&res, active
+        ? "PASS: fail2ban service is active"
+        : "FAIL: fail2ban service is not active");
+    if (active) passed++;
+
+    /* Check 2: aegis jail config file exists */
+    total++;
+    bool conf_exists = exec->file_exists(FAIL2BAN_JAIL_CONF, exec->ctx);
+    aegis_result_add_action(&res, conf_exists
+        ? "PASS: " FAIL2BAN_JAIL_CONF " present"
+        : "FAIL: " FAIL2BAN_JAIL_CONF " missing");
+    if (conf_exists) passed++;
+
+    /* Check 3: sshd jail loaded */
+    total++;
+    const char *status_argv[] = {"fail2ban-client", "status", "sshd", NULL};
+    r = exec->execute(status_argv, exec->ctx);
+    bool sshd_loaded = (r.exit_code == 0);
+    aegis_exec_result_free(&r);
+    aegis_result_add_action(&res, sshd_loaded
+        ? "PASS: sshd jail is active in fail2ban"
+        : "FAIL: sshd jail is not active in fail2ban");
+    if (sshd_loaded) passed++;
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "fail2ban: %d/%d checks passed", passed, total);
+    free(res.message);
+    res.message = strdup(msg);
+
+    if (passed == total) {
+        res.status = AEGIS_OK;
+    } else if (passed > total / 2) {
+        res.status = AEGIS_WARN;
+    } else {
+        res.status = AEGIS_FAIL;
+    }
+    return res;
 }

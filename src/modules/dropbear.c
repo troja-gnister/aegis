@@ -111,5 +111,39 @@ aegis_result_t aegis_dropbear_status(aegis_executor_t *exec) {
 }
 
 aegis_result_t aegis_dropbear_verify(aegis_executor_t *exec) {
-    return aegis_dropbear_status(exec);
+    /* Per-item compliance: binary present, hook in mkinitcpio.conf */
+    aegis_result_t res = aegis_result_ok("dropbear: all checks passed");
+    int total = 0, passed = 0;
+
+    /* Check 1: dropbear binary exists */
+    total++;
+    bool installed = exec->file_exists("/usr/bin/dropbear", exec->ctx);
+    aegis_result_add_action(&res, installed
+        ? "PASS: /usr/bin/dropbear present"
+        : "FAIL: /usr/bin/dropbear not found — dropbear not installed");
+    if (installed) passed++;
+
+    /* Check 2: mkinitcpio.conf contains dropbear hook */
+    total++;
+    char *content = exec->read_file(MKINITCPIO_CONF, exec->ctx);
+    bool in_hooks = (content && strstr(content, "dropbear") != NULL);
+    free(content);
+    aegis_result_add_action(&res, in_hooks
+        ? "PASS: dropbear hook present in " MKINITCPIO_CONF
+        : "FAIL: dropbear hook missing from " MKINITCPIO_CONF);
+    if (in_hooks) passed++;
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "dropbear: %d/%d checks passed", passed, total);
+    free(res.message);
+    res.message = strdup(msg);
+
+    if (passed == total) {
+        res.status = AEGIS_OK;
+    } else if (passed > 0) {
+        res.status = AEGIS_WARN;
+    } else {
+        res.status = AEGIS_FAIL;
+    }
+    return res;
 }

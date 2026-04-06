@@ -57,5 +57,37 @@ aegis_result_t aegis_firejail_status(aegis_executor_t *exec) {
 }
 
 aegis_result_t aegis_firejail_verify(aegis_executor_t *exec) {
-    return aegis_firejail_status(exec);
+    /* Per-item compliance: check binary and symlinks in /usr/local/bin */
+    aegis_result_t res = aegis_result_ok("firejail: all checks passed");
+    int total = 0, passed = 0;
+
+    /* Check 1: firejail binary installed */
+    total++;
+    bool installed = exec->file_exists("/usr/bin/firejail", exec->ctx);
+    aegis_result_add_action(&res, installed
+        ? "PASS: /usr/bin/firejail exists"
+        : "FAIL: /usr/bin/firejail not found — firejail not installed");
+    if (installed) passed++;
+
+    /* Check 2: firejail default profiles directory exists */
+    total++;
+    bool profiles_exist = exec->file_exists("/etc/firejail", exec->ctx);
+    aegis_result_add_action(&res, profiles_exist
+        ? "PASS: /etc/firejail profiles directory present"
+        : "FAIL: /etc/firejail not found — profiles missing");
+    if (profiles_exist) passed++;
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "firejail: %d/%d checks passed", passed, total);
+    free(res.message);
+    res.message = strdup(msg);
+
+    if (passed == total) {
+        res.status = AEGIS_OK;
+    } else if (passed > 0) {
+        res.status = AEGIS_WARN;
+    } else {
+        res.status = AEGIS_FAIL;
+    }
+    return res;
 }

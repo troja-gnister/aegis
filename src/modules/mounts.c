@@ -126,5 +126,53 @@ aegis_result_t aegis_mounts_status(aegis_executor_t *exec) {
 }
 
 aegis_result_t aegis_mounts_verify(aegis_executor_t *exec) {
-    return aegis_mounts_status(exec);
+    /* Per-mount-point compliance check */
+    aegis_result_t res = aegis_result_ok("mounts: all hardening checks passed");
+    int total = 0, passed = 0;
+
+    const char *argv[] = {"mount", NULL};
+    aegis_exec_result_t r = exec->execute(argv, exec->ctx);
+    const char *out = r.stdout_buf ? r.stdout_buf : "";
+
+    /* Check /tmp: must have noexec, nodev, nosuid */
+    total++;
+    bool tmp_ok = (strstr(out, "/tmp") && strstr(out, "noexec") &&
+                   strstr(out, "nodev") && strstr(out, "nosuid"));
+    aegis_result_add_action(&res, tmp_ok
+        ? "PASS: /tmp mounted with noexec,nodev,nosuid"
+        : "FAIL: /tmp missing one or more of noexec,nodev,nosuid");
+    if (tmp_ok) passed++;
+
+    /* Check /dev/shm: must have noexec, nodev, nosuid */
+    total++;
+    bool shm_ok = (strstr(out, "/dev/shm") && strstr(out, "noexec") &&
+                   strstr(out, "nodev") && strstr(out, "nosuid"));
+    aegis_result_add_action(&res, shm_ok
+        ? "PASS: /dev/shm mounted with noexec,nodev,nosuid"
+        : "FAIL: /dev/shm missing one or more of noexec,nodev,nosuid");
+    if (shm_ok) passed++;
+
+    /* Check /proc: must have hidepid */
+    total++;
+    bool proc_ok = (strstr(out, "/proc") && strstr(out, "hidepid"));
+    aegis_result_add_action(&res, proc_ok
+        ? "PASS: /proc mounted with hidepid"
+        : "FAIL: /proc not mounted with hidepid");
+    if (proc_ok) passed++;
+
+    aegis_exec_result_free(&r);
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "mounts: %d/%d hardened", passed, total);
+    free(res.message);
+    res.message = strdup(msg);
+
+    if (passed == total) {
+        res.status = AEGIS_OK;
+    } else if (passed > 0) {
+        res.status = AEGIS_WARN;
+    } else {
+        res.status = AEGIS_FAIL;
+    }
+    return res;
 }

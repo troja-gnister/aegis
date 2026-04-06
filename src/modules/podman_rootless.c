@@ -75,5 +75,56 @@ aegis_result_t aegis_podman_rootless_status(aegis_executor_t *exec) {
 }
 
 aegis_result_t aegis_podman_rootless_verify(aegis_executor_t *exec) {
-    return aegis_podman_rootless_status(exec);
+    /* Per-item compliance: userns enabled, subuid/subgid configured */
+    aegis_result_t res = aegis_result_ok("podman_rootless: all checks passed");
+    int total = 0, passed = 0;
+
+    /* Check 1: kernel.unprivileged_userns_clone = 1 */
+    total++;
+    const char *sysctl_argv[] = {"sysctl", "kernel.unprivileged_userns_clone", NULL};
+    aegis_exec_result_t r = exec->execute(sysctl_argv, exec->ctx);
+    bool userns_ok = false;
+    if (r.exit_code == 0 && r.stdout_buf) {
+        char *eq = strstr(r.stdout_buf, "= ");
+        if (eq && strncmp(eq + 2, "1", 1) == 0) userns_ok = true;
+    }
+    aegis_exec_result_free(&r);
+    aegis_result_add_action(&res, userns_ok
+        ? "PASS: kernel.unprivileged_userns_clone = 1"
+        : "FAIL: kernel.unprivileged_userns_clone != 1 (expected 1)");
+    if (userns_ok) passed++;
+
+    /* Check 2: /etc/subuid exists and contains containers entry */
+    total++;
+    char *subuid = exec->read_file(SUBUID_PATH, exec->ctx);
+    bool subuid_ok = (subuid && strstr(subuid, "containers") != NULL);
+    free(subuid);
+    aegis_result_add_action(&res, subuid_ok
+        ? "PASS: " SUBUID_PATH " contains containers entry"
+        : "FAIL: " SUBUID_PATH " missing or no containers entry");
+    if (subuid_ok) passed++;
+
+    /* Check 3: /etc/subgid exists and contains containers entry */
+    total++;
+    char *subgid = exec->read_file(SUBGID_PATH, exec->ctx);
+    bool subgid_ok = (subgid && strstr(subgid, "containers") != NULL);
+    free(subgid);
+    aegis_result_add_action(&res, subgid_ok
+        ? "PASS: " SUBGID_PATH " contains containers entry"
+        : "FAIL: " SUBGID_PATH " missing or no containers entry");
+    if (subgid_ok) passed++;
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "podman_rootless: %d/%d checks passed", passed, total);
+    free(res.message);
+    res.message = strdup(msg);
+
+    if (passed == total) {
+        res.status = AEGIS_OK;
+    } else if (passed > 0) {
+        res.status = AEGIS_WARN;
+    } else {
+        res.status = AEGIS_FAIL;
+    }
+    return res;
 }

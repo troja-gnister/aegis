@@ -53,5 +53,53 @@ aegis_result_t aegis_flatpak_hardening_status(aegis_executor_t *exec) {
 }
 
 aegis_result_t aegis_flatpak_hardening_verify(aegis_executor_t *exec) {
-    return aegis_flatpak_hardening_status(exec);
+    /* Per-item compliance: check system overrides for key restrictions */
+    aegis_result_t res = aegis_result_ok("flatpak_hardening: all checks passed");
+    int total = 0, passed = 0;
+
+    const char *show_argv[] = {"flatpak", "override", "--system", "--show", NULL};
+    aegis_exec_result_t r = exec->execute(show_argv, exec->ctx);
+    bool ok = (r.exit_code == 0);
+    const char *out = (ok && r.stdout_buf) ? r.stdout_buf : "";
+
+    /* Check 1: overrides command succeeds */
+    total++;
+    aegis_result_add_action(&res, ok
+        ? "PASS: flatpak system overrides are configured"
+        : "FAIL: flatpak override --system --show failed — no overrides configured");
+    if (ok) passed++;
+
+    /* Check 2: nofilesystem=home restriction present */
+    total++;
+    bool no_home = (strstr(out, "nofilesystem=home") != NULL ||
+                    strstr(out, "filesystems=!home") != NULL);
+    aegis_result_add_action(&res, no_home
+        ? "PASS: home filesystem access restricted"
+        : "FAIL: home filesystem restriction not found in overrides");
+    if (no_home) passed++;
+
+    /* Check 3: ssh-auth socket restricted */
+    total++;
+    bool no_ssh = (strstr(out, "nosocket=ssh-auth") != NULL ||
+                   strstr(out, "sockets=!ssh-auth") != NULL);
+    aegis_result_add_action(&res, no_ssh
+        ? "PASS: ssh-auth socket access restricted"
+        : "FAIL: ssh-auth socket restriction not found in overrides");
+    if (no_ssh) passed++;
+
+    aegis_exec_result_free(&r);
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "flatpak_hardening: %d/%d checks passed", passed, total);
+    free(res.message);
+    res.message = strdup(msg);
+
+    if (passed == total) {
+        res.status = AEGIS_OK;
+    } else if (passed > 0) {
+        res.status = AEGIS_WARN;
+    } else {
+        res.status = AEGIS_FAIL;
+    }
+    return res;
 }
