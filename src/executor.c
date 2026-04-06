@@ -78,6 +78,7 @@ static aegis_exec_result_t run_argv(const char **argv) {
     /* Parent */
     close(out_pipe[1]);
     close(err_pipe[1]);
+    setpgid(pid, pid);  // Ensure pgid is set even if child hasn't run yet
 
     /* Set timeout BEFORE reading — covers both I/O and waitpid */
     _timed_out = 0;
@@ -88,9 +89,16 @@ static aegis_exec_result_t run_argv(const char **argv) {
     alarm(120);
 
     char *out_buf = read_fd(out_pipe[0]);
-    char *err_buf = read_fd(err_pipe[0]);
     close(out_pipe[0]);
-    close(err_pipe[0]);
+
+    char *err_buf;
+    if (_timed_out) {
+        err_buf = strdup("");
+        close(err_pipe[0]);
+    } else {
+        err_buf = read_fd(err_pipe[0]);
+        close(err_pipe[0]);
+    }
 
     int status;
     pid_t w = waitpid(pid, &status, 0);

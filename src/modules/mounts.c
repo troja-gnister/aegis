@@ -107,17 +107,20 @@ aegis_result_t aegis_mounts_apply(const void *config, aegis_executor_t *exec) {
 }
 
 /* Check if a specific flag appears on the mount line for a given mount point.
- * This avoids false positives where a flag on /dev/shm matches when checking /tmp. */
+ * Matches " on <mount_point> " to avoid substring false positives (e.g. /proc
+ * matching /proc/sys/fs/binfmt_misc). */
 static bool check_mount_flags(const char *mount_output, const char *mount_point,
                                const char *flag) {
+    char pattern[256];
+    snprintf(pattern, sizeof(pattern), " on %s ", mount_point);
+
     const char *line = mount_output;
-    while (line) {
-        if (strstr(line, mount_point)) {
-            /* Check if flag appears on THIS line only */
+    while (line && *line) {
+        if (strstr(line, pattern)) {
             const char *eol = strchr(line, '\n');
             size_t line_len = eol ? (size_t)(eol - line) : strlen(line);
             char *line_copy = strndup(line, line_len);
-            bool found = line_copy && strstr(line_copy, flag) != NULL;
+            bool found = strstr(line_copy, flag) != NULL;
             free(line_copy);
             return found;
         }
