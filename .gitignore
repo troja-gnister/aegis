@@ -22,3 +22,6 @@ Thumbs.db
 
 # Local design companion sessions
 .superpowers/
+
+# Isolated feature worktrees
+.worktrees/
