@@ -1,6 +1,6 @@
 # Aegis platform rewrite design
 
-**Status:** Approved product and architecture design
+**Status:** Architecture approved; written checkpoint awaiting final review
 
 **Date:** 2026-08-31
 
@@ -17,7 +17,7 @@ The selected architecture is:
 - a Django modular monolith for authentication, authorization, administration, APIs, operation journaling, and orchestration;
 - a React and TypeScript progressive web app, optimized first for mobile browsers;
 - PostgreSQL for identities, grants, indexed metadata, durable work, organization, search metadata, and audit records;
-- separate process roles from the same versioned application code for file operations, indexing, media/document processing, and optional AI;
+- separate process roles from the same versioned application code for file operations, indexing, media/document processing, optional local AI, and an isolated optional frontier connector;
 - an unprivileged delivery gateway for static assets, API proxying, request limits, and authorized byte-range file delivery;
 - mounted filesystems as the source of truth for original files;
 - local CPU inference as the default AI mode, with optional GPU acceleration and explicitly enabled frontier APIs.
@@ -38,6 +38,8 @@ During Phase 0:
 4. replace the active legacy source tree during Phase 1 rather than carrying it as a dormant subdirectory.
 
 Git history and the named tag are the recovery mechanism for the legacy product. The new application does not reuse its C architecture, configuration, or release identity.
+
+The Phase 0 checkpoint changes documentation and local design-tool hygiene only: `.superpowers/` is ignored so browser-companion session artifacts cannot enter commits. It changes no legacy or new-product runtime behavior.
 
 ## 3. Goals
 
@@ -103,6 +105,16 @@ The Phase 2 fixture contains:
 
 Later scale work may add PostgreSQL partitioning, read replicas, or sharded processing queues. No client API exposes physical table layout, database sequence values, or absolute paths, so those changes remain internal.
 
+### 5.3 Reference benchmark profile
+
+Release acceptance uses one versioned benchmark manifest rather than the full supported-hardware range. The initial reference is an x86-64 Intel N100-class 4-core host with 16 GB RAM. Core services receive four CPU cores total and these hard memory limits: PostgreSQL 3 GiB, web 1 GiB, operations 1 GiB, indexer 1 GiB, media 2 GiB, and gateway 256 MiB. AI is excluded from the base measurement and added as an explicitly reported load profile.
+
+PostgreSQL and managed volumes use local SSD/NVMe storage with at least 20,000 measured random-read IOPS and 300 MB/s sequential throughput. The originals fixture uses a separately calibrated root with at least 150 MB/s sequential throughput and 150 metadata operations per second, representing modest NAS storage. The release report records CPU model/governor, RAM, kernel, Docker, filesystem/mount options, PostgreSQL settings, image digests, storage calibration, and deterministic dataset seed.
+
+The server workload uses ten concurrent authenticated users for 15 minutes after a five-minute warmup, page size 100, and a fixed mix: 60% first/next directory pages, 15% alternate sorts, 10% entry details, 10% filename searches, and 5% transfer/job status. At least one quarter of list requests target the 50,000-child folder. A worker-load run adds one bounded index scan and two preview jobs. Cold results are recorded separately after service/database restart and are not blended into warm p95.
+
+Mobile measurements use a 412-by-915 CSS-pixel viewport, touch input, 4x CPU slowdown, 40 Mbps downstream, 10 Mbps upstream, and 40 ms round-trip latency. The exact browser versions and trace journey are pinned in the benchmark manifest. WebKit functional journeys run separately because Chromium emulation is not a substitute for WebKit correctness.
+
 ## 6. System architecture
 
 ~~~mermaid
@@ -119,10 +131,17 @@ flowchart LR
     I --> R
     G -. authorized internal delivery .-> R
     M --> R
-    M --> D[Aegis data volume]
+    W --> D[Role-scoped managed volumes]
+    O --> D
+    M --> D
     A --> D
-    A -. explicit opt-in only .-> F[Frontier model API]
+    G -. authorized derivative delivery .-> D
+    A --> E[Approved frontier outbox]
+    E --> C[Isolated frontier connector]
+    C -. allowlisted TLS egress .-> F[Frontier model API]
 ~~~
+
+Edges to the managed-volumes node represent only the role-specific mounts in Section 6.6; no container receives the aggregated storage shown by the diagram.
 
 ### 6.1 Gateway
 
@@ -152,7 +171,9 @@ The initial API layer uses Django REST Framework. The same-origin PWA uses serve
 
 The frontend uses React, TypeScript, Vite, React Router, TanStack Query, and a virtual collection primitive. Its responsibilities are interaction state, bounded client caching, optimistic presentation only when recoverable, mobile navigation, viewer controls, and resumable transfer coordination. It does not recreate authorization rules.
 
-The service worker caches only the application shell and explicitly public build assets. It never caches originals. Private thumbnails use authenticated requests, content-addressed URLs, short browser cache policies, and logout-triggered cache clearing.
+The service worker caches only the unauthenticated application shell and fingerprinted public build assets. It never caches an authenticated response, original, derivative, API payload, or transfer record. Originals, document bytes, APIs, and authenticated HTML use `Cache-Control: private, no-store`.
+
+Thumbnails and posters may use the browser HTTP cache only with `Cache-Control: private, no-cache`, a strong ETag, and `Vary: Cookie`, which forces authorization revalidation before reuse. Their content-addressed URL also includes a signed user/session cache namespace and current root-authorization epoch. Login, logout, session expiry, account switch, and grant change rotate that namespace. A revalidation always passes through Django before Nginx can return a derivative.
 
 ### 6.4 PostgreSQL
 
@@ -181,45 +202,79 @@ All workers use the same application release and migration version.
 | File operations | Read/write only on writable roots plus staging | final upload publication, cross-filesystem copy/move, recursive operations, trash purge, and recovery |
 | Indexer | Read-only roots | initial scan, watcher events, checkpointed reconciliation, and catalog repair |
 | Media/document | Read-only roots; read/write derivative volume | thumbnails, EXIF, probes, PDF pages/text, text sniffing, CSV indexes, and video compatibility output |
-| AI | Read-only selected inputs; read/write model/derivative volume | embeddings, OCR, labels, captions, face grouping when enabled, and frontier calls when explicitly permitted |
+| Local AI supervisor | Read-only selected inputs; read/write model/derivative/outbox volumes | sandboxed embeddings, OCR, labels, captions, face grouping when enabled, and preparation of explicitly approved outbox payloads; no egress |
+| Frontier connector | No root or general managed-volume access; one outbox payload | one allowlisted provider call and its audited result |
 
 Same-filesystem mutations use the high-priority operations queue and may be awaited briefly by the API for an immediate response. The web process never needs a writable originals mount. Potentially long or recursive work returns an accepted operation immediately and continues in the file-operations worker.
 
 ### 6.6 Storage layout
 
-Operators explicitly mount each logical root into known container paths. Root configuration maps an opaque root ID and display name to a server-only mount path and mode. The browser never sees that mount path.
+Operators declare mount slots in deployment configuration before containers start. Each slot has a stable slot ID, host source, fixed container path below `/srv/aegis/roots/`, read-only/read-write mode, and expected filesystem identity. Compose mounts the same slot path read-only into gateway/indexer/media/AI and, only when writable, read-write into operations. The browser and Django APIs never receive the host or container path.
 
-The Aegis-managed data volume contains:
+A platform administrator can activate a logical root only by selecting a predeclared slot; Django cannot register an arbitrary path that is absent from the deployment manifest. Adding or changing a slot requires host-side preflight and recreation of the affected containers before database activation. Runtime readiness compares the manifest with the identity and access mode reported by each role, and a mismatch keeps that root unavailable.
 
-- resumable upload chunks and session data;
-- generated thumbnails, PDF pages, transcodes, and extraction artifacts;
-- downloaded local model artifacts and their manifests;
-- temporary processor output and quarantined failures.
+The host-side preflight canonicalizes sources and compares real paths, filesystem/mount identity, root inode, and ancestor relationships. It rejects identical, nested, or otherwise detectable physical aliases so one subtree cannot acquire two authorization identities. For network mounts whose aliases cannot be proven distinct, the operator must supply a stable remote/share identity; ambiguous duplicates fail closed rather than relying on display names. The expected identity is rechecked before scan finalization and every mutation.
 
-At upload finalization, the operations worker streams assembled content into a hidden destination-local temporary file, flushes it, and atomically renames it into view. This gives atomic publication even when the Aegis data volume and destination root are different filesystems.
+Role-scoped Aegis volumes prevent an untrusted processor from reading unrelated state:
 
-Recoverable deletion uses a reserved hidden trash directory inside the same writable root. A same-filesystem rename makes normal deletes atomic and restores inexpensive. The data volume does not hold the authoritative trash copy.
+| Volume | Writers | Readers | Contents |
+| --- | --- | --- | --- |
+| Staging | web | operations | resumable upload chunks; never served by the gateway |
+| Derivatives | media and local AI | gateway and authorized processors | thumbnails, PDF pages, transcodes, and extraction artifacts |
+| Models | explicit model-management job | local AI | pinned local model artifacts and manifests |
+| Media scratch/quarantine | media | media and authorized administration | per-job temporary output and quarantined failures |
+| Frontier outbox | trusted AI supervisor | isolated frontier connector | only the payload approved for one audited provider job |
+
+The volumes are separate Compose mounts, not merely directories protected by application convention. A tool sandbox sees only one job's input descriptor, scratch directory, and output limit. It receives no PostgreSQL credential and no broad staging, derivative, model, or root mount.
+
+At upload finalization, the operations worker streams assembled content from staging into a hidden destination-local temporary file, flushes it, and atomically renames it into view. This gives atomic publication even when the staging volume and destination root are different filesystems.
+
+Recoverable deletion uses a reserved hidden trash directory inside the same writable root. A same-filesystem rename makes normal deletes atomic and restores inexpensive. No managed volume holds the authoritative trash copy.
+
+### 6.7 Filesystem identity and metadata contract
+
+Deployment config sets the unprivileged UID, primary GID, and supplementary groups used for root access. A root may additionally set its creation group and umask; the secure default umask is `0027`. Uploads are owned by the configured operations UID/GID. Aegis does not require root, grant arbitrary ownership changes, or retain setuid/setgid bits. Operators use host ownership, ACLs, and supplementary groups to make each mount slot readable or writable as intended.
+
+Activation preflight verifies read access and, for a writable slot, bounded create, file-sync, atomic-rename, directory-sync, lock, trash, and cleanup operations inside the reserved Aegis area. It records case behavior, timestamp precision, stable-identity support, sparse-file support, ACL/xattr support, and free-space semantics. A root that fails mandatory checks remains read-only or unavailable rather than accepting unsafe mutations.
+
+Same-filesystem rename/trash naturally preserves the filesystem object's metadata. For a copy, v1 guarantees regular-file bytes, directory structure, safe names, and a verified destination. It preserves modification time and ordinary permission bits when the destination permits. ACLs and extended attributes use a configured allowlist and are reported when unsupported; a cross-filesystem move never removes the source if required metadata could not be preserved. Sparse extents are retained when both filesystems support them, otherwise free-space checks assume expanded size. Hard-link topology is not preserved by copy: each destination is an independent file and the UI reports that limitation.
+
+Symlink entries remain inert and are never dereferenced. Rename and trash operate on the link object. Copy may recreate only the link text, and only when the destination root explicitly permits symlink objects; otherwise it returns a policy conflict. Devices, sockets, and FIFOs are metadata-visible but cannot be previewed, uploaded, copied, or opened by Aegis.
 
 ## 7. Domain and data model
 
 ### 7.1 Principals, roots, and grants
 
 - **User** and **Group** are Django authentication principals.
-- **Root** is an administratively registered logical filesystem boundary with an opaque UUID, display name, server-only mount path, read/write mode, case behavior, and scan policy.
+- **Root** is an administratively activated logical filesystem boundary with an opaque UUID, display name, deployment mount-slot reference, read/write mode, case behavior, and scan policy.
 - **Grant** assigns a principal a bit set for one complete logical root.
 - **EffectiveGrant** is the additive union of the user's direct and group grants.
 
-The v1 permission bits are:
+The v1 permission bits are independently assignable:
 
 1. browse and search metadata;
 2. preview and stream;
-3. download;
+3. download and export content;
 4. upload and create folders;
-5. rename, move, and copy;
-6. delete and restore;
-7. administer that root.
+5. rename and move within a root;
+6. request server-side copies;
+7. delete and restore;
+8. administer that root.
 
 There are no deny rules in v1. An administrator expresses a subtree boundary by registering it as a separate logical root. Overlapping canonical root paths are rejected to avoid ambiguous authorization. A platform administrator can manage the installation but receives no implicit file access; data access still requires a root grant.
+
+Operation authorization is evaluated on both sides of an operation:
+
+| Operation | Source requirement | Destination requirement |
+| --- | --- | --- |
+| Rename or move within one root | rename/move | the same root grant and a writable destination |
+| Copy within one root | copy plus download/export | upload/create on the same root |
+| Copy across roots | copy plus download/export on the source root | upload/create on the destination root |
+| Move across roots | copy, download/export, and delete/restore on the source root | upload/create on the destination root |
+| Restore to original location | delete/restore | writable original root |
+| Restore to a different folder | delete/restore | upload/create on the destination root |
+
+A cross-root move is always the authorized copy workflow followed by a recoverable source delete; it is never treated as a rename. Directory operations require the same permissions for every affected root. Preview/stream is content disclosure and cannot promise that a browser user is technically unable to save displayed bytes; the download/export permission controls explicit original delivery and operations that transfer complete content.
 
 ### 7.2 Catalog entries
 
@@ -294,19 +349,23 @@ A normal browser request queries PostgreSQL only. It never calls directory enume
 
 For each root, the indexer:
 
-1. obtains a scan generation and enqueues bounded directory work;
+1. verifies the configured mount-slot identity, captures the root reconciliation epoch, obtains a scan generation, and enqueues bounded directory work;
 2. enumerates one directory at a time with `os.scandir`;
 3. converts entries to bounded batches and bulk-upserts their current metadata;
 4. schedules child directories without retaining the full tree in memory;
 5. persists checkpoints and counters;
-6. marks unseen entries missing only after the relevant directory or subtree completes successfully;
+6. finalizes unseen entries with the fenced rules below only after the relevant directory completes successfully;
 7. emits downstream work only when a source fingerprint changed.
 
 An interrupted scan resumes from durable checkpoints. It cannot erase catalog entries merely because a scan stopped midway. Per-root scan concurrency and I/O rate are configurable so browsing retains priority.
 
+Each focused reconciliation commit increments a root-scoped monotonic reconciliation epoch and records that epoch on affected rows. Scan rows carry their scan ID and captured start epoch. Directory scan finalization acquires the same per-directory advisory lock used by focused reconciliation, rechecks the mount-slot identity, and may mark missing only rows that were not seen by this completed scan and whose last observed epoch is not newer than the scan's start epoch. Compare-and-swap predicates prevent a later watcher/focused update from being overwritten by stale scan finalization.
+
+Watcher events received after scan start remain in the durable event sequence and are applied after or alongside finalization. Overflow marks the affected root/directory dirty and schedules a new scan. An identity mismatch, enumeration error, lost mount, or incomplete directory leaves prior live rows intact and records degraded health; an empty or replacement mount can never be interpreted as a successful mass deletion scan.
+
 ### 9.3 Watcher events
 
-Where supported, filesystem events are normalized and coalesced by root and path. Events schedule focused reconciliation; they do not directly establish truth. Queue overflow, watcher loss, container downtime, and network mount behavior are handled by the next scan. A periodic full or rolling scan is mandatory.
+Where supported, filesystem events are normalized, assigned a durable per-root ingestion sequence, and coalesced by root and path. Events schedule focused reconciliation; they do not directly establish truth. Focused catalog commits serialize with scan finalization for the same directory. Queue overflow, watcher loss, container downtime, and network mount behavior are handled by the next scan. A periodic full or rolling scan is mandatory.
 
 ### 9.4 External changes
 
@@ -320,7 +379,7 @@ Where supported, filesystem events are normalized and coalesced by root and path
 
 ### 10.1 Journaled state machine
 
-Before touching a writable root, Aegis authenticates, authorizes, validates preconditions, and commits an operation record. The operation moves through:
+Before touching a writable root, Aegis authenticates, authorizes, validates preconditions, and commits an operation record. Acceptance is not a permanent authorization grant: execution-time checks described below still apply. The operation moves through:
 
 `accepted -> running -> filesystem_applied -> catalog_applied -> completed`
 
@@ -339,36 +398,68 @@ If step 2 succeeds and step 3 fails, recovery inspects the filesystem and finish
 
 Operations acquire deterministic root/path-scoped coordination records or advisory locks in canonical order. They never take a global filesystem lock. Interactive operations have short lock windows; long jobs use renewable leases and checkpointed manifests.
 
-### 10.3 Upload
+Each accepted operation records the request hash, expected entry versions, source/destination root identities, and the authorization epoch of every relevant principal/root grant. Disabling a user, changing a grant, changing a root mode, or replacing/deactivating a mount slot increments the applicable epoch and fences queued work.
+
+When a worker claims an operation, and again immediately before every publish, rename, trash, unlink, or other irreversible primitive, it must verify:
+
+1. the actor's account remains active;
+2. current effective source and destination permissions satisfy the complete operation matrix;
+3. every root remains active, in the required read/write mode, and mounted with the recorded deployment identity;
+4. expected catalog versions still match;
+5. descriptor-relative `fstat` identity for each source/destination parent and entry matches the object that was authorized;
+6. the worker still owns the current operation attempt and path-scoped fence.
+
+Long manifests repeat these checks at every checkpoint. A revocation stops before the next item; it never authorizes the remainder from a stale snapshot. If destination publication already happened when a later source-side check fails, Aegis preserves the destination, preserves the source, and reports a completed copy requiring attention.
+
+Job claims use a monotonically increasing attempt/fence token and compare-and-swap state transitions. Each worker uses an operation-owned, attempt-specific temporary name. A worker with an expired token may clean its own unpublished temporary data but cannot publish, remove a source, or update completion state. The short final primitive is guarded by a live PostgreSQL advisory lock acquired after the execution-time checks. Losing the lease, lock connection, root identity, or authorization forces revalidation rather than continuation.
+
+### 10.3 Durability and publication
+
+Every operation-owned temporary or trash name includes the operation ID and attempt token, is created with exclusive no-follow semantics, and is recorded before filesystem use. Publication follows this minimum sequence:
+
+1. open source, source parent, and destination parent by descriptors and record their filesystem identity;
+2. stream to the destination-local temporary while calculating a strong digest;
+3. confirm the source descriptor's identity, size, and timestamps did not change during the read;
+4. flush and `fsync` the temporary file, then verify its bytes/digest;
+5. reacquire the execution-time authorization and fencing checks;
+6. atomically rename the temporary into the destination;
+7. `fsync` the destination directory before recording the destination durable.
+
+A same-filesystem rename synchronizes every changed parent directory after the atomic rename. File creation also synchronizes the created file before its parent. Permanent removal synchronizes the affected parent after unlink. A filesystem that does not provide the required atomic rename, file synchronization, directory synchronization, stable identity, or locking primitive is recorded as having reduced capabilities; Aegis uses the conservative fallback and never describes an unverified source removal as a durable move.
+
+For a cross-filesystem move, the worker re-reads and hashes the source after destination publication, revalidates that the authorized source path still names the same object, and compares that digest with the destination. It then performs the source side as a normal recoverable delete: atomically rename the source into its root-local trash and synchronize both the original and trash parent directories. It does not immediately unlink the source bytes. If the source changed, an external writer is still active, identity is ambiguous, or the source filesystem cannot establish this sequence, the operation degrades to a completed copy with manual source cleanup. This policy favors duplicate data over silent loss.
+
+### 10.4 Upload
 
 Uploads follow the tus resumable-upload protocol:
 
 1. Django authorizes the target root/folder and creates a quota-bounded upload session.
-2. Chunks stream through bounded request buffers to the Aegis data volume; the complete chunk or upload is never held in Django process memory.
+2. Chunks stream through bounded request buffers to the staging volume; the complete chunk or upload is never held in Django process memory.
 3. The server validates declared length and optional client checksum.
 4. Finalization revalidates grants, destination version, free space, and conflict policy.
-5. A worker streams the assembled content into a hidden destination-local temporary file while hashing it, flushes data and metadata, then atomically renames it into the final name.
+5. A worker streams the assembled content into an operation-owned destination-local temporary file while hashing it, synchronizes and verifies the file, atomically renames it into the final name, and synchronizes the destination directory.
 6. Catalog update completes the operation and schedules derived work.
 
 Expired sessions are garbage-collected. Request, per-user, and installation limits prevent unbounded staging use. A disk-space failure leaves no partially visible destination and returns HTTP 507.
 
-### 10.4 Rename and move
+### 10.5 Rename and move
 
-A rename or same-filesystem move uses the filesystem's atomic rename primitive after source/destination descriptor validation. A cross-filesystem move is a background operation:
+A rename or same-filesystem move uses the filesystem's atomic rename primitive after source/destination descriptor validation and follows the parent-directory synchronization contract. A cross-filesystem move is a background operation:
 
 1. stream to a destination-local temporary name while computing a strong digest;
-2. flush and verify destination bytes;
-3. atomically publish the destination;
-4. update the catalog;
-5. delete the source only after the verified destination is durable.
+2. synchronize and verify destination bytes;
+3. atomically publish and synchronize the destination;
+4. update the destination catalog state;
+5. re-read, hash, and identity-check the source;
+6. move the unchanged source into root-local trash and synchronize its parent directories.
 
-If source deletion then fails, the result is reported as a completed copy with cleanup required rather than pretending the move was atomic.
+If the source-side checks or trash move fail, the result is reported as a completed copy with cleanup required rather than pretending the move was atomic.
 
-### 10.5 Copy and recursive operations
+### 10.6 Copy and recursive operations
 
 Copies use the same temporary, verification, and publish sequence without deleting the source. Directory copy/move/delete operations first build a bounded checkpointed manifest and expose progress. Restarts continue from recorded items and idempotently inspect already completed destinations.
 
-### 10.6 Recycle bin
+### 10.7 Recycle bin
 
 Delete through Aegis atomically renames the entry into a reserved hidden directory in the same writable root. PostgreSQL records the original parent/name, trash location, actor, deletion time, retention deadline, and source fingerprint. The indexer excludes internal staging and trash paths from ordinary views.
 
@@ -409,15 +500,19 @@ Django superuser status does not bypass product data checks. Grant changes revok
 - PDF and media viewers use sandboxed, pinned libraries and never trust file-supplied MIME alone.
 - Content-Disposition filenames use safe encoding.
 - Private originals are excluded from service-worker storage.
-- Sensitive client caches are cleared at logout and when the active user changes.
+- Authenticated HTML, APIs, originals, and document bytes use `private, no-store`; thumbnails use the revalidating policy defined above.
+- Cache Storage, IndexedDB transfer metadata, query caches, object URLs, and in-memory selection/viewer state are purged on logout, session expiry, and account change.
+- A page restored from the browser back/forward cache must revalidate the session before revealing prior authenticated state.
 
 ### 11.5 Container and processor safety
 
-Containers run as fixed unprivileged UIDs with read-only application filesystems, dropped Linux capabilities, no privileged mode, and no Docker socket. Only the file-operations role receives writable original mounts. Media and AI tools receive CPU, memory, time, output-size, and concurrency limits.
+Containers run as configured unprivileged UIDs with read-only application filesystems, dropped Linux capabilities, no privileged mode, and no Docker socket. Only the file-operations role receives writable original mounts. Media and AI tools receive CPU, memory, time, output-size, and concurrency limits.
 
 External tools are invoked with argument arrays, never shell interpolation. Processor input is treated as hostile. Malformed files, decompression bombs, huge dimensions, recursive documents, and excessive CSV fields are rejected or quarantined by policy.
 
-The default internal network has no unnecessary published ports. Media/indexer roles do not need general internet egress. A frontier-enabled AI role uses a separate egress-capable profile so cloud access cannot be activated accidentally in the default deployment.
+Application roles attach only to Docker internal networks with no internet route. The gateway is the sole core ingress, and PostgreSQL is never published. A dedicated frontier connector is the only egress-capable application role: it has no original-root, staging, derivative, model, or quarantine mount; it can read only a single approved outbox payload and write its response through a narrow database interface. Outbound TLS is restricted to the configured provider allowlist. The local AI worker itself has no internet route, so enabling cloud access cannot silently expand the trust boundary of a process that can read originals.
+
+Database access also follows role boundaries. A migration principal owns schema changes and is absent during normal operation. Web, operations, indexer, media, local AI, and frontier connector use distinct credentials with table/operation privileges limited to their duties. Processor roles cannot create or alter immutable web-created operation intents or grants; they can claim eligible jobs and update only fenced status/result fields. Gateway has no database credential.
 
 ### 11.6 Secrets and audit
 
@@ -493,7 +588,7 @@ AI suggestions are stored separately from accepted human metadata. Re-running or
 
 Before content can leave the deployment, an administrator must configure a provider/key and enable a named capability. The initiating UI identifies the provider and data class. Every outbound job applies root policy, minimizes payload, records audited egress, and surfaces provider failures without falling back elsewhere.
 
-The default deployment has no frontier provider and the AI worker can run without egress.
+The default deployment has no frontier provider. The local AI supervisor has no egress in every profile; only the separately enabled connector can reach an allowlisted provider.
 
 ## 14. Mobile-first experience
 
@@ -534,7 +629,7 @@ The transfer manager persists resumable upload identifiers, progress, target, an
 
 ### 14.5 PWA caching
 
-The app shell can open offline and explain that server content is unavailable. v1 does not sync originals for offline use. Authenticated response caches are bounded, user-scoped, and cleared at logout. Content-addressed thumbnail URLs permit safe revalidation without exposing permanent unauthenticated links.
+The unauthenticated app shell can open offline and explain that server content is unavailable. v1 does not sync originals for offline use. Authenticated application data is never placed in the service-worker cache. Content-addressed thumbnail URLs permit conditional revalidation, but their session namespace and authorization epoch prevent reuse as permanent unauthenticated links.
 
 ## 15. Performance contract
 
@@ -546,6 +641,9 @@ On the baseline host and required fixture:
 - the defined mobile interaction journey has interaction to next paint at most 200 ms;
 - process memory remains within documented container budgets during scan, list, preview, and viewer tests;
 - no normal list endpoint performs a synchronous filesystem enumeration or exact total count.
+- the initial catalog-only 1,000,000-entry scan completes within four hours on the calibrated originals root;
+- indexer resident memory remains at or below 750 MiB and catalog tables plus indexes remain at or below 8 GiB for that fixture;
+- a mobile browser viewing the 50,000-entry folder remains at or below 250 MiB heap after a ten-minute scroll/select/navigation journey.
 
 Measurements report cold and warm database/cache cases separately and identify host storage. A passing result cannot depend on disabling authorization, reconciliation, or representative metadata.
 
@@ -575,12 +673,12 @@ The production Compose definition includes:
 - `indexer`: read-only catalog reconciliation worker;
 - `media`: read-only media/document processor;
 - `postgres`: pinned PostgreSQL image and durable volume;
-- a named Aegis data volume;
+- separate named staging, derivative, model, quarantine, and frontier-outbox volumes;
 - one explicit bind/volume mount per configured root.
 
 Root mounts are read-only in the gateway, indexer, media, and AI roles. Only the operations role receives a read/write mount, and only for roots configured writable. The web role receives no original-root mount.
 
-Optional profiles add `tls` for Caddy and `ai-cpu` or `ai-gpu`. The GPU profile documents the required host runtime and fails clearly when unavailable.
+Optional profiles add `tls` for Caddy, `ai-cpu` or `ai-gpu`, and the separately authorized `ai-frontier` connector. The GPU profile documents the required host runtime and fails clearly when unavailable. CPU/GPU local AI remains on an internal no-egress network.
 
 Images are pinned by version or digest for releases. Startup applies explicit, reversible-aware Django migrations. Workers remain unready and do not claim jobs until the database schema version matches the application.
 
@@ -603,16 +701,17 @@ Logs are structured and correlate request, operation, job, user, and root IDs. A
 
 ### 16.3 Backup and restore
 
-A complete backup includes:
+Mandatory recoverable state consists of:
 
 1. PostgreSQL;
-2. secrets, encryption keys, and root/deployment configuration;
-3. original roots, including hidden Aegis trash;
-4. optionally, the derivative/model data volume to shorten recovery.
+2. secrets, encryption keys, and the deployment/root-slot manifest;
+3. every original root, including its hidden Aegis trash.
 
-Originals alone do not restore accounts, grants, albums, tags, ratings, audit history, upload state, or trash manifests. PostgreSQL alone does not restore file bytes. The operations guide provides a quiesced backup mode that stops new mutations, records scan/operation boundaries, and permits a consistent database/filesystem capture.
+Staging is conditionally mandatory. A backup that preserves resumable upload sessions captures the staging volume at the same boundary as PostgreSQL. A backup that omits staging must first drain or explicitly invalidate incomplete upload sessions and record that decision in the backup manifest. Derivative, model-cache, scratch, and quarantine volumes are optional because their successful outputs can be regenerated or their failed jobs can be restarted. A nonempty frontier outbox is either drained/canceled or captured with its matching database state.
 
-After restore, Aegis verifies configuration and root identities, then performs reconciliation before declaring full readiness. Derivatives may be deleted and rebuilt.
+Originals alone do not restore accounts, grants, albums, tags, ratings, audit history, or trash manifests. PostgreSQL alone does not restore file bytes. The quiesced backup mode refuses new uploads/mutations, lets active operations reach safe checkpoints, fences workers, and records scan/operation epochs. Application quiescence does not stop host, SMB, or NFS writers: an application-consistent backup also requires those writers to stop or coordinated filesystem/database snapshots at one boundary.
+
+If external writers cannot be quiesced, the backup is labeled crash-consistent rather than application-consistent. Restore then verifies configuration and root identities, invalidates incomplete operations/uploads whose staged bytes are absent, and completes a full reconciliation before declaring readiness. Derivatives may be deleted and rebuilt.
 
 ### 16.4 Upgrades
 
@@ -644,6 +743,7 @@ Release upgrades document supported source versions, database backup, migration 
 - additive grant calculation and permission-query construction;
 - signed cursor binding, ordering, expiration, and tamper rejection;
 - operation state-machine transitions and idempotency;
+- permission matrices, authorization epochs, attempt fencing, and stale-worker rejection;
 - source fingerprints and derivative invalidation;
 - retry, lease, and scan-generation invariants.
 
@@ -657,19 +757,27 @@ Integration tests use real PostgreSQL and temporary filesystems to cover:
 - upload resume/finalization/conflict;
 - trash/restore/retention;
 - user/group/root permission isolation;
+- cross-root copy/move permission combinations and content-export boundaries;
+- grant/account/root-mode revocation after enqueue and during a checkpointed operation;
 - event plus scan convergence;
+- focused-event versus scan-finalization races;
 - external changes and missing mounts;
-- concurrent mutations and stale preconditions;
+- path/object replacement between acceptance and the irreversible primitive;
+- concurrent mutations, expired-lease overlap, and stale preconditions;
+- duplicate/nested mount-slot aliases and cross-role root-identity mismatch;
+- per-role database privileges, volume visibility, and internal-network egress denial;
+- frontier outbox scoping, provider allowlisting, and absence of root mounts in the connector;
 - crash points between every filesystem/database transition;
+- file/directory synchronization and copy-to-trash durability sequencing;
 - gateway authorization and byte ranges.
 
 ### 18.3 Hostile content tests
 
-A maintained corpus covers malformed images, videos, PDFs, encodings, huge dimensions, deep metadata, decompression bombs, long CSV rows, formula-like cells, MIME mismatches, and processor timeouts. Tests assert resource bounds and that failures do not grant content access or corrupt originals.
+A maintained corpus covers malformed images, videos, PDFs, encodings, huge dimensions, deep metadata, decompression bombs, long CSV rows, formula-like cells, MIME mismatches, and processor timeouts. Tests assert resource bounds, job-scoped sandbox mounts, lack of database/network access in tool subprocesses, and that failures do not grant content access or corrupt originals.
 
 ### 18.4 Browser and accessibility tests
 
-Playwright runs mobile-size Chromium and WebKit journeys for login, root isolation, 50,000-entry virtual browsing, upload interruption/resume, file commands, trash/restore, photo gestures, video playback/fallback, PDF/text/CSV viewing, transfers, dark theme, keyboard navigation, accessibility semantics, and logout cache clearing.
+Playwright runs mobile-size Chromium and WebKit journeys for login, root isolation, 50,000-entry virtual browsing, upload interruption/resume, file commands, trash/restore, photo gestures, video playback/fallback, PDF/text/CSV viewing, transfers, dark theme, keyboard navigation, and accessibility semantics. Cache-isolation journeys explicitly cover user A viewing private thumbnails/originals, then logout, session expiry, grant revocation, back/forward navigation, and user B login; no A content may render without successful B authorization.
 
 ### 18.5 Performance tests
 
@@ -688,7 +796,7 @@ Query plans and index sizes are captured with results.
 
 ### 18.6 Failure injection and recovery drills
 
-Tests restart PostgreSQL and workers, revoke filesystem permissions, fill staging/derivative destinations, lose watcher events, interrupt copies, replace a root mount, corrupt job payloads, and restore from backup. Phase 6 requires a documented operator-run recovery drill, not only mocked tests.
+Tests restart PostgreSQL and workers, revoke grants and filesystem permissions, expire a lease while its old worker is paused, fill staging/derivative destinations, lose watcher events, interrupt every copy/publish/sync step, replace or alias a root mount, corrupt job payloads, and restore from both application-consistent and crash-consistent backups. Phase 6 requires a documented operator-run recovery drill, not only mocked tests.
 
 ## 19. Delivery roadmap
 
@@ -700,19 +808,19 @@ Gate: reviewed documents, recoverable legacy state, and a clean documentation ch
 
 ### Phase 1 — Secure platform foundation
 
-Create the Django/React/PostgreSQL/Compose skeleton, same-origin credential sessions, bootstrap administration, users/groups, root registration, additive grants, opaque IDs, job/operation primitives, health, migrations, and CI. The UI is the approved dark mobile shell, not yet a live large-directory browser.
+Create the Django/React/PostgreSQL/Compose skeleton, same-origin credential sessions, bootstrap administration, users/groups, deployment mount slots, root activation, additive grants, opaque IDs, authorization epochs, fenced job/operation primitives, per-role database credentials and volumes, no-egress networks, health, migrations, and CI. The UI is the approved dark mobile shell, not yet a live large-directory browser.
 
 Gate: through the deployed gateway, a user can sign in and see only authorized root shells; unauthorized metadata and delivery attempts fail; core checks pass.
 
 ### Phase 2 — Scalable drive core
 
-Build checkpointed indexing, watcher ingestion, cursor browsing, filename search, resumable uploads, full file commands, root-local trash, reconciliation, audit, progress, and the performance fixture.
+Build checkpointed indexing, watcher ingestion, cursor browsing, filename search, resumable uploads, full file commands, root-local trash, reconciliation, audit, progress, the functional mobile Files/Transfers UI, and the performance fixture.
 
-Gate: complete drive workflows meet correctness and server-latency budgets with 1M total entries and a 50K-entry folder.
+Gate: complete UI and API drive workflows meet correctness and server-latency budgets with 1M total entries and a 50K-entry folder.
 
 ### Phase 3 — Mobile media and documents
 
-Build the production PWA navigation, thumbnails, timeline, photo/video viewers, range/HLS delivery, and PDF/text/CSV viewers.
+Complete installable PWA navigation and build thumbnails, timeline, photo/video viewers, range/HLS delivery, and PDF/text/CSV viewers on the Files/Transfers foundation from Phase 2.
 
 Gate: mobile Chromium/WebKit, accessibility, payload, LCP, and INP journeys pass under representative data.
 
@@ -747,8 +855,12 @@ WebDAV/sync, historical versions, controlled sharing, 10M+ certification, storag
 | A 50K-entry directory overwhelms API or browser | Compound indexes, keyset cursors, bounded DTOs, no exact counts, and UI virtualization |
 | Media/AI workers starve interactive traffic | Separate roles, priority queues, concurrency/I/O limits, and browse-under-load gates |
 | Filesystem/database split creates half-completed commands | Durable idempotent journal, filesystem-first recorded transitions, destination-local temporary publication, and reconciliation |
+| A queued or expired-lease operation outlives its authority | Execution-time grant/root/object checks, authorization epochs, attempt fencing, and short live advisory locks |
+| Cross-filesystem move loses a concurrent source change | Verified/synchronized destination, source re-read, recoverable trash move, and copy-only degradation |
 | Network filesystem semantics differ | Capability detection, conservative fallbacks, periodic scans, explicit documentation, and integration fixtures |
 | Multi-user path escape or metadata leak | Opaque IDs, descriptor-relative containment, query-bound permissions, protected delivery, and adversarial tests |
+| Browser cache exposes one user's media to another | No-store for private data, forced thumbnail revalidation, session/authorization cache namespaces, and A-to-B browser tests |
+| Hostile processor reaches unrelated data or network | Per-job sandboxes, role-scoped mounts/database principals, internal networks, and an isolated frontier connector |
 | Cloud AI violates privacy expectations | Disabled by default, separate egress profile, per-capability opt-in, payload minimization, and audit |
 | Derivative growth consumes storage | Content-addressed manifests, quotas/watermarks, eviction, and reproducibility |
 | All-at-once rewrite stalls | Phase-specific plans, first-usable drive gate in Phase 2, and acceptance criteria in the canonical README |

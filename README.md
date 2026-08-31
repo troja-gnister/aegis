@@ -2,7 +2,7 @@
 
 Aegis is a planned self-hosted, mobile-first file drive and media library. It will combine the focused drive features of Nextcloud with the browsing, filtering, and local organization features of PhotoPrism, without taking ownership of users' files or requiring cloud AI.
 
-> **Project status: approved design; rewrite not yet implemented.** The current source tree is the legacy Arch Linux hardening CLI at commit `1cb4277`. Phase 0 will preserve that release with a named Git tag, and Phase 1 will replace the active tree with the web platform foundation. Do not treat the current binary as the product described below.
+> **Project status: architecture approved; written checkpoint awaiting final review; rewrite not yet implemented.** The current source tree is the legacy Arch Linux hardening CLI at commit `1cb4277`. Phase 0 will preserve that release with a named Git tag, and Phase 1 will replace the active tree with the web platform foundation. Do not treat the current binary as the product described below.
 
 The canonical platform design is [docs/superpowers/specs/2026-08-31-aegis-platform-rewrite-design.md](docs/superpowers/specs/2026-08-31-aegis-platform-rewrite-design.md).
 
@@ -40,54 +40,71 @@ The first release does not include collaborative editing, desktop sync, WebDAV, 
 | File operations role | Upload publication, copy/move/delete work, trash retention, and crash recovery on writable roots |
 | Indexer role | Initial scans, filesystem events, checkpointed reconciliation, and catalog repair |
 | Media role | Thumbnails, metadata, PDF/text/CSV extraction, video probing, and compatibility transcodes |
-| Optional AI role | CPU or GPU local inference and explicitly enabled frontier-provider tasks |
+| Optional local AI role | CPU or GPU inference and preparation of explicitly approved provider payloads |
+| Optional frontier connector | Audited, allowlisted provider egress without original-root mounts |
 | Delivery gateway | Static assets, request limits, authorized byte-range delivery, and an optional automatic-TLS profile |
 
-All application roles will ship from one versioned codebase and image where practical. PostgreSQL is the initial coordination and job store; Redis is not a required dependency. Originals stay on explicitly mounted roots. Generated assets, upload staging, and model data live in an Aegis-managed volume, while recoverable deletions use hidden trash inside each writable root.
+All application roles will ship from one versioned codebase and image where practical. PostgreSQL is the initial coordination and job store; Redis is not a required dependency. Originals stay on explicitly mounted roots. Derivatives, upload staging, model data, and quarantine use separate role-scoped Aegis volumes, while recoverable deletions use hidden trash inside each writable root.
 
 ## Feature matrix
 
-Statuses describe implementation, not design approval: **planned** means specified but not built; **deferred** means intentionally outside the v1 roadmap. Every feature pull request must update its row.
+Statuses describe implementation, not design approval:
 
-| ID | Capability | Status | Target |
-| --- | --- | --- | --- |
-| PLAT-001 | Docker Compose deployment with gateway, web, workers, PostgreSQL, and explicit roots | Planned | Phase 1 |
-| PLAT-002 | Health/readiness checks, structured logs, worker heartbeat, queue and scan visibility | Planned | Phase 1, hardened in Phase 6 |
-| AUTH-001 | Credential login with Argon2id and revocable server-side sessions | Planned | Phase 1 |
-| AUTH-002 | Multiple users and groups with administrative management | Planned | Phase 1 |
-| AUTH-003 | Additive per-user/group root grants and operation-level permissions | Planned | Phase 1 |
-| AUTH-004 | Optional administrator-enforced TOTP | Planned | Phase 6 |
-| FILE-001 | Indexed, virtualized file browser with stable cursor pagination | Planned | Phase 2 |
-| FILE-002 | Multiple mounted logical roots with safe path containment | Planned | Phase 1–2 |
-| FILE-003 | Resumable uploads with staging, progress, and conflict handling | Planned | Phase 2 |
-| FILE-004 | Create folder, rename, move, copy, and idempotent operation recovery | Planned | Phase 2 |
-| FILE-005 | Authorized downloads and browser-compatible byte-range streaming | Planned | Phase 2 |
-| FILE-006 | Root-local recycle bin, restore, and configurable retention | Planned | Phase 2 |
-| FILE-007 | Filesystem event ingestion plus checkpointed full reconciliation | Planned | Phase 2 |
-| FILE-008 | Permission-safe filename and path search | Planned | Phase 2 |
-| UX-001 | Installable dark-first mobile PWA with Files, Photos, Search, and More navigation | Planned | Phase 3 |
-| UX-002 | Persistent resumable transfer manager and live job progress | Planned | Phase 2–3 |
-| MEDIA-001 | Responsive thumbnails, EXIF metadata, video posters, and media probing | Planned | Phase 3 |
-| MEDIA-002 | Photo timeline, filters, favorites, and fast virtualized grids | Planned | Phase 3–4 |
-| MEDIA-003 | Touch-oriented photo and video viewing | Planned | Phase 3 |
-| MEDIA-004 | Original video range streaming with cached HLS fallback when required | Planned | Phase 3 |
-| DOC-001 | Progressive PDF viewing, page thumbnails, and extracted-text search | Planned | Phase 3–4 |
-| DOC-002 | Escaped, chunked text viewing with encoding detection | Planned | Phase 3 |
-| DOC-003 | Server-paged CSV viewing with bounded filtering | Planned | Phase 3 |
-| ORG-001 | Albums, tags, ratings, favorites, and duplicate candidates | Planned | Phase 4 |
-| SEARCH-001 | Permission-safe metadata, full-text, and combined search | Planned | Phase 4 |
-| AI-001 | Optional local CPU embeddings, OCR, labels, and captions | Planned | Phase 5 |
-| AI-002 | Optional GPU acceleration using a deployment profile | Planned | Phase 5 |
-| AI-003 | Semantic search and virtual smart albums with provenance and confidence | Planned | Phase 5 |
-| AI-004 | Explicit per-capability frontier API connector with audited egress | Planned | Phase 5 |
-| SEC-001 | Hardened internet-facing defaults, least-privilege containers, and safe content handling | Planned | Phase 1, audited in Phase 6 |
-| SEC-002 | Audit trail for authentication, grants, file mutations, administration, and cloud AI use | Planned | Phase 1–2 |
-| PERF-001 | Automated 1,000,000-entry and 50,000-entry-folder performance suite | Planned | Phase 2, enforced thereafter |
-| OPS-001 | Documented backup, restore, upgrade, failure-injection, and recovery workflows | Planned | Phase 6 |
-| EXT-001 | WebDAV and desktop synchronization | Deferred | Later |
-| EXT-002 | Historical file versions and controlled sharing | Deferred | Later |
-| EXT-003 | Certified 10,000,000+ entry operation and storage adapters | Deferred | Later |
-| EXT-004 | Collaborative editing | Deferred | Later |
+- **Planned:** specified but implementation has not started.
+- **In progress:** an active bounded plan or pull request is delivering it.
+- **Implemented:** code and scoped tests landed, but the roadmap acceptance gate has not passed.
+- **Verified:** the acceptance evidence and applicable phase gate passed.
+- **Deferred:** intentionally outside the v1 roadmap.
+
+Every feature pull request must update its row. Implemented and Verified rows link their pull request, test report, benchmark, or recovery evidence; bundled work does not advance unrelated rows.
+
+| ID | Capability | Status | Target | Evidence |
+| --- | --- | --- | --- | --- |
+| PLAT-001 | Docker Compose deployment with gateway, web, workers, PostgreSQL, and explicit roots | Planned | Phase 1 | — |
+| PLAT-002 | Dependency-aware liveness, readiness, and schema gates | Planned | Phase 1 | — |
+| OPS-002 | Structured logs, worker heartbeat, queue age, scan progress, and disk-pressure visibility | Planned | Phase 1 | — |
+| AUTH-001 | Credential login with Argon2id and revocable server-side sessions | Planned | Phase 1 | — |
+| AUTH-002 | Multiple users and groups with administrative management | Planned | Phase 1 | — |
+| AUTH-003 | Additive per-user/group root grants with explicit cross-root operation rules | Planned | Phase 1 | — |
+| AUTH-004 | Optional administrator-enforced TOTP | Planned | Phase 6 | — |
+| FILE-001 | Indexed directory API with stable keyset cursor pagination | Planned | Phase 2 | — |
+| FILE-002 | Deployment-declared mount slots, logical roots, and safe path containment | Planned | Phase 1 | — |
+| FILE-003 | Resumable uploads with staging, progress, and conflict handling | Planned | Phase 2 | — |
+| FILE-004 | Create folder, rename, move, copy, and idempotent operation recovery | Planned | Phase 2 | — |
+| FILE-005 | Authorized downloads and browser-compatible byte-range streaming | Planned | Phase 2 | — |
+| FILE-006 | Root-local recycle bin, restore, and configurable retention | Planned | Phase 2 | — |
+| FILE-007 | Filesystem event ingestion plus checkpointed full reconciliation | Planned | Phase 2 | — |
+| FILE-008 | Permission-safe filename and path search | Planned | Phase 2 | — |
+| UX-001 | Dark responsive authenticated application shell | Planned | Phase 1 | — |
+| UX-002 | Virtualized mobile Files UI and persistent resumable transfer manager | Planned | Phase 2 | — |
+| UX-003 | Installable PWA with Files, Photos, Search, and More navigation | Planned | Phase 3 | — |
+| UX-004 | Reconnectable server-sent operation, transfer, and job progress | Planned | Phase 2 | — |
+| MEDIA-001 | Responsive thumbnails, video posters, and media probing | Planned | Phase 3 | — |
+| MEDIA-002 | Keyset photo timeline, date/type filters, and virtualized grids | Planned | Phase 3 | — |
+| MEDIA-003 | Touch-oriented photo and video viewing | Planned | Phase 3 | — |
+| MEDIA-004 | Original video range streaming with cached HLS fallback when required | Planned | Phase 3 | — |
+| DOC-001 | Progressive PDF viewer and page thumbnails | Planned | Phase 3 | — |
+| DOC-002 | Escaped, chunked text viewing with encoding detection | Planned | Phase 3 | — |
+| DOC-003 | Server-paged CSV viewing with bounded filtering | Planned | Phase 3 | — |
+| META-001 | EXIF/GPS/date/type/size extraction and filtering | Planned | Phase 4 | — |
+| ORG-001 | Albums, tags, ratings, favorites, and duplicate candidates | Planned | Phase 4 | — |
+| SEARCH-001 | Permission-safe combined filename and metadata search | Planned | Phase 4 | — |
+| SEARCH-002 | Extracted PDF/text full-text search | Planned | Phase 4 | — |
+| AI-001 | Optional local CPU embeddings, OCR, labels, and captions | Planned | Phase 5 | — |
+| AI-002 | Optional GPU acceleration using a deployment profile | Planned | Phase 5 | — |
+| AI-003 | Semantic search and virtual smart albums with provenance and confidence | Planned | Phase 5 | — |
+| AI-004 | Explicit per-capability frontier API connector | Planned | Phase 5 | — |
+| SEC-001 | Hardened same-origin edge, least-privilege containers, and safe content handling | Planned | Phase 1 | — |
+| SEC-002 | Authentication, grant, and administration audit trail | Planned | Phase 1 | — |
+| SEC-003 | File mutation, trash, and restore audit trail | Planned | Phase 2 | — |
+| SEC-004 | Frontier egress audit trail and isolation tests | Planned | Phase 5 | — |
+| SEC-005 | Release security/rate-limit review and hostile-content gate | Planned | Phase 6 | — |
+| PERF-001 | Automated 1,000,000-entry and 50,000-entry-folder performance suite | Planned | Phase 2 | — |
+| OPS-001 | Documented backup, restore, upgrade, failure-injection, and recovery workflows | Planned | Phase 6 | — |
+| EXT-001 | WebDAV and desktop synchronization | Deferred | Later | — |
+| EXT-002 | Historical file versions and controlled sharing | Deferred | Later | — |
+| EXT-003 | Certified 10,000,000+ entry operation and storage adapters | Deferred | Later | — |
+| EXT-004 | Collaborative editing | Deferred | Later | — |
 
 ## Roadmap
 
@@ -96,9 +113,9 @@ The current focus is **Phase 0**. A phase is complete only when its acceptance g
 | Phase | Deliverable | Acceptance gate | Status |
 | --- | --- | --- | --- |
 | 0 — Design and checkpoint | Canonical README/specification, legacy release tag, and first bounded implementation plan | Design reviewed, legacy state recoverable by name, and clean documentation checkpoint | In progress |
-| 1 — Secure foundation | Django/React/PostgreSQL/Compose skeleton, same-origin auth, users/groups, roots/grants, job and operation primitives, health, and CI | A user can sign in and reach only an authorized root shell through the deployed stack | Planned |
-| 2 — Scalable drive core | Indexer, cursor browser, search, resumable upload, full mutations, trash, reconciliation, and audit | Required workflows pass against 1M total entries and a 50K-entry folder | Planned |
-| 3 — Mobile media and documents | Dark PWA, thumbnails, photo timeline, photo/video viewers, range/HLS delivery, and PDF/text/CSV viewers | Mobile interaction budgets and Chromium/WebKit browser journeys pass | Planned |
+| 1 — Secure foundation | Django/React/PostgreSQL/Compose skeleton, same-origin auth, role-scoped credentials/volumes, mount slots, users/groups/grants, fenced job/operation primitives, health, and CI | A user can sign in and reach only an authorized root shell through the least-privilege deployed stack | Planned |
+| 2 — Scalable drive core | Indexer, cursor browser, functional mobile Files/transfers UI, search, resumable upload, full mutations, trash, reconciliation, and audit | Complete UI and API workflows pass against 1M total entries and a 50K-entry folder | Planned |
+| 3 — Mobile media and documents | Installable PWA navigation, thumbnails, photo timeline, photo/video viewers, range/HLS delivery, and PDF/text/CSV viewers | Mobile interaction budgets and Chromium/WebKit browser journeys pass | Planned |
 | 4 — Search and human organization | Rich metadata, albums, tags, ratings, favorites, duplicates, and full-text search | Combined search remains correct and permission-safe across users and roots | Planned |
 | 5 — Local intelligence | CPU AI, optional GPU, semantic search, provenance, smart albums, and opt-in frontier providers | Files remain fully usable with AI disabled or failed; no unapproved egress occurs | Planned |
 | 6 — Release hardening | Backup/restore drills, hostile media tests, failure injection, security review, upgrade path, and operations guide | A documented recovery exercise and release checklist pass for v1 | Planned |
@@ -107,6 +124,8 @@ The current focus is **Phase 0**. A phase is complete only when its acceptance g
 ## Performance contract
 
 Initial measurements target an x86 home server or NAS with 4–8 CPU cores, 8–16 GB RAM, PostgreSQL on local storage, and no required GPU.
+
+Acceptance uses the fixed [reference benchmark profile](docs/superpowers/specs/2026-08-31-aegis-platform-rewrite-design.md#53-reference-benchmark-profile), including container memory limits, workload mix, storage calibration, and mobile network/device conditions.
 
 | Scenario | Budget |
 | --- | --- |
@@ -125,6 +144,7 @@ Directory APIs use bounded page sizes, compact list records, compound indexes, a
 - Filesystem operations stay beneath the authorized root; symlink following is disabled by default.
 - The gateway serves content only after short-lived internal authorization from Django.
 - Active or unknown content is downloaded as an attachment; browser-rendered text is escaped.
+- Originals and APIs are not stored in browser caches; authenticated thumbnails must revalidate against the current session and authorization epoch.
 - Secrets are injected through Docker secrets or protected configuration and are redacted from logs.
 - Containers run unprivileged with minimal mounts and capabilities; indexing, media, and AI roles never receive write access to originals.
 - Cloud model use is disabled by default, explicitly selected per capability, and recorded in the audit trail.
