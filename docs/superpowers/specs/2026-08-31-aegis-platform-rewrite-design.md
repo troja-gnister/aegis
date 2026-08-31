@@ -1,6 +1,6 @@
 # Aegis platform rewrite design
 
-**Status:** Architecture approved; written checkpoint awaiting final review
+**Status:** Approved
 
 **Date:** 2026-08-31
 
@@ -904,4 +904,4 @@ These sources inform implementation details but do not override this specificati
 
 The README feature matrix is the canonical public status. Every feature change updates its stable ID row and relevant phase status. Material changes to authorization, source-of-truth rules, mutation ordering, cloud egress, or performance budgets require an explicit design amendment before implementation.
 
-The immediate next artifact after review is a Phase 1 implementation plan. No later-phase code should be pulled into that plan merely because this platform specification describes it.
+The approved next artifact is the [Phase 1 secure platform foundation implementation plan](../plans/2026-08-31-phase-1-secure-platform-foundation.md). No later-phase code may be pulled into that plan merely because this platform specification describes it.

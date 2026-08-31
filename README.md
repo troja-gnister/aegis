@@ -2,9 +2,9 @@
 
 Aegis is a planned self-hosted, mobile-first file drive and media library. It will combine the focused drive features of Nextcloud with the browsing, filtering, and local organization features of PhotoPrism, without taking ownership of users' files or requiring cloud AI.
 
-> **Project status: architecture approved; written checkpoint awaiting final review; rewrite not yet implemented.** The current source tree is the legacy Arch Linux hardening CLI at commit `1cb4277`. Phase 0 will preserve that release with a named Git tag, and Phase 1 will replace the active tree with the web platform foundation. Do not treat the current binary as the product described below.
+> **Project status: Phase 0 design and legacy checkpoint verified; rewrite not yet implemented.** The current source tree remains the legacy Arch Linux hardening CLI, preserved as `legacy-hardening-cli-v0.1.0` at commit `1cb4277`. The approved Phase 1 plan will replace the active tree with the web platform foundation. Do not treat the current binary as the product described below.
 
-The canonical platform design is [docs/superpowers/specs/2026-08-31-aegis-platform-rewrite-design.md](docs/superpowers/specs/2026-08-31-aegis-platform-rewrite-design.md).
+The canonical platform design is [docs/superpowers/specs/2026-08-31-aegis-platform-rewrite-design.md](docs/superpowers/specs/2026-08-31-aegis-platform-rewrite-design.md). Its first bounded delivery plan is [docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md).
 
 ## Product charter
 
@@ -108,11 +108,11 @@ Every feature pull request must update its row. Implemented and Verified rows li
 
 ## Roadmap
 
-The current focus is **Phase 0**. A phase is complete only when its acceptance gate passes; landing some listed features is not enough.
+The current focus is **Phase 1 — Secure foundation**. Its plan is approved, but implementation has not started. A phase is complete only when its acceptance gate passes; landing some listed features is not enough.
 
 | Phase | Deliverable | Acceptance gate | Status |
 | --- | --- | --- | --- |
-| 0 — Design and checkpoint | Canonical README/specification, legacy release tag, and first bounded implementation plan | Design reviewed, legacy state recoverable by name, and clean documentation checkpoint | In progress |
+| 0 — Design and checkpoint | Canonical README/specification, legacy release tag, and first bounded implementation plan | Design reviewed, legacy state recoverable by name, and clean documentation checkpoint | Verified |
 | 1 — Secure foundation | Django/React/PostgreSQL/Compose skeleton, same-origin auth, role-scoped credentials/volumes, mount slots, users/groups/grants, fenced job/operation primitives, health, and CI | A user can sign in and reach only an authorized root shell through the least-privilege deployed stack | Planned |
 | 2 — Scalable drive core | Indexer, cursor browser, functional mobile Files/transfers UI, search, resumable upload, full mutations, trash, reconciliation, and audit | Complete UI and API workflows pass against 1M total entries and a 50K-entry folder | Planned |
 | 3 — Mobile media and documents | Installable PWA navigation, thumbnails, photo timeline, photo/video viewers, range/HLS delivery, and PDF/text/CSV viewers | Mobile interaction budgets and Chromium/WebKit browser journeys pass | Planned |
@@ -151,10 +151,10 @@ Directory APIs use bounded page sizes, compact list records, compound indexes, a
 
 ## Development and documentation
 
-The web rewrite does not have runnable development commands yet. The first implementation plan will cover only Phase 1 after this design is reviewed. Subsequent phases receive their own bounded plans so scale, security, and recovery gates stay visible.
+The web rewrite does not have runnable development commands yet. The approved Phase 1 plan establishes them without pulling later drive, media, document, or AI work forward. Subsequent phases receive their own bounded plans so scale, security, and recovery gates stay visible.
 
 - [Approved platform design](docs/superpowers/specs/2026-08-31-aegis-platform-rewrite-design.md)
-- Future implementation plans: `docs/superpowers/plans/`
+- [Approved Phase 1 implementation plan](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md)
 - License: [MIT](LICENSE)
 
 When implementation starts, changes must include tests appropriate to their risk, preserve the stable feature IDs above, and update both the feature matrix and current roadmap status in the same pull request.
