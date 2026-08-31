@@ -265,14 +265,17 @@ There are no deny rules in v1. An administrator expresses a subtree boundary by 
 
 Operation authorization is evaluated on both sides of an operation:
 
-| Operation | Source requirement | Destination requirement |
-| --- | --- | --- |
-| Rename or move within one root | rename/move | the same root grant and a writable destination |
-| Copy within one root | copy plus download/export | upload/create on the same root |
-| Copy across roots | copy plus download/export on the source root | upload/create on the destination root |
-| Move across roots | copy, download/export, and delete/restore on the source root | upload/create on the destination root |
-| Restore to original location | delete/restore | writable original root |
-| Restore to a different folder | delete/restore | upload/create on the destination root |
+| Operation | Source requirement | Destination requirement | Replacing an existing destination |
+| --- | --- | --- | --- |
+| Upload or create folder | none | upload/create | also delete/restore on destination plus its exact version |
+| Rename or move within one root | rename/move | the same active writable root | also delete/restore on destination plus its exact version |
+| Copy within one root | copy plus download/export | upload/create on the same root | also delete/restore on destination plus its exact version |
+| Copy across roots | copy plus download/export on the source root | upload/create on the destination root | also delete/restore on destination plus its exact version |
+| Move across roots | copy, download/export, and delete/restore on the source root | upload/create on the destination root | also delete/restore on destination plus its exact version |
+| Restore to original location | delete/restore | the active writable original root | delete/restore already applies; exact destination version is still required |
+| Restore to another folder in the original root | delete/restore | upload/create on that same root | also delete/restore on destination plus its exact version |
+
+Initial requests never overwrite: a conflict returns HTTP 409. A separate explicit replace command rechecks the complete row above, requires the current destination version, and moves the old destination into root-local trash before publishing the replacement. Keep-both creates a new nonconflicting name and requires no replacement permission. Cross-root restore is forbidden in v1; the user restores within the original root and then requests the separately authorized cross-root copy or move.
 
 A cross-root move is always the authorized copy workflow followed by a recoverable source delete; it is never treated as a rename. Directory operations require the same permissions for every affected root. Preview/stream is content disclosure and cannot promise that a browser user is technically unable to save displayed bytes; the download/export permission controls explicit original delivery and operations that transfer complete content.
 
@@ -329,7 +332,7 @@ Cross-request browsing does not claim a database snapshot while external files a
 
 ### 8.3 Concurrency and preconditions
 
-Entry details include a version token. Destructive or overwriting commands include the expected version. A stale version returns HTTP 412. A destination-name conflict returns HTTP 409. Replace, keep-both, and cancel are explicit follow-up choices; the server never silently chooses one.
+Entry details include a version token. Destructive or overwriting commands include the expected version. A stale version returns HTTP 412. A destination-name conflict returns HTTP 409. Replace, keep-both, and cancel are explicit follow-up choices; the server never silently chooses one. Replace includes the destination's exact version, requires destination delete/restore permission in addition to the base operation matrix, and trashes the prior destination rather than permanently unlinking it.
 
 Every mutation has a client-generated idempotency key. A repeated key with the same principal and request hash returns the existing operation. Reusing a key for a different request returns a conflict.
 
@@ -758,6 +761,7 @@ Integration tests use real PostgreSQL and temporary filesystems to cover:
 - trash/restore/retention;
 - user/group/root permission isolation;
 - cross-root copy/move permission combinations and content-export boundaries;
+- replacement attempts with and without destination delete/restore permission, stale destination versions, and cross-root restore rejection;
 - grant/account/root-mode revocation after enqueue and during a checkpointed operation;
 - event plus scan convergence;
 - focused-event versus scan-finalization races;
