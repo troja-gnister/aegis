@@ -206,7 +206,7 @@ services:
       AEGIS_TLS_HOST: "${AEGIS_TLS_HOST:-}"
     networks: [edge, tls-hop]
     ports:
-      - "${AEGIS_HTTPS_PORT:-8443}:8443"
+      - "${AEGIS_HTTPS_PORT:-443}:8443"
     volumes:
       - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
@@ -231,7 +231,7 @@ services:
     user: "10001:10001"
     networks: [edge, tls-hop]
     ports:
-      - "${AEGIS_HTTPS_PORT:-8443}:8443"
+      - "${AEGIS_LOCAL_HTTPS_PORT:-8443}:8443"
     volumes:
       - ./deploy/caddy/Caddyfile.local:/etc/caddy/Caddyfile:ro
       - caddy-local-data:/data

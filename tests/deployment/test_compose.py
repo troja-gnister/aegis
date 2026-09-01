@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any, cast
 
@@ -20,6 +21,7 @@ CADDY_IMAGE = (
     "caddy:2.11.4-alpine@"
     "sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648"
 )
+PUBLIC_TLS_HOST = "files.operator-domain.dev"
 
 
 def rendered_compose(
@@ -240,9 +242,7 @@ def test_backend_network_is_internal_and_gateway_is_the_only_published_service()
 
 
 def test_tls_hop_is_private_alias_bound_and_trusted_by_web() -> None:
-    config = rendered_compose(
-        "tls", environment={"AEGIS_TLS_HOST": "files.example.test"}
-    )
+    config = rendered_compose("tls", environment={"AEGIS_TLS_HOST": PUBLIC_TLS_HOST})
     services = config["services"]
 
     assert config["networks"]["tls-hop"]["internal"] is True
@@ -256,26 +256,47 @@ def test_tls_hop_is_private_alias_bound_and_trusted_by_web() -> None:
     } == {"gateway", "caddy"}
     assert [publisher["target"] for publisher in services["gateway"]["ports"]] == [8080]
     assert services["web"]["environment"]["AEGIS_TRUST_PROXY_HEADERS"] == "true"
-    assert services["caddy"]["environment"]["AEGIS_TLS_HOST"] == "files.example.test"
+    assert services["caddy"]["environment"]["AEGIS_TLS_HOST"] == PUBLIC_TLS_HOST
 
 
 def test_production_and_local_tls_modes_have_distinct_issuers() -> None:
     production_path = REPOSITORY / "deploy" / "caddy" / "Caddyfile"
     local_path = REPOSITORY / "deploy" / "caddy" / "Caddyfile.local"
-    production = adapted_caddyfile(production_path, tls_host="files.example.test")
+    production = adapted_caddyfile(production_path, tls_host=PUBLIC_TLS_HOST)
     local = adapted_caddyfile(local_path)
     production_rendered = json.dumps(production, sort_keys=True)
     local_rendered = json.dumps(local, sort_keys=True)
 
     assert "internal" not in production_rendered
-    assert "files.example.test" in production_rendered
+    assert PUBLIC_TLS_HOST in production_rendered
     assert '"module": "internal"' in local_rendered
     assert "localhost" in local_rendered
 
 
+def test_production_tls_exposes_acme_port_and_local_tls_keeps_development_port() -> None:
+    production = rendered_compose(
+        "tls",
+        environment={"AEGIS_TLS_HOST": PUBLIC_TLS_HOST, "AEGIS_HTTPS_PORT": ""},
+    )["services"]["caddy"]
+    local = rendered_compose(
+        "tls-local",
+        environment={"AEGIS_HTTPS_PORT": "", "AEGIS_LOCAL_HTTPS_PORT": ""},
+    )["services"]["caddy-local"]
+    example_environment = (REPOSITORY / ".env.example").read_text(encoding="utf-8")
+
+    assert production["ports"] == [
+        {"mode": "ingress", "target": 8443, "published": "443", "protocol": "tcp"}
+    ]
+    assert local["ports"] == [
+        {"mode": "ingress", "target": 8443, "published": "8443", "protocol": "tcp"}
+    ]
+    assert "AEGIS_HTTPS_PORT=443\n" in example_environment
+    assert "AEGIS_LOCAL_HTTPS_PORT=8443\n" in example_environment
+
+
 def test_caddy_data_is_durable_and_runtime_identity_is_fixed() -> None:
     config = rendered_compose(
-        "tls", "tls-local", environment={"AEGIS_TLS_HOST": "files.example.test"}
+        "tls", "tls-local", environment={"AEGIS_TLS_HOST": PUBLIC_TLS_HOST}
     )
     services = config["services"]
     caddy = services["caddy"]
@@ -324,7 +345,24 @@ def test_base_profile_does_not_require_tls_host_but_production_startup_does() ->
     )
 
 
-@pytest.mark.parametrize("tls_host", [None, "localhost", "127.0.0.1", "files"])
+@pytest.mark.parametrize(
+    "tls_host",
+    [
+        None,
+        "localhost",
+        "127.0.0.1",
+        "files",
+        "files.example",
+        "files.example.test",
+        "files.example.invalid",
+        "FILES.EXAMPLE.TEST",
+        "files.example.com",
+        "-files.public.dev",
+        "files-.public.dev",
+        f"{'a' * 64}.public.dev",
+        "files.public.123",
+    ],
+)
 def test_production_caddy_start_rejects_non_public_hosts(
     tls_host: str | None,
 ) -> None:
@@ -348,6 +386,58 @@ def test_production_caddy_start_rejects_non_public_hosts(
     assert result.stderr == (
         "AEGIS_TLS_HOST must be set to a public DNS hostname for the tls profile\n"
     )
+
+
+def test_production_tls_profile_rejects_reserved_host_before_acme() -> None:
+    project = f"aegis-production-tls-probe-{uuid.uuid4().hex[:10]}"
+    compose = [
+        "docker",
+        "compose",
+        "--project-name",
+        project,
+        "--project-directory",
+        str(REPOSITORY),
+        "-f",
+        str(REPOSITORY / "compose.yaml"),
+        "--profile",
+        "tls",
+    ]
+    environment = os.environ | {"AEGIS_TLS_HOST": "files.example.test"}
+
+    try:
+        result = subprocess.run(
+            [
+                *compose,
+                "run",
+                "--build",
+                "--rm",
+                "--no-deps",
+                "caddy",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=environment,
+        )
+    finally:
+        subprocess.run(
+            [*compose, "down", "--volumes", "--remove-orphans"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=environment,
+        )
+
+    rendered = (result.stdout + result.stderr).lower()
+    assert result.returncode == 64
+    assert (
+        "aegis_tls_host must be set to a public dns hostname for the tls profile"
+        in rendered
+    )
+    assert "obtaining certificate" not in rendered
+    assert "acme" not in rendered
 
 
 def test_caddy_build_removes_unneeded_file_capability_without_weakening_policy() -> None:

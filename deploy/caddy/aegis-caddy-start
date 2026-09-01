@@ -8,24 +8,43 @@ fail_host() {
 }
 
 tls_host=${AEGIS_TLS_HOST:-}
+tls_host_normalized=$(printf '%s' "$tls_host" | tr '[:upper:]' '[:lower:]')
 
-case "$tls_host" in
+case "$tls_host_normalized" in
     "" | localhost | *.localhost | *:* | */* | *\\* | *_* | *" "* | .* | *. | *..*)
         fail_host
         ;;
 esac
 
-case "$tls_host" in
-    *.*) ;;
-    *) fail_host ;;
+case "$tls_host_normalized" in
+    local | *.local | test | *.test | invalid | *.invalid | example | *.example \
+        | internal | *.internal | onion | *.onion | home.arpa | *.home.arpa \
+        | example.com | *.example.com | example.net | *.example.net \
+        | example.org | *.example.org)
+        fail_host
+        ;;
 esac
 
-if ! printf '%s\n' "$tls_host" | grep -Eq \
-    '^[[:alnum:]]([[:alnum:].-]*[[:alnum:]])?$'; then
+if ! printf '%s\n' "$tls_host_normalized" | awk '
+    length($0) > 253 { exit 1 }
+    {
+        count = split($0, labels, ".")
+        if (count < 2) exit 1
+        for (label_index = 1; label_index <= count; label_index++) {
+            if (length(labels[label_index]) > 63 ||
+                labels[label_index] !~ /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/) exit 1
+        }
+    }
+'; then
     fail_host
 fi
 
-if printf '%s\n' "$tls_host" | grep -Eq '^[0-9.]+$'; then
+if printf '%s\n' "$tls_host_normalized" | grep -Eq '^[0-9.]+$'; then
+    fail_host
+fi
+
+top_level=${tls_host_normalized##*.}
+if ! printf '%s\n' "$top_level" | grep -Eq '[a-z]'; then
     fail_host
 fi
 

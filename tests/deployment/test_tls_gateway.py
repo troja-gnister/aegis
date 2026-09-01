@@ -112,7 +112,7 @@ class TlsStack:
             env=os.environ
             | {
                 "AEGIS_HTTP_PORT": str(self.http_port),
-                "AEGIS_HTTPS_PORT": str(self.https_port),
+                "AEGIS_LOCAL_HTTPS_PORT": str(self.https_port),
             },
             check=check,
             timeout=COMPOSE_TIMEOUT_SECONDS,
