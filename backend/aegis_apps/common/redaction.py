@@ -9,6 +9,8 @@ REDACTED = "[REDACTED]"
 _MAX_DEPTH = 8
 _MAX_ITEMS = 256
 _MAX_TEXT = 2_048
+_MAX_KEY = 256
+_MAX_KEY_SCAN = 4_096
 _SENSITIVE_MARKERS = (
     "password",
     "secret",
@@ -19,6 +21,7 @@ _SENSITIVE_MARKERS = (
     "filename",
     "content",
     "apikey",
+    "credential",
     "username",
     "email",
 )
@@ -77,11 +80,21 @@ def _redact(
                 state.remaining -= 1
                 if not isinstance(raw_key, str):
                     key = f"[UNSAFE_KEY:{_type_name(raw_key)}]"
+                    sensitive = True
                 else:
-                    key = _bounded_text(raw_key)
+                    if len(raw_key) > _MAX_KEY_SCAN:
+                        key = "[OVERSIZED_KEY]"
+                        sensitive = True
+                    else:
+                        sensitive = _sensitive(raw_key)
+                        if len(raw_key) > _MAX_KEY:
+                            key = f"{raw_key[:_MAX_KEY]}[TRUNCATED_KEY]"
+                            sensitive = True
+                        else:
+                            key = raw_key
                 result[key] = (
                     REDACTED
-                    if _sensitive(key)
+                    if sensitive
                     else _redact(
                         child,
                         state=state,

@@ -23,4 +23,4 @@ COPY --from=build /app/.venv /app/.venv
 COPY --from=build /app/backend /app/backend
 USER 10001:10001
 
-CMD ["uvicorn", "aegis.asgi:application", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "aegis.asgi:application", "--host", "0.0.0.0", "--port", "8000", "--log-config", "/app/backend/aegis/uvicorn_logging.json"]

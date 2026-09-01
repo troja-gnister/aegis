@@ -75,7 +75,15 @@ services:
 
   web:
     <<: *backend-runtime
-    command: [uvicorn, aegis.asgi:application, --host, 0.0.0.0, --port, "8000"]
+    command:
+      - uvicorn
+      - aegis.asgi:application
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --log-config
+      - /app/backend/aegis/uvicorn_logging.json
     environment:
       <<: *backend-environment
       AEGIS_DB_USER: aegis_web

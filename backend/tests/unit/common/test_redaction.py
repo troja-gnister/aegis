@@ -10,6 +10,7 @@ def test_recursive_redaction_removes_paths_and_credentials() -> None:
         {
             "password": "secret",
             "API-Key": "key",
+            "credentials": "plural-secret",
             "nested": [{"Auth_orization": "bearer"}, {"file-name": "/private"}],
             "ok": 3,
         }
@@ -18,6 +19,7 @@ def test_recursive_redaction_removes_paths_and_credentials() -> None:
     assert value == {
         "password": "[REDACTED]",
         "API-Key": "[REDACTED]",
+        "credentials": "[REDACTED]",
         "nested": [
             {"Auth_orization": "[REDACTED]"},
             {"file-name": "[REDACTED]"},
@@ -52,3 +54,15 @@ def test_redaction_never_calls_unknown_object_text() -> None:
             raise AssertionError("must not stringify unknown objects")
 
     assert redact({"value": Unsafe()}) == {"value": "[UNSAFE:Unsafe]"}
+
+
+def test_sensitive_tail_after_display_key_bound_is_redacted_without_oversized_key() -> None:
+    key = f"{'x' * 4_096}-credentials"
+    canary = "must-never-survive-redaction"
+
+    rendered = json.dumps(redact({key: canary}), ensure_ascii=True)
+
+    assert key not in rendered
+    assert canary not in rendered
+    assert "[REDACTED]" in rendered
+    assert len(rendered.encode("utf-8")) < 1_024

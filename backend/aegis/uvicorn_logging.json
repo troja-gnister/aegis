@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "disable_existing_loggers": false,
+  "formatters": {
+    "aegis_json": {
+      "()": "aegis_apps.common.logging.BoundedJSONFormatter"
+    }
+  },
+  "handlers": {
+    "stdout": {
+      "class": "logging.StreamHandler",
+      "formatter": "aegis_json",
+      "stream": "ext://sys.stdout"
+    },
+    "stderr": {
+      "class": "logging.StreamHandler",
+      "formatter": "aegis_json",
+      "stream": "ext://sys.stderr"
+    }
+  },
+  "root": {
+    "handlers": ["stderr"],
+    "level": "INFO"
+  },
+  "loggers": {
+    "uvicorn": {
+      "handlers": ["stderr"],
+      "level": "INFO",
+      "propagate": false
+    },
+    "uvicorn.error": {
+      "handlers": ["stderr"],
+      "level": "INFO",
+      "propagate": false
+    },
+    "uvicorn.access": {
+      "handlers": ["stdout"],
+      "level": "INFO",
+      "propagate": false
+    }
+  }
+}

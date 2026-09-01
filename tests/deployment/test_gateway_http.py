@@ -26,7 +26,7 @@ NGINX_IMAGE = (
     "nginxinc/nginx-unprivileged:1.30.4-alpine@"
     "sha256:45ce1e2e699234253d1def7baa96218a5d00b498d1ba0cbb1a17b6bdf73d1351"
 )
-SAFE_REQUEST_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+SAFE_REQUEST_ID = re.compile(r"[A-Za-z0-9_-]{8,64}\Z")
 SECURITY_HEADERS = {
     "Content-Security-Policy": (
         "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
@@ -52,6 +52,7 @@ class HttpResponse:
 class GatewayHarness:
     base_url: str
     resource_prefix: str
+    container_name: str
 
     def request(
         self,
@@ -92,7 +93,7 @@ def wait_for_gateway(base_url: str, container_name: str) -> None:
     last_error: Exception | None = None
     while time.monotonic() < deadline:
         try:
-            with urllib.request.urlopen(f"{base_url}/", timeout=1) as response:
+            with urllib.request.urlopen(f"{base_url}/api/request-id", timeout=1) as response:
                 if response.status == 200:
                     return
         except (OSError, urllib.error.URLError) as error:
@@ -184,7 +185,7 @@ def gateway(tmp_path_factory: pytest.TempPathFactory) -> Iterator[GatewayHarness
         assert port.isdecimal() and int(port) > 0
         base_url = f"http://127.0.0.1:{port}"
         wait_for_gateway(base_url, gateway_name)
-        yield GatewayHarness(base_url, prefix)
+        yield GatewayHarness(base_url, prefix, gateway_name)
     finally:
         remove_container(gateway_name)
         remove_container(upstream_name)
@@ -210,14 +211,16 @@ def assert_private_no_store(response: HttpResponse) -> None:
 
 
 def test_valid_bounded_request_ids_are_preserved(gateway: GatewayHarness) -> None:
-    for request_id in ("Client-123._:ok", "A" + "b" * 127):
+    for request_id in ("Client-123_ok", "A" + "b" * 63):
         response = gateway.request("/api/request-id", headers={"X-Request-ID": request_id})
 
         assert response.status == 200
         assert response.json()["request_id"] == request_id
 
 
-@pytest.mark.parametrize("request_id", [None, "invalid request id", "a" * 129])
+@pytest.mark.parametrize(
+    "request_id", [None, "short", "invalid request id", "client.dot", "a" * 65]
+)
 def test_missing_or_invalid_request_ids_are_replaced_safely(
     gateway: GatewayHarness, request_id: str | None
 ) -> None:
@@ -229,7 +232,7 @@ def test_missing_or_invalid_request_ids_are_replaced_safely(
     assert response.status == 200
     assert isinstance(generated, str)
     assert SAFE_REQUEST_ID.fullmatch(generated)
-    assert len(generated) <= 128
+    assert len(generated) <= 64
     assert generated != request_id
 
 
@@ -309,3 +312,27 @@ def test_protected_aliases_cannot_be_requested_directly(
 
     assert response.status == 404
     assert_security_headers(response)
+
+
+def test_gateway_logs_omit_request_path_query_and_header_canaries(
+    gateway: GatewayHarness,
+) -> None:
+    canary = "nginx-credential-canary"
+    header_canary = "invalid credential canary"
+
+    response = gateway.request(
+        f"/missing/{canary}?credentials={canary}",
+        headers={"X-Request-ID": header_canary},
+    )
+    logs = docker("logs", gateway.container_name)
+    rendered = f"{logs.stdout}\n{logs.stderr}"
+    access_lines = [
+        line for line in rendered.splitlines() if '"logger":"nginx.access"' in line
+    ]
+
+    assert response.status == 200
+    assert canary not in rendered
+    assert header_canary not in rendered
+    assert access_lines
+    assert all(len(line.encode("utf-8")) < 512 for line in access_lines)
+    assert all(isinstance(json.loads(line), dict) for line in access_lines)

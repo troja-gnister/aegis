@@ -16,7 +16,10 @@ def database_status() -> tuple[bool, str]:
     except Exception:
         logger.exception(
             "Database readiness check failed",
-            extra={"safe_metadata": {"event": "health.readiness.database"}},
+            extra={
+                "event": "health.readiness.database",
+                "error_code": "DATABASE_UNAVAILABLE",
+            },
         )
         return False, "database unavailable"
     return True, "ok"

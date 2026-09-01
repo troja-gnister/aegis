@@ -54,6 +54,12 @@ def test_core_services_are_unprivileged_and_postgres_is_private() -> None:
         assert services[name]["security_opt"] == ["no-new-privileges:true"]
 
 
+def test_web_uses_bounded_log_config_from_process_start() -> None:
+    command = rendered_compose()["services"]["web"]["command"]
+
+    assert command[-2:] == ["--log-config", "/app/backend/aegis/uvicorn_logging.json"]
+
+
 def test_backend_network_is_internal_and_gateway_is_the_only_published_service() -> None:
     config = rendered_compose()
     services = config["services"]
