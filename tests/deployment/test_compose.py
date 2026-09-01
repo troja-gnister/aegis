@@ -1,6 +1,10 @@
 import json
+import os
 import subprocess
+import urllib.request
 from pathlib import Path
+
+import pytest
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 UV_IMAGE = (
@@ -13,18 +17,32 @@ PYTHON_IMAGE = (
 )
 
 
-def rendered_compose() -> dict:
+def rendered_compose(
+    *profiles: str, environment: dict[str, str] | None = None
+) -> dict:
+    profile_arguments = [argument for profile in profiles for argument in ("--profile", profile)]
     result = subprocess.run(
-        ["docker", "compose", "-f", "compose.yaml", "config", "--format", "json"],
+        [
+            "docker",
+            "compose",
+            *profile_arguments,
+            "-f",
+            "compose.yaml",
+            "config",
+            "--format",
+            "json",
+        ],
         check=True,
         capture_output=True,
         text=True,
+        env=os.environ | (environment or {}),
     )
     return json.loads(result.stdout)
 
 
 def test_nginx_configuration_parses_with_pinned_runtime() -> None:
     config = REPOSITORY / "deploy" / "nginx" / "nginx.conf"
+    server_config = REPOSITORY / "deploy" / "nginx" / "aegis-server.conf"
     image = (
         "nginxinc/nginx-unprivileged:1.30.4-alpine@"
         "sha256:45ce1e2e699234253d1def7baa96218a5d00b498d1ba0cbb1a17b6bdf73d1351"
@@ -37,8 +55,12 @@ def test_nginx_configuration_parses_with_pinned_runtime() -> None:
             "--rm",
             "--add-host",
             "web:127.0.0.1",
+            "--add-host",
+            "tls-gateway:127.0.0.1",
             "--volume",
             f"{config}:/etc/nginx/nginx.conf:ro",
+            "--volume",
+            f"{server_config}:/etc/nginx/aegis-server.conf:ro",
             "--entrypoint",
             "nginx",
             image,
@@ -59,6 +81,7 @@ def test_nginx_configuration_failure_remains_visible_to_ci(tmp_path: Path) -> No
         config.replace("worker_processes auto;", "invalid_directive;", 1),
         encoding="utf-8",
     )
+    server_config = REPOSITORY / "deploy" / "nginx" / "aegis-server.conf"
     image = (
         "nginxinc/nginx-unprivileged:1.30.4-alpine@"
         "sha256:45ce1e2e699234253d1def7baa96218a5d00b498d1ba0cbb1a17b6bdf73d1351"
@@ -71,8 +94,12 @@ def test_nginx_configuration_failure_remains_visible_to_ci(tmp_path: Path) -> No
             "--rm",
             "--add-host",
             "web:127.0.0.1",
+            "--add-host",
+            "tls-gateway:127.0.0.1",
             "--volume",
             f"{invalid}:/etc/nginx/nginx.conf:ro",
+            "--volume",
+            f"{server_config}:/etc/nginx/aegis-server.conf:ro",
             "--entrypoint",
             "nginx",
             image,
@@ -122,6 +149,42 @@ def test_web_uses_bounded_log_config_from_process_start() -> None:
     assert command[-2:] == ["--log-config", "/app/backend/aegis/uvicorn_logging.json"]
 
 
+def test_caddy_overwrites_forwarding_headers_without_deleting_replacements() -> None:
+    caddyfile = (REPOSITORY / "deploy" / "caddy" / "Caddyfile").read_text(
+        encoding="utf-8"
+    )
+
+    assert "header_up X-Forwarded-For {remote_host}" in caddyfile
+    assert "header_up X-Forwarded-Proto https" in caddyfile
+    assert "header_up -X-Forwarded-For" not in caddyfile
+    assert "header_up -X-Forwarded-Proto" not in caddyfile
+
+
+def test_web_healthcheck_connects_loopback_with_public_authority_and_https(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command = rendered_compose()["services"]["web"]["healthcheck"]["test"][-1]
+    captured: dict[str, object] = {}
+
+    def capture(request: urllib.request.Request, *, timeout: int) -> None:
+        captured["url"] = request.full_url
+        captured["host"] = request.get_header("Host")
+        captured["forwarded_proto"] = request.get_header("X-forwarded-proto")
+        captured["timeout"] = timeout
+
+    monkeypatch.setenv("AEGIS_PUBLIC_URL", "https://public.example.test:9443")
+    monkeypatch.setattr(urllib.request, "urlopen", capture)
+
+    exec(command, {})
+
+    assert captured == {
+        "url": "http://127.0.0.1:8000/health/live",
+        "host": "public.example.test:9443",
+        "forwarded_proto": "https",
+        "timeout": 2,
+    }
+
+
 def test_backend_network_is_internal_and_gateway_is_the_only_published_service() -> None:
     config = rendered_compose()
     services = config["services"]
@@ -142,12 +205,59 @@ def test_backend_network_is_internal_and_gateway_is_the_only_published_service()
     )
 
 
+def test_tls_hop_is_private_alias_bound_and_trusted_by_web() -> None:
+    config = rendered_compose("tls")
+    services = config["services"]
+
+    assert config["networks"]["tls-hop"]["internal"] is True
+    assert set(services["gateway"]["networks"]) == {"backend", "edge", "tls-hop"}
+    assert services["gateway"]["networks"]["tls-hop"]["aliases"] == ["tls-gateway"]
+    assert set(services["caddy"]["networks"]) == {"edge", "tls-hop"}
+    assert {
+        name
+        for name, service in services.items()
+        if "tls-hop" in service.get("networks", {})
+    } == {"gateway", "caddy"}
+    assert [publisher["target"] for publisher in services["gateway"]["ports"]] == [8080]
+    assert services["web"]["environment"]["AEGIS_TRUST_PROXY_HEADERS"] == "true"
+
+
+def test_caddy_tmpfs_ownership_follows_nondefault_runtime_ids() -> None:
+    caddy = rendered_compose(
+        "tls", environment={"AEGIS_UID": "21001", "AEGIS_GID": "21002"}
+    )["services"]["caddy"]
+
+    assert caddy["user"] == "21001:21002"
+    assert all("uid=21001" in item and "gid=21002" in item for item in caddy["tmpfs"])
+
+
+def test_caddy_build_removes_unneeded_file_capability_without_weakening_policy() -> None:
+    caddy = rendered_compose("tls")["services"]["caddy"]
+    dockerfile_path = REPOSITORY / "docker" / "caddy.Dockerfile"
+
+    assert dockerfile_path.is_file()
+    dockerfile = dockerfile_path.read_text(encoding="utf-8")
+    assert caddy["image"] == "aegis-caddy"
+    assert caddy["build"] == {
+        "context": str(REPOSITORY),
+        "dockerfile": "docker/caddy.Dockerfile",
+    }
+    assert caddy["cap_drop"] == ["ALL"]
+    assert caddy["security_opt"] == ["no-new-privileges:true"]
+    assert (
+        "FROM caddy:2.11.4-alpine@"
+        "sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648"
+    ) in dockerfile
+    assert "setcap -r /usr/bin/caddy" in dockerfile
+    assert "test -z \"$(getcap /usr/bin/caddy)\"" in dockerfile
+
+
 def test_only_core_gateway_joins_non_internal_edge_network_for_host_ingress() -> None:
     config = rendered_compose()
     services = config["services"]
 
     assert config["networks"]["edge"].get("internal", False) is False
-    assert set(services["gateway"]["networks"]) == {"backend", "edge"}
+    assert set(services["gateway"]["networks"]) == {"backend", "edge", "tls-hop"}
     for name, service in services.items():
         if name != "gateway" and not service.get("profiles"):
             assert "edge" not in service["networks"]

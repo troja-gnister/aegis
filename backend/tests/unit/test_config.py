@@ -176,6 +176,29 @@ def test_production_requires_https(tmp_path: Path) -> None:
         RuntimeConfig.from_environ(environ)
 
 
+def test_production_requires_allowed_hosts_to_match_public_hostname(
+    tmp_path: Path,
+) -> None:
+    secret = _write_secret(tmp_path / "secret")
+    environ = _production_environ(secret)
+    environ["AEGIS_ALLOWED_HOSTS"] = "other.example.test"
+
+    with pytest.raises(ConfigurationError, match="public URL hostname"):
+        RuntimeConfig.from_environ(environ)
+
+
+def test_production_allowed_host_leading_dot_matches_public_hostname(
+    tmp_path: Path,
+) -> None:
+    secret = _write_secret(tmp_path / "secret")
+    environ = _production_environ(secret)
+    environ["AEGIS_ALLOWED_HOSTS"] = ".example.test"
+
+    config = RuntimeConfig.from_environ(environ)
+
+    assert config.allowed_hosts == (".example.test",)
+
+
 @pytest.mark.parametrize(
     "public_url",
     [

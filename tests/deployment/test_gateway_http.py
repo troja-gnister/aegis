@@ -17,6 +17,7 @@ import pytest
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 NGINX_CONFIG = REPOSITORY / "deploy" / "nginx" / "nginx.conf"
+NGINX_SERVER_CONFIG = REPOSITORY / "deploy" / "nginx" / "aegis-server.conf"
 UPSTREAM_FIXTURE = Path(__file__).parent / "fixtures" / "gateway_upstream.py"
 PYTHON_IMAGE = (
     "python:3.13.15-slim-trixie@"
@@ -51,6 +52,7 @@ class HttpResponse:
 @dataclass(frozen=True)
 class GatewayHarness:
     base_url: str
+    internal_base_url: str
     resource_prefix: str
     container_name: str
 
@@ -60,9 +62,12 @@ class GatewayHarness:
         *,
         method: str = "GET",
         headers: Mapping[str, str] | None = None,
+        internal: bool = False,
     ) -> HttpResponse:
         request = urllib.request.Request(
-            f"{self.base_url}{path}", method=method, headers=dict(headers or {})
+            f"{self.internal_base_url if internal else self.base_url}{path}",
+            method=method,
+            headers=dict(headers or {}),
         )
         try:
             with urllib.request.urlopen(request, timeout=3) as response:
@@ -164,6 +169,8 @@ def gateway(tmp_path_factory: pytest.TempPathFactory) -> Iterator[GatewayHarness
             f"aegis.test.scope={suffix}",
             "--network",
             network_name,
+            "--network-alias",
+            "tls-gateway",
             "--user",
             "101:101",
             "--read-only",
@@ -179,8 +186,15 @@ def gateway(tmp_path_factory: pytest.TempPathFactory) -> Iterator[GatewayHarness
             "NGINX_ENTRYPOINT_QUIET_LOGS=1",
             "--publish",
             "127.0.0.1::8080",
+            "--publish",
+            "127.0.0.1::8081",
             "--mount",
             f"type=bind,src={NGINX_CONFIG},dst=/etc/nginx/nginx.conf,readonly",
+            "--mount",
+            (
+                f"type=bind,src={NGINX_SERVER_CONFIG},"
+                "dst=/etc/nginx/aegis-server.conf,readonly"
+            ),
             "--mount",
             f"type=bind,src={static_root},dst=/usr/share/nginx/html,readonly",
             NGINX_IMAGE,
@@ -190,8 +204,13 @@ def gateway(tmp_path_factory: pytest.TempPathFactory) -> Iterator[GatewayHarness
         assert host == "127.0.0.1"
         assert port.isdecimal() and int(port) > 0
         base_url = f"http://127.0.0.1:{port}"
+        internal_binding = docker("port", gateway_name, "8081/tcp").stdout.strip()
+        internal_host, internal_port = internal_binding.rsplit(":", 1)
+        assert internal_host == "127.0.0.1"
+        assert internal_port.isdecimal() and int(internal_port) > 0
+        internal_base_url = f"http://127.0.0.1:{internal_port}"
         wait_for_gateway(base_url, gateway_name)
-        yield GatewayHarness(base_url, prefix, gateway_name)
+        yield GatewayHarness(base_url, internal_base_url, prefix, gateway_name)
     finally:
         remove_container(gateway_name)
         remove_container(upstream_name)
@@ -257,6 +276,50 @@ def test_hostile_forwarding_headers_are_overwritten(gateway: GatewayHarness) -> 
     ipaddress.ip_address(forwarded_for)
     assert forwarded_for != "203.0.113.10, 127.0.0.1"
     assert response.json()["forwarded_proto"] == "http"
+
+
+def test_internal_listener_accepts_only_bounded_caddy_identity(
+    gateway: GatewayHarness,
+) -> None:
+    accepted = gateway.request(
+        "/api/forwarding",
+        headers={"X-Forwarded-For": "198.51.100.42", "X-Forwarded-Proto": "http"},
+        internal=True,
+    )
+
+    assert accepted.status == 200
+    assert accepted.json()["forwarded_for"] == "198.51.100.42"
+    assert accepted.json()["forwarded_proto"] == "https"
+
+    ipv6 = gateway.request(
+        "/api/forwarding",
+        headers={"X-Forwarded-For": "2001:db8::42"},
+        internal=True,
+    )
+    assert ipv6.status == 200
+    assert ipv6.json()["forwarded_for"] == "2001:db8::42"
+
+    mapped = gateway.request(
+        "/api/forwarding",
+        headers={"X-Forwarded-For": "::ffff:198.51.100.42"},
+        internal=True,
+    )
+    assert mapped.status == 200
+    assert mapped.json()["forwarded_for"] == "::ffff:198.51.100.42"
+
+    for value in (
+        None,
+        "198.51.100.1, 203.0.113.1",
+        "bad identity",
+        "198.51.100.42 203.0.113.1",
+        "999.999.999.999",
+        "::::",
+        "2001:db8:0:0:0:0:0:0:42",
+        "a" * 46,
+    ):
+        headers = {} if value is None else {"X-Forwarded-For": value}
+        rejected = gateway.request("/api/forwarding", headers=headers, internal=True)
+        assert rejected.status == 400
 
 
 def test_login_rate_limit_rejects_excess_without_limiting_other_api(

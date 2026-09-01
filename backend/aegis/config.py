@@ -13,6 +13,15 @@ class ConfigurationError(RuntimeError):
     """Raised when runtime configuration cannot be loaded safely."""
 
 
+def _allowed_host_matches_hostname(pattern: str, hostname: str) -> bool:
+    normalized = pattern.casefold()
+    if normalized.startswith("[") and normalized.endswith("]"):
+        normalized = normalized[1:-1]
+    if normalized.startswith("."):
+        return hostname == normalized[1:] or hostname.endswith(normalized)
+    return hostname == normalized
+
+
 @overload
 def read_secret(
     environ: Mapping[str, str],
@@ -142,6 +151,12 @@ class RuntimeConfig:
         )
         if production and (not hosts or "*" in hosts):
             raise ConfigurationError("AEGIS_ALLOWED_HOSTS must list explicit production hosts")
+        if production and not any(
+            _allowed_host_matches_hostname(host, hostname.casefold()) for host in hosts
+        ):
+            raise ConfigurationError(
+                "AEGIS_ALLOWED_HOSTS must include the public URL hostname"
+            )
 
         try:
             db_port = int(environ.get("AEGIS_DB_PORT", "5432"))

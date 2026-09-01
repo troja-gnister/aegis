@@ -86,6 +86,7 @@ services:
       - /app/backend/aegis/uvicorn_logging.json
     environment:
       <<: *backend-environment
+      AEGIS_TRUST_PROXY_HEADERS: "true"
       AEGIS_DB_USER: aegis_web
       AEGIS_DB_PASSWORD_FILE: /run/secrets/db_web_password
     volumes:
@@ -104,8 +105,10 @@ services:
         - python
         - -c
         - >-
-          import urllib.request;
-          urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=2)
+          import os,urllib.parse,urllib.request;
+          authority=urllib.parse.urlsplit(os.environ['AEGIS_PUBLIC_URL']).netloc;
+          request=urllib.request.Request('http://127.0.0.1:8000/health/live',headers={'Host':authority,'X-Forwarded-Proto':'https'});
+          urllib.request.urlopen(request, timeout=2)
       interval: 5s
       timeout: 3s
       retries: 20
@@ -171,7 +174,11 @@ services:
     user: "101:101"
     environment:
       NGINX_ENTRYPOINT_QUIET_LOGS: "1"
-    networks: [backend, edge]
+    networks:
+      backend:
+      edge:
+      tls-hop:
+        aliases: [tls-gateway]
     ports:
       - "${AEGIS_HTTP_PORT:-8080}:8080"
     volumes:
@@ -188,20 +195,23 @@ services:
     restart: unless-stopped
 
   caddy:
-    image: caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    image: aegis-caddy
+    build:
+      context: .
+      dockerfile: docker/caddy.Dockerfile
     profiles: [tls]
     command: [caddy, run, --config, /etc/caddy/Caddyfile, --adapter, caddyfile]
     user: "${AEGIS_UID:-10001}:${AEGIS_GID:-10001}"
-    networks: [edge]
+    networks: [edge, tls-hop]
     ports:
       - "${AEGIS_HTTPS_PORT:-8443}:8443"
     volumes:
       - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
     read_only: true
     tmpfs:
-      - /config:size=16m,noexec,nosuid,nodev
-      - /data:size=32m,noexec,nosuid,nodev
-      - /tmp:size=16m,noexec,nosuid,nodev
+      - /config:size=16m,noexec,nosuid,nodev,uid=${AEGIS_UID:-10001},gid=${AEGIS_GID:-10001},mode=0700
+      - /data:size=32m,noexec,nosuid,nodev,uid=${AEGIS_UID:-10001},gid=${AEGIS_GID:-10001},mode=0700
+      - /tmp:size=16m,noexec,nosuid,nodev,uid=${AEGIS_UID:-10001},gid=${AEGIS_GID:-10001},mode=1777
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     depends_on:
@@ -214,6 +224,8 @@ networks:
     internal: true
   edge:
     internal: false
+  tls-hop:
+    internal: true
 
 volumes:
   postgres-data:
