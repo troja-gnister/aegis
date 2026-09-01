@@ -62,7 +62,7 @@ def test_request_context_resets_after_sequential_request() -> None:
 def test_concurrent_request_contexts_do_not_bleed() -> None:
     barrier = Barrier(2)
 
-    def invoke(request_id: str) -> tuple[str, str, None]:
+    def invoke(request_id: str) -> tuple[str, str, str | None]:
         observed = ""
 
         def respond(_request: HttpRequest) -> HttpResponse:

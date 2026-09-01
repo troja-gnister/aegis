@@ -26,6 +26,7 @@ INSTALLED_APPS = [
     "rest_framework",
     "aegis_apps.common",
     "aegis_apps.identity",
+    "aegis_apps.audit",
 ]
 
 MIDDLEWARE = [

@@ -3,19 +3,32 @@ from __future__ import annotations
 import json
 import logging
 import sys
+from collections.abc import Mapping
+from types import TracebackType
+from typing import cast
 
 from aegis_apps.common.logging import BoundedJSONFormatter
 
 
 def _record(**values: object) -> logging.LogRecord:
+    args = cast(
+        tuple[object, ...] | Mapping[str, object] | None,
+        values.pop("args", ()),
+    )
+    exc_info = cast(
+        tuple[type[BaseException], BaseException, TracebackType | None]
+        | tuple[None, None, None]
+        | None,
+        values.pop("exc_info", None),
+    )
     record = logging.LogRecord(
         name="aegis.test",
         level=logging.ERROR,
         pathname="/private/source.py",
         lineno=9,
         msg=values.pop("msg", "safe message"),
-        args=values.pop("args", ()),
-        exc_info=values.pop("exc_info", None),
+        args=args,
+        exc_info=exc_info,
         func=None,
     )
     for key, value in values.items():

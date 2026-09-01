@@ -19,6 +19,8 @@ _SENSITIVE_MARKERS = (
     "filename",
     "content",
     "apikey",
+    "username",
+    "email",
 )
 
 

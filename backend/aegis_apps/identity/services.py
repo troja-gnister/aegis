@@ -10,6 +10,8 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, connection, transaction
 
+from aegis_apps.audit.services import record_event
+
 from .models import User
 
 _BOOTSTRAP_ERROR = "administrator bootstrap configuration is invalid"
@@ -101,21 +103,37 @@ def bootstrap_admin(
                     and existing_email == normalized_email
                 ):
                     raise _invalid_configuration()
-                return BootstrapResult(user_id=existing.pk, created=False)
+                user = existing
+                result = BootstrapResult(user_id=existing.pk, created=False)
+            else:
+                candidate = User(
+                    username=normalized_username,
+                    email=normalized_email,
+                    is_active=True,
+                    is_staff=True,
+                    is_superuser=True,
+                )
+                try:
+                    validate_password(password, user=candidate)
+                except ValidationError:
+                    raise _invalid_configuration() from None
+                candidate.set_password(password)
+                candidate.save(force_insert=True)
+                user = candidate
+                result = BootstrapResult(user_id=candidate.pk, created=True)
 
-            candidate = User(
-                username=normalized_username,
-                email=normalized_email,
-                is_active=True,
-                is_staff=True,
-                is_superuser=True,
+            record_event(
+                event_type=(
+                    "identity.bootstrap.created"
+                    if result.created
+                    else "identity.bootstrap.existing"
+                ),
+                outcome="success",
+                actor=user,
+                request_id=request_id,
+                object_id=user.pk,
+                metadata={"subject_id": str(user.pk)},
             )
-            try:
-                validate_password(password, user=candidate)
-            except ValidationError:
-                raise _invalid_configuration() from None
-            candidate.set_password(password)
-            candidate.save(force_insert=True)
-            return BootstrapResult(user_id=candidate.pk, created=True)
+            return result
     except IntegrityError:
         raise _invalid_configuration() from None

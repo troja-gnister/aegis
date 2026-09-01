@@ -3,6 +3,7 @@ from threading import Barrier
 
 import pytest
 from aegis.config import ConfigurationError
+from aegis_apps.audit.models import AuditEvent
 from aegis_apps.identity.services import BootstrapResult, bootstrap_admin
 from django.contrib.auth import get_user_model
 from django.db import close_old_connections
@@ -166,3 +167,53 @@ def test_bootstrap_admin_concurrent_calls_create_once_without_rotating_password(
     created_result = next(result for result in results if result.created)
     winning_password = passwords[results.index(created_result)]
     assert user.check_password(winning_password)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_bootstrap_admin_records_exact_created_and_existing_events() -> None:
+    first = bootstrap_admin(
+        username="admin",
+        email="admin@example.invalid",
+        password=VALID_PASSWORD,
+        request_id=VALID_REQUEST_ID,
+    )
+    second = bootstrap_admin(
+        username="admin",
+        email="admin@example.invalid",
+        password="Quartz-Harbor-Orbit-984!",
+        request_id="abcdef0123456789abcdef0123456789",
+    )
+
+    events = list(AuditEvent.objects.order_by("occurred_at"))
+    assert [event.event_type for event in events] == [
+        "identity.bootstrap.created",
+        "identity.bootstrap.existing",
+    ]
+    assert [event.request_id for event in events] == [
+        VALID_REQUEST_ID,
+        "abcdef0123456789abcdef0123456789",
+    ]
+    assert all(event.outcome == "success" for event in events)
+    assert all(event.actor_id == first.user_id for event in events)
+    assert all(event.object_id == first.user_id for event in events)
+    assert all(event.metadata == {"subject_id": str(first.user_id)} for event in events)
+    assert second.user_id == first.user_id
+
+
+@pytest.mark.django_db(transaction=True)
+def test_bootstrap_admin_audit_failure_rolls_back_new_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_audit(**_values: object) -> None:
+        raise RuntimeError("simulated audit failure")
+
+    monkeypatch.setattr("aegis_apps.identity.services.record_event", fail_audit)
+
+    with pytest.raises(RuntimeError, match="simulated audit failure"):
+        bootstrap_admin(
+            username="admin",
+            email="admin@example.invalid",
+            password=VALID_PASSWORD,
+            request_id=VALID_REQUEST_ID,
+        )
+
+    assert get_user_model().objects.count() == 0
+    assert AuditEvent.objects.count() == 0
