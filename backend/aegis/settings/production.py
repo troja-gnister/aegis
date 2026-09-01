@@ -11,12 +11,6 @@ ALLOWED_HOSTS = list(RUNTIME_CONFIG.allowed_hosts)  # noqa: F405
 _public_url = urlparse(RUNTIME_CONFIG.public_url)  # noqa: F405
 CSRF_TRUSTED_ORIGINS = [f"{_public_url.scheme}://{_public_url.netloc}"]
 
-PASSWORD_HASHERS = [
-    "django.contrib.auth.hashers.Argon2PasswordHasher",
-    "django.contrib.auth.hashers.PBKDF2PasswordHasher",
-    "django.contrib.auth.hashers.PBKDF2SHA1PasswordHasher",
-    "django.contrib.auth.hashers.ScryptPasswordHasher",
-]
 SESSION_ENGINE = "django.contrib.sessions.backends.db"
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = "Lax"
