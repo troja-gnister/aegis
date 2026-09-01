@@ -196,10 +196,17 @@ def assert_security_headers(response: HttpResponse) -> None:
         assert response.headers[name] == expected
 
 
+def cache_control_directives(response: HttpResponse) -> set[str]:
+    return {
+        directive.strip().lower()
+        for value in response.headers.get_all("Cache-Control", [])
+        for directive in value.split(",")
+        if directive.strip()
+    }
+
+
 def assert_private_no_store(response: HttpResponse) -> None:
-    directives = ",".join(response.headers.get_all("Cache-Control", [])).lower()
-    assert "private" in directives
-    assert "no-store" in directives
+    assert cache_control_directives(response) == {"private", "no-store"}
 
 
 def test_valid_bounded_request_ids_are_preserved(gateway: GatewayHarness) -> None:
@@ -246,12 +253,16 @@ def test_hostile_forwarding_headers_are_overwritten(gateway: GatewayHarness) -> 
 def test_login_rate_limit_rejects_excess_without_limiting_other_api(
     gateway: GatewayHarness,
 ) -> None:
-    login_statuses = [
-        gateway.request("/api/v1/auth/login", method="POST").status for _ in range(25)
+    login_responses = [
+        gateway.request("/api/v1/auth/login", method="POST") for _ in range(25)
     ]
+    rejected = next(
+        response for response in login_responses if response.status in {429, 503}
+    )
 
-    assert 200 in login_statuses
-    assert any(status in {429, 503} for status in login_statuses)
+    assert any(response.status == 200 for response in login_responses)
+    assert_security_headers(rejected)
+    assert_private_no_store(rejected)
     assert gateway.request("/api/not-login", method="POST").status == 200
 
 
@@ -279,18 +290,22 @@ def test_spa_shell_and_fallback_are_private_no_store(gateway: GatewayHarness) ->
 
 def test_hashed_asset_is_cached_immutably(gateway: GatewayHarness) -> None:
     response = gateway.request("/assets/app-abcdefgh.js")
-    directives = ",".join(response.headers.get_all("Cache-Control", [])).lower()
 
     assert response.status == 200
     assert response.body == b"asset-body"
     assert_security_headers(response)
-    assert "public" in directives
-    assert "max-age=31536000" in directives
-    assert "immutable" in directives
+    assert cache_control_directives(response) == {
+        "public",
+        "max-age=31536000",
+        "immutable",
+    }
 
 
 @pytest.mark.parametrize("path", ["/__aegis_roots/file", "/__aegis_derivatives/file"])
 def test_protected_aliases_cannot_be_requested_directly(
     gateway: GatewayHarness, path: str
 ) -> None:
-    assert gateway.request(path).status == 404
+    response = gateway.request(path)
+
+    assert response.status == 404
+    assert_security_headers(response)
