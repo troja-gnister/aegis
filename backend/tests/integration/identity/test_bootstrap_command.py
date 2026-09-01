@@ -1,5 +1,7 @@
 import os
 import re
+import subprocess
+import sys
 from io import StringIO
 from pathlib import Path
 
@@ -14,6 +16,24 @@ OUTPUT_PATTERN = re.compile(
     r"^user_id=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12} "
     r"created=(?:true|false)\n$"
 )
+BACKEND_DIR = Path(__file__).parents[3]
+
+
+def _run_bootstrap_cli(*arguments: str) -> subprocess.CompletedProcess[str]:
+    environment = {
+        **os.environ,
+        "AEGIS_ENV": "test",
+        "DJANGO_SETTINGS_MODULE": "aegis.settings.test",
+    }
+    return subprocess.run(
+        [sys.executable, str(BACKEND_DIR / "manage.py"), "bootstrap_admin", *arguments],
+        cwd=BACKEND_DIR.parent,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
 
 
 def _write_secret(path: Path, value: str, *, mode: int = 0o600) -> None:
@@ -77,6 +97,57 @@ def test_bootstrap_admin_command_rejects_plaintext_password_option_without_leaki
 
     assert "Unknown option" in str(caught.value)
     assert credential not in str(caught.value)
+
+
+@pytest.mark.parametrize("option", ["--password", "--password-f"])
+def test_bootstrap_admin_cli_rejects_password_file_abbreviations_without_echoing_value(
+    option: str, tmp_path: Path
+) -> None:
+    sentinel = (
+        "Never-Echo-This-Plaintext-Credential-552!"
+        if option == "--password"
+        else str(tmp_path / "must-not-read-private-file")
+    )
+
+    completed = _run_bootstrap_cli(
+        "--username",
+        "admin",
+        "--email",
+        "admin@example.invalid",
+        option,
+        sentinel,
+    )
+
+    assert completed.returncode != 0
+    assert f"unrecognized argument: {option}" in completed.stderr
+    assert sentinel not in completed.stdout
+    assert sentinel not in completed.stderr
+    assert "created=" not in completed.stdout
+
+
+def test_bootstrap_admin_help_lists_only_exact_documented_options() -> None:
+    completed = _run_bootstrap_cli("--help")
+
+    assert completed.returncode == 0
+    option_names = set(re.findall(r"--[a-z-]+", completed.stdout))
+    documented = {"--username", "--email", "--password-file"}
+    guarded_prefixes = {
+        "--p",
+        "--pa",
+        "--pas",
+        "--pass",
+        "--passw",
+        "--passwo",
+        "--passwor",
+        "--password",
+        "--password-",
+        "--password-f",
+        "--password-fi",
+        "--password-fil",
+    }
+
+    assert documented <= option_names
+    assert guarded_prefixes.isdisjoint(option_names)
 
 
 @pytest.mark.django_db(transaction=True)
