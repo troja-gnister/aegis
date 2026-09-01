@@ -1,0 +1,12 @@
+:root {
+  --color-canvas: #0b1220;
+  --color-surface: #111827;
+  --color-surface-raised: #172033;
+  --color-text: #f8fafc;
+  --color-text-muted: #a8b3c7;
+  --color-primary: #818cf8;
+  --color-accent: #22d3ee;
+  --color-danger: #fb7185;
+  --focus-ring: 0 0 0 3px rgb(34 211 238 / 55%);
+  --touch-target: 44px;
+}
