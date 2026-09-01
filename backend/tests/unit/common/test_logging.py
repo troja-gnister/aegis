@@ -140,3 +140,35 @@ def test_uvicorn_access_record_uses_static_message_without_path_or_query() -> No
     assert canary not in rendered
     assert value["logger"] == "uvicorn.access"
     assert value["message"] == "HTTP request completed"
+
+
+def test_valid_shaped_but_unregistered_exception_code_is_omitted() -> None:
+    try:
+        raise RuntimeError("credential-code-canary")
+    except RuntimeError:
+        exc_info = sys.exc_info()
+
+    rendered = BoundedJSONFormatter().format(
+        _record(
+            msg="unknown exception",
+            exc_info=exc_info,
+            error_code="CREDENTIAL_EXPOSED",
+        )
+    )
+    value = json.loads(rendered)
+
+    assert value["exception"] == {"class": "RuntimeError"}
+    assert "CREDENTIAL_EXPOSED" not in rendered
+    assert "credential-code-canary" not in rendered
+
+
+def test_pathological_logger_name_is_length_gated_before_registry_lookup() -> None:
+    class HostileLoggerName(str):
+        def __hash__(self) -> int:
+            raise AssertionError("oversized logger must not reach registry lookup")
+
+    rendered = BoundedJSONFormatter().format(
+        _record(name=HostileLoggerName("x" * 1_000_000), msg="raw")
+    )
+
+    assert json.loads(rendered)["logger"] == "application"

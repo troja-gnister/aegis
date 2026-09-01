@@ -52,7 +52,15 @@ class BoundedJSONFormatter(logging.Formatter):
             timespec="milliseconds"
         )
         level = record.levelname if record.levelname in _SAFE_LEVELS else "ERROR"
-        logger_name = record.name if record.name in _LOGGER_MESSAGES else "application"
+        raw_logger_name = record.name
+        trusted_logger_name = (
+            raw_logger_name
+            if type(raw_logger_name) is str
+            and len(raw_logger_name) <= 64
+            and raw_logger_name in _LOGGER_MESSAGES
+            else None
+        )
+        logger_name = trusted_logger_name or "application"
         event_value = getattr(record, "event", None)
         event = (
             event_value
@@ -64,7 +72,11 @@ class BoundedJSONFormatter(logging.Formatter):
         if event is not None:
             message = _EVENT_MESSAGES[event]
         else:
-            message = _LOGGER_MESSAGES.get(record.name, "untrusted log message omitted")
+            message = (
+                _LOGGER_MESSAGES[trusted_logger_name]
+                if trusted_logger_name is not None
+                else "untrusted log message omitted"
+            )
 
         payload: dict[str, Any] = {
             "timestamp": timestamp,
