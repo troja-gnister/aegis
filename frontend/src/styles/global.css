@@ -52,7 +52,11 @@ a {
 .app-shell__brand {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  min-width: var(--touch-target);
+  min-inline-size: var(--touch-target);
   min-block-size: var(--touch-target);
+  padding-inline: 0.5rem;
   color: var(--color-primary);
   font-size: 1.125rem;
   font-weight: 700;
