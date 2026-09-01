@@ -77,8 +77,20 @@ def _reject_inline_writes(
         raise PermissionError("identity admin inline writes are disabled")
 
 
+class CanonicalAuditOnlyAdminMixin:
+    """Keep AuditEvent as the sole change log for audited identity admins."""
+
+    def log_addition(self, request: HttpRequest, obj: Any, message: Any) -> Any:
+        del request, obj, message
+        return None
+
+    def log_change(self, request: HttpRequest, obj: Any, message: Any) -> Any:
+        del request, obj, message
+        return None
+
+
 @admin.register(User)
-class AegisUserAdmin(UserAdmin):  # type: ignore[type-arg]
+class AegisUserAdmin(CanonicalAuditOnlyAdminMixin, UserAdmin):  # type: ignore[type-arg]
     actions = ("activate_users", "deactivate_users")
     form = AegisUserChangeForm
     readonly_fields = (*tuple(UserAdmin.readonly_fields), "authorization_epoch")
@@ -147,7 +159,7 @@ admin.site.unregister(Group)
 
 
 @admin.register(Group)
-class AegisGroupAdmin(GroupAdmin):
+class AegisGroupAdmin(CanonicalAuditOnlyAdminMixin, GroupAdmin):
     form = AegisGroupAdminForm
     actions = None
     fieldsets = ((None, {"fields": ("name", "permissions", "members")}),)

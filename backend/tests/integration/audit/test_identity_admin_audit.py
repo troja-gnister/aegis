@@ -5,8 +5,10 @@ from collections.abc import Iterator
 import pytest
 from aegis_apps.audit.models import AuditEvent
 from aegis_apps.identity.models import GroupIdentity, User
+from django.contrib import admin
+from django.contrib.admin.models import LogEntry
 from django.contrib.auth.models import Group, Permission
-from django.test import Client
+from django.test import Client, RequestFactory
 from django.urls import reverse
 
 pytestmark = [pytest.mark.integration, pytest.mark.django_db(transaction=True)]
@@ -105,6 +107,8 @@ def test_real_user_add_post_hashes_password_once_and_records_one_event(
     assert event.actor == actor
     assert event.object_id == user.id
     assert event.metadata == {"subject_id": str(user.id)}
+    assert user.username not in str(event.metadata)
+    assert LogEntry.objects.count() == 0
 
 
 def test_invalid_user_add_and_noop_user_change_emit_no_events(
@@ -150,6 +154,11 @@ def test_real_user_permission_change_records_exactly_one_event(
     assert response.status_code == 302
     assert list(user.user_permissions.values_list("pk", flat=True)) == [permission.pk]
     assert _event_types() == ["identity.user.changed"]
+    event = AuditEvent.objects.get()
+    assert event.object_id == user.id
+    assert event.metadata == {"subject_id": str(user.id)}
+    assert user.username not in str(event.metadata)
+    assert LogEntry.objects.count() == 0
 
 
 def test_default_password_change_bypass_is_not_routable_or_linked(client: Client) -> None:
@@ -200,6 +209,11 @@ def test_real_activation_action_changes_through_service_and_noop_is_silent(
     assert first.status_code == second.status_code == 302
     assert user.is_active is False
     assert _event_types() == ["identity.user.changed"]
+    event = AuditEvent.objects.get()
+    assert event.object_id == user.id
+    assert event.metadata == {"subject_id": str(user.id)}
+    assert user.username not in str(event.metadata)
+    assert LogEntry.objects.count() == 0
 
 
 def test_group_create_and_combined_change_use_stable_subject_and_one_event(
@@ -244,8 +258,24 @@ def test_group_create_and_combined_change_use_stable_subject_and_one_event(
         "identity.group.created",
         "identity.group.changed",
     ]
+    assert LogEntry.objects.count() == 0
     assert set(group.user_set.values_list("pk", flat=True)) == {member.pk, second_member.pk}
     assert list(group.permissions.values_list("pk", flat=True)) == [permission.pk]
+
+
+def test_unrelated_model_admin_logging_remains_enabled(actor: User) -> None:
+    permission = Permission.objects.order_by("pk").first()
+    assert permission is not None
+    request = RequestFactory().post("/unrelated-admin/")
+    request.user = actor
+    unrelated_admin = admin.ModelAdmin(Permission, admin.AdminSite(name="unrelated"))
+
+    unrelated_admin.log_addition(request, permission, "Unrelated admin change")
+
+    entry = LogEntry.objects.get()
+    assert entry.user_id == actor.pk
+    assert entry.object_id == str(permission.pk)
+    assert AuditEvent.objects.count() == 0
 
 
 def test_group_membership_only_change_is_one_event_and_noop_is_silent(client: Client) -> None:
