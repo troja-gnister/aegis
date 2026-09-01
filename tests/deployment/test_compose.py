@@ -3,6 +3,7 @@ import os
 import subprocess
 import urllib.request
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -15,11 +16,15 @@ PYTHON_IMAGE = (
     "python:3.13.15-slim-trixie@"
     "sha256:881d80734ee05dca6f7f42dcb080975652a53c7eda9ba1f03bb8da31aa6a6ec2"
 )
+CADDY_IMAGE = (
+    "caddy:2.11.4-alpine@"
+    "sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648"
+)
 
 
 def rendered_compose(
     *profiles: str, environment: dict[str, str] | None = None
-) -> dict:
+) -> dict[str, Any]:
     profile_arguments = [argument for profile in profiles for argument in ("--profile", profile)]
     result = subprocess.run(
         [
@@ -37,7 +42,36 @@ def rendered_compose(
         text=True,
         env=os.environ | (environment or {}),
     )
-    return json.loads(result.stdout)
+    return cast(dict[str, Any], json.loads(result.stdout))
+
+
+def adapted_caddyfile(path: Path, *, tls_host: str | None = None) -> dict[str, Any]:
+    arguments = [
+        "docker",
+        "run",
+        "--rm",
+        "--volume",
+        f"{path}:/etc/caddy/Caddyfile:ro",
+    ]
+    if tls_host is not None:
+        arguments.extend(["--env", f"AEGIS_TLS_HOST={tls_host}"])
+    result = subprocess.run(
+        [
+            *arguments,
+            CADDY_IMAGE,
+            "caddy",
+            "adapt",
+            "--config",
+            "/etc/caddy/Caddyfile",
+            "--adapter",
+            "caddyfile",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return cast(dict[str, Any], json.loads(result.stdout))
 
 
 def test_nginx_configuration_parses_with_pinned_runtime() -> None:
@@ -206,7 +240,9 @@ def test_backend_network_is_internal_and_gateway_is_the_only_published_service()
 
 
 def test_tls_hop_is_private_alias_bound_and_trusted_by_web() -> None:
-    config = rendered_compose("tls")
+    config = rendered_compose(
+        "tls", environment={"AEGIS_TLS_HOST": "files.example.test"}
+    )
     services = config["services"]
 
     assert config["networks"]["tls-hop"]["internal"] is True
@@ -220,15 +256,98 @@ def test_tls_hop_is_private_alias_bound_and_trusted_by_web() -> None:
     } == {"gateway", "caddy"}
     assert [publisher["target"] for publisher in services["gateway"]["ports"]] == [8080]
     assert services["web"]["environment"]["AEGIS_TRUST_PROXY_HEADERS"] == "true"
+    assert services["caddy"]["environment"]["AEGIS_TLS_HOST"] == "files.example.test"
 
 
-def test_caddy_tmpfs_ownership_follows_nondefault_runtime_ids() -> None:
-    caddy = rendered_compose(
-        "tls", environment={"AEGIS_UID": "21001", "AEGIS_GID": "21002"}
-    )["services"]["caddy"]
+def test_production_and_local_tls_modes_have_distinct_issuers() -> None:
+    production_path = REPOSITORY / "deploy" / "caddy" / "Caddyfile"
+    local_path = REPOSITORY / "deploy" / "caddy" / "Caddyfile.local"
+    production = adapted_caddyfile(production_path, tls_host="files.example.test")
+    local = adapted_caddyfile(local_path)
+    production_rendered = json.dumps(production, sort_keys=True)
+    local_rendered = json.dumps(local, sort_keys=True)
 
-    assert caddy["user"] == "21001:21002"
-    assert all("uid=21001" in item and "gid=21002" in item for item in caddy["tmpfs"])
+    assert "internal" not in production_rendered
+    assert "files.example.test" in production_rendered
+    assert '"module": "internal"' in local_rendered
+    assert "localhost" in local_rendered
+
+
+def test_caddy_data_is_durable_and_runtime_identity_is_fixed() -> None:
+    config = rendered_compose(
+        "tls", "tls-local", environment={"AEGIS_TLS_HOST": "files.example.test"}
+    )
+    services = config["services"]
+    caddy = services["caddy"]
+    local = services["caddy-local"]
+
+    assert caddy["user"] == local["user"] == "10001:10001"
+    for service in (caddy, local):
+        assert service["read_only"] is True
+        assert service["cap_drop"] == ["ALL"]
+        assert service["security_opt"] == ["no-new-privileges:true"]
+        assert set(service["networks"]) == {"edge", "tls-hop"}
+    assert {mount["target"]: mount["source"] for mount in caddy["volumes"]}["/data"] == (
+        "caddy-data"
+    )
+    assert {mount["target"]: mount["source"] for mount in local["volumes"]}["/data"] == (
+        "caddy-local-data"
+    )
+    assert all(not item.startswith("/data:") for item in caddy["tmpfs"])
+    assert all(not item.startswith("/data:") for item in local["tmpfs"])
+    assert {
+        name
+        for name, service in services.items()
+        if any(
+            mount.get("source") == "caddy-data"
+            for mount in service.get("volumes", [])
+        )
+    } == {"caddy"}
+    assert {
+        name
+        for name, service in services.items()
+        if any(
+            mount.get("source") == "caddy-local-data"
+            for mount in service.get("volumes", [])
+        )
+    } == {"caddy-local"}
+
+
+def test_base_profile_does_not_require_tls_host_but_production_startup_does() -> None:
+    base = rendered_compose()
+    production = rendered_compose("tls", environment={"AEGIS_TLS_HOST": ""})
+
+    assert "caddy" not in base["services"]
+    assert production["services"]["caddy"]["environment"]["AEGIS_TLS_HOST"] == ""
+    assert production["services"]["caddy"]["command"][0].endswith(
+        "aegis-caddy-start"
+    )
+
+
+@pytest.mark.parametrize("tls_host", [None, "localhost", "127.0.0.1", "files"])
+def test_production_caddy_start_rejects_non_public_hosts(
+    tls_host: str | None,
+) -> None:
+    environment = os.environ.copy()
+    if tls_host is None:
+        environment.pop("AEGIS_TLS_HOST", None)
+    else:
+        environment["AEGIS_TLS_HOST"] = tls_host
+
+    result = subprocess.run(
+        ["sh", str(REPOSITORY / "deploy" / "caddy" / "aegis-caddy-start")],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        env=environment,
+    )
+
+    assert result.returncode == 64
+    assert result.stdout == ""
+    assert result.stderr == (
+        "AEGIS_TLS_HOST must be set to a public DNS hostname for the tls profile\n"
+    )
 
 
 def test_caddy_build_removes_unneeded_file_capability_without_weakening_policy() -> None:
@@ -250,6 +369,10 @@ def test_caddy_build_removes_unneeded_file_capability_without_weakening_policy()
     ) in dockerfile
     assert "setcap -r /usr/bin/caddy" in dockerfile
     assert "test -z \"$(getcap /usr/bin/caddy)\"" in dockerfile
+    assert (
+        "COPY --chmod=0755 deploy/caddy/aegis-caddy-start "
+        "/usr/local/bin/aegis-caddy-start"
+    ) in dockerfile
 
 
 def test_only_core_gateway_joins_non_internal_edge_network_for_host_ingress() -> None:

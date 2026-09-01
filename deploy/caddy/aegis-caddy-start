@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+
+fail_host() {
+    printf '%s\n' \
+        'AEGIS_TLS_HOST must be set to a public DNS hostname for the tls profile' >&2
+    exit 64
+}
+
+tls_host=${AEGIS_TLS_HOST:-}
+
+case "$tls_host" in
+    "" | localhost | *.localhost | *:* | */* | *\\* | *_* | *" "* | .* | *. | *..*)
+        fail_host
+        ;;
+esac
+
+case "$tls_host" in
+    *.*) ;;
+    *) fail_host ;;
+esac
+
+if ! printf '%s\n' "$tls_host" | grep -Eq \
+    '^[[:alnum:]]([[:alnum:].-]*[[:alnum:]])?$'; then
+    fail_host
+fi
+
+if printf '%s\n' "$tls_host" | grep -Eq '^[0-9.]+$'; then
+    fail_host
+fi
+
+exec /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile

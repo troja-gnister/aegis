@@ -200,18 +200,45 @@ services:
       context: .
       dockerfile: docker/caddy.Dockerfile
     profiles: [tls]
-    command: [caddy, run, --config, /etc/caddy/Caddyfile, --adapter, caddyfile]
-    user: "${AEGIS_UID:-10001}:${AEGIS_GID:-10001}"
+    command: [/usr/local/bin/aegis-caddy-start]
+    user: "10001:10001"
+    environment:
+      AEGIS_TLS_HOST: "${AEGIS_TLS_HOST:-}"
     networks: [edge, tls-hop]
     ports:
       - "${AEGIS_HTTPS_PORT:-8443}:8443"
     volumes:
       - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
     read_only: true
     tmpfs:
-      - /config:size=16m,noexec,nosuid,nodev,uid=${AEGIS_UID:-10001},gid=${AEGIS_GID:-10001},mode=0700
-      - /data:size=32m,noexec,nosuid,nodev,uid=${AEGIS_UID:-10001},gid=${AEGIS_GID:-10001},mode=0700
-      - /tmp:size=16m,noexec,nosuid,nodev,uid=${AEGIS_UID:-10001},gid=${AEGIS_GID:-10001},mode=1777
+      - /config:size=16m,noexec,nosuid,nodev,uid=10001,gid=10001,mode=0700
+      - /tmp:size=16m,noexec,nosuid,nodev,uid=10001,gid=10001,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    depends_on:
+      gateway:
+        condition: service_started
+    restart: unless-stopped
+
+  caddy-local:
+    image: aegis-caddy
+    build:
+      context: .
+      dockerfile: docker/caddy.Dockerfile
+    profiles: [tls-local]
+    command: [caddy, run, --config, /etc/caddy/Caddyfile, --adapter, caddyfile]
+    user: "10001:10001"
+    networks: [edge, tls-hop]
+    ports:
+      - "${AEGIS_HTTPS_PORT:-8443}:8443"
+    volumes:
+      - ./deploy/caddy/Caddyfile.local:/etc/caddy/Caddyfile:ro
+      - caddy-local-data:/data
+    read_only: true
+    tmpfs:
+      - /config:size=16m,noexec,nosuid,nodev,uid=10001,gid=10001,mode=0700
+      - /tmp:size=16m,noexec,nosuid,nodev,uid=10001,gid=10001,mode=1777
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     depends_on:
@@ -229,6 +256,8 @@ networks:
 
 volumes:
   postgres-data:
+  caddy-data:
+  caddy-local-data:
   staging:
   derivatives:
   model-cache:

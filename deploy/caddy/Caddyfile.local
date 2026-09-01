@@ -1,4 +1,5 @@
-https://{$AEGIS_TLS_HOST}:8443 {
+https://localhost:8443 {
+    tls internal
     reverse_proxy tls-gateway:8081 {
         header_up X-Forwarded-For {remote_host}
         header_up X-Forwarded-Proto https

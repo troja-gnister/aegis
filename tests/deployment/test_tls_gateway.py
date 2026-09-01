@@ -26,6 +26,7 @@ ADMIN_PASSWORD = "Tls-Probe-Anchor-934!"
 COMMAND_TIMEOUT_SECONDS = 30
 COMPOSE_TIMEOUT_SECONDS = 180
 DIAGNOSTIC_LIMIT = 8 * 1024
+CADDY_SERVICE = "caddy-local"
 
 
 def bounded_tail(value: str) -> str:
@@ -99,7 +100,7 @@ class TlsStack:
             "-f",
             str(self.override),
             "--profile",
-            "tls",
+            "tls-local",
         ]
 
     def compose(
@@ -192,7 +193,7 @@ class TlsStack:
             f"headers={request_headers!r};"
             "\nclass CaddyConnection(http.client.HTTPSConnection):\n"
             " def connect(self):\n"
-            "  raw=socket.create_connection(('caddy',8443),self.timeout);"
+            f"  raw=socket.create_connection(('{CADDY_SERVICE}',8443),self.timeout);"
             "self.sock=self._context.wrap_socket(raw,server_hostname='localhost')\n"
             "\nfor _ in range(requests):\n"
             " connection=CaddyConnection('localhost',8443,context=ctx,timeout=3);"
@@ -223,7 +224,15 @@ class TlsStack:
 
         processes = self.compose(["ps", "--all"], check=False)
         logs = self.compose(
-            ["logs", "--no-color", "--tail", "80", "web", "gateway", "caddy"],
+            [
+                "logs",
+                "--no-color",
+                "--tail",
+                "80",
+                "web",
+                "gateway",
+                CADDY_SERVICE,
+            ],
             check=False,
         )
         process_output = bounded_tail(processes.stdout + processes.stderr)
@@ -288,7 +297,7 @@ def test_tls_readiness_timeout_has_bounded_process_and_log_diagnostics(
     assert len(rendered) < 20_000
 
 
-def test_client_rate_probe_dials_caddy_with_localhost_sni(
+def test_client_rate_probe_dials_local_caddy_with_localhost_sni(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     stack = TlsStack("client-probe", tmp_path / "override.yaml", 1, 2, [])
@@ -310,7 +319,7 @@ def test_client_rate_probe_dials_caddy_with_localhost_sni(
     )
 
     assert statuses == [403]
-    assert "('caddy',8443)" in captured["script"]
+    assert "('caddy-local',8443)" in captured["script"]
     assert "server_hostname='localhost'" in captured["script"]
     assert "198.51.100.42" in captured["script"]
 
@@ -344,9 +353,6 @@ services:
   web:
     environment:
 {production_environment}
-  caddy:
-    environment:
-      AEGIS_TLS_HOST: localhost
 secrets:
   admin-password:
     file: {password_file}
@@ -357,7 +363,16 @@ secrets:
 
     try:
         started = stack.compose(
-            ["up", "--build", "--detach", "postgres", "migrate", "web", "gateway", "caddy"],
+            [
+                "up",
+                "--build",
+                "--detach",
+                "postgres",
+                "migrate",
+                "web",
+                "gateway",
+                CADDY_SERVICE,
+            ],
             check=False,
         )
         assert started.returncode == 0, started.stdout + started.stderr
@@ -391,7 +406,7 @@ secrets:
 
 def test_tls_listener_alias_is_bound_only_to_tls_hop(tls_stack: TlsStack) -> None:
     gateway = tls_stack.service_container("gateway")
-    caddy = tls_stack.service_container("caddy")
+    caddy = tls_stack.service_container(CADDY_SERVICE)
     gateway_info = json.loads(
         run_command(
             ["docker", "inspect", gateway],
@@ -509,7 +524,7 @@ def test_public_http_ignores_spoofed_forwarding_scheme(tls_stack: TlsStack) -> N
 
 
 def test_caddy_starts_unprivileged_and_output_omits_canaries(tls_stack: TlsStack) -> None:
-    caddy = tls_stack.service_container("caddy")
+    caddy = tls_stack.service_container(CADDY_SERVICE)
     request_canary = "caddy-request-credential-canary"
     header_canary = "caddy-header-credential-canary"
 
@@ -524,7 +539,7 @@ def test_caddy_starts_unprivileged_and_output_omits_canaries(tls_stack: TlsStack
     capabilities = run_command(
         ["docker", "exec", caddy, "getcap", "/usr/bin/caddy"]
     ).stdout.strip()
-    logs = tls_stack.compose(["logs", "--no-color", "caddy"], check=False)
+    logs = tls_stack.compose(["logs", "--no-color", CADDY_SERVICE], check=False)
     rendered = logs.stdout + logs.stderr
 
     assert status == 200
@@ -542,3 +557,32 @@ def test_caddy_starts_unprivileged_and_output_omits_canaries(tls_stack: TlsStack
     ).returncode == 0
     assert request_canary not in rendered
     assert header_canary not in rendered
+
+
+def test_local_caddy_preserves_ca_and_certificate_across_recreation(
+    tls_stack: TlsStack,
+) -> None:
+    certificate_paths = [
+        "/data/caddy/pki/authorities/local/root.crt",
+        "/data/caddy/certificates/local/localhost/localhost.crt",
+    ]
+    original = tls_stack.service_container(CADDY_SERVICE)
+    before = run_command(
+        ["docker", "exec", original, "sha256sum", *certificate_paths]
+    ).stdout
+
+    tls_stack.compose(
+        ["up", "--detach", "--force-recreate", "--no-deps", CADDY_SERVICE]
+    )
+    tls_stack.wait_until_ready()
+
+    recreated = tls_stack.service_container(CADDY_SERVICE)
+    after = run_command(
+        ["docker", "exec", recreated, "sha256sum", *certificate_paths]
+    ).stdout
+    status, _, body = tls_stack.request("/admin/login/", tls=True)
+
+    assert recreated != original
+    assert after == before
+    assert status == 200
+    assert b"csrfmiddlewaretoken" in body
