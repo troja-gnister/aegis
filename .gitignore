@@ -16,6 +16,7 @@
 .env
 .env.local
 .venv/
+/deploy/secrets/dev/
 
 # Python and tool caches
 __pycache__/

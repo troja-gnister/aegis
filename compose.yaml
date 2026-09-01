@@ -1,0 +1,230 @@
+x-backend-image: &backend-image
+  image: aegis-backend
+  build:
+    context: .
+    dockerfile: docker/backend.Dockerfile
+
+x-backend-runtime: &backend-runtime
+  <<: *backend-image
+  user: "${AEGIS_UID:-10001}:${AEGIS_GID:-10001}"
+  networks: [backend]
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,noexec,nosuid,nodev
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  restart: unless-stopped
+
+x-backend-environment: &backend-environment
+  AEGIS_ENV: development
+  AEGIS_PUBLIC_URL: "${AEGIS_PUBLIC_URL:-http://localhost:8080}"
+  AEGIS_ALLOWED_HOSTS: "${AEGIS_ALLOWED_HOSTS:-localhost,127.0.0.1,web}"
+  AEGIS_DB_HOST: "${AEGIS_DB_HOST:-postgres}"
+  AEGIS_DB_PORT: "${AEGIS_DB_PORT:-5432}"
+  AEGIS_DB_NAME: "${AEGIS_DB_NAME:-aegis}"
+  AEGIS_DJANGO_SECRET_KEY_FILE: /run/secrets/django_secret_key
+  DJANGO_SETTINGS_MODULE: aegis.settings.development
+
+services:
+  postgres:
+    image: postgres:18.6-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2
+    environment:
+      POSTGRES_DB: "${AEGIS_DB_NAME:-aegis}"
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_superuser_password
+    networks: [backend]
+    volumes:
+      - postgres-data:/var/lib/postgresql
+      - ./deploy/postgres/init:/docker-entrypoint-initdb.d:ro
+    secrets:
+      - source: postgres-superuser-password
+        target: postgres_superuser_password
+      - source: db-migrator-password
+        target: db_migrator_password
+      - source: db-web-password
+        target: db_web_password
+      - source: db-operations-password
+        target: db_operations_password
+      - source: db-indexer-password
+        target: db_indexer_password
+      - source: db-media-password
+        target: db_media_password
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U postgres -d "${AEGIS_DB_NAME:-aegis}"']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  migrate:
+    <<: *backend-runtime
+    command: [python, manage.py, migrate, --noinput]
+    environment:
+      <<: *backend-environment
+      AEGIS_DB_USER: aegis_migrator
+      AEGIS_DB_PASSWORD_FILE: /run/secrets/db_migrator_password
+    secrets:
+      - source: django-secret-key
+        target: django_secret_key
+      - source: db-migrator-password
+        target: db_migrator_password
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  web:
+    <<: *backend-runtime
+    command: [uvicorn, aegis.asgi:application, --host, 0.0.0.0, --port, "8000"]
+    environment:
+      <<: *backend-environment
+      AEGIS_DB_USER: aegis_web
+      AEGIS_DB_PASSWORD_FILE: /run/secrets/db_web_password
+    volumes:
+      - staging:/srv/aegis/staging
+    secrets:
+      - source: django-secret-key
+        target: django_secret_key
+      - source: db-web-password
+        target: db_web_password
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=2)
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  operations:
+    <<: *backend-runtime
+    command: [python, manage.py, run_role, --role, operations]
+    environment:
+      <<: *backend-environment
+      AEGIS_DB_USER: aegis_operations
+      AEGIS_DB_PASSWORD_FILE: /run/secrets/db_operations_password
+    volumes:
+      - staging:/srv/aegis/staging
+    secrets:
+      - source: django-secret-key
+        target: django_secret_key
+      - source: db-operations-password
+        target: db_operations_password
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  indexer:
+    <<: *backend-runtime
+    command: [python, manage.py, run_role, --role, indexer]
+    environment:
+      <<: *backend-environment
+      AEGIS_DB_USER: aegis_indexer
+      AEGIS_DB_PASSWORD_FILE: /run/secrets/db_indexer_password
+    secrets:
+      - source: django-secret-key
+        target: django_secret_key
+      - source: db-indexer-password
+        target: db_indexer_password
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  media:
+    <<: *backend-runtime
+    command: [python, manage.py, run_role, --role, media]
+    environment:
+      <<: *backend-environment
+      AEGIS_DB_USER: aegis_media
+      AEGIS_DB_PASSWORD_FILE: /run/secrets/db_media_password
+    volumes:
+      - derivatives:/srv/aegis/derivatives
+      - quarantine:/srv/aegis/quarantine
+    secrets:
+      - source: django-secret-key
+        target: django_secret_key
+      - source: db-media-password
+        target: db_media_password
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  gateway:
+    image: aegis-gateway
+    build:
+      context: .
+      dockerfile: docker/gateway.Dockerfile
+    user: "101:101"
+    networks: [backend, edge]
+    ports:
+      - "${AEGIS_HTTP_PORT:-8080}:8080"
+    volumes:
+      - derivatives:/srv/aegis/derivatives:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,noexec,nosuid,nodev
+      - /var/cache/nginx:size=64m,noexec,nosuid,nodev
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    depends_on:
+      web:
+        condition: service_healthy
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    profiles: [tls]
+    command: [caddy, run, --config, /etc/caddy/Caddyfile, --adapter, caddyfile]
+    user: "${AEGIS_UID:-10001}:${AEGIS_GID:-10001}"
+    networks: [edge]
+    ports:
+      - "${AEGIS_HTTPS_PORT:-8443}:8443"
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+    read_only: true
+    tmpfs:
+      - /config:size=16m,noexec,nosuid,nodev
+      - /data:size=32m,noexec,nosuid,nodev
+      - /tmp:size=16m,noexec,nosuid,nodev
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    depends_on:
+      gateway:
+        condition: service_started
+    restart: unless-stopped
+
+networks:
+  backend:
+    internal: true
+  edge:
+    internal: false
+
+volumes:
+  postgres-data:
+  staging:
+  derivatives:
+  model-cache:
+  quarantine:
+  frontier-outbox:
+
+secrets:
+  postgres-superuser-password:
+    file: ./deploy/secrets/dev/postgres-superuser-password
+  db-migrator-password:
+    file: ./deploy/secrets/dev/db-migrator-password
+  db-web-password:
+    file: ./deploy/secrets/dev/db-web-password
+  db-operations-password:
+    file: ./deploy/secrets/dev/db-operations-password
+  db-indexer-password:
+    file: ./deploy/secrets/dev/db-indexer-password
+  db-media-password:
+    file: ./deploy/secrets/dev/db-media-password
+  django-secret-key:
+    file: ./deploy/secrets/dev/django-secret-key

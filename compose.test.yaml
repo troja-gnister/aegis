@@ -1,0 +1,8 @@
+services:
+  postgres:
+    environment:
+      POSTGRES_INITDB_ARGS: --encoding=UTF8 --locale=C
+  web:
+    environment:
+      AEGIS_ENV: test
+      DJANGO_SETTINGS_MODULE: aegis.settings.test
