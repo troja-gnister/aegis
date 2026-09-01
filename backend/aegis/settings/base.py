@@ -1,11 +1,20 @@
 import os
 from pathlib import Path
 
+from aegis.config import RuntimeConfig
+
 BASE_DIR = Path(__file__).resolve().parents[2]
 
-SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "development-only-secret-key")
+_runtime_environ = dict(os.environ)
+if _runtime_environ.get("AEGIS_ENV", "development").strip().lower() != "production":
+    _runtime_environ.setdefault("AEGIS_DJANGO_SECRET_KEY", "development-only-secret-key")
+    _runtime_environ.setdefault("AEGIS_DB_PASSWORD", "development-only-database-password")
+RUNTIME_CONFIG = RuntimeConfig.from_environ(_runtime_environ)
+
+AEGIS_ENVIRONMENT = RUNTIME_CONFIG.environment
+SECRET_KEY = RUNTIME_CONFIG.django_secret_key
 DEBUG = False
-ALLOWED_HOSTS: list[str] = []
+ALLOWED_HOSTS = list(RUNTIME_CONFIG.allowed_hosts)
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -51,11 +60,11 @@ ASGI_APPLICATION = "aegis.asgi.application"
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
-        "NAME": os.environ.get("POSTGRES_DB", "aegis"),
-        "USER": os.environ.get("POSTGRES_USER", "aegis"),
-        "PASSWORD": os.environ.get("POSTGRES_PASSWORD", "aegis"),
-        "HOST": os.environ.get("POSTGRES_HOST", "localhost"),
-        "PORT": os.environ.get("POSTGRES_PORT", "5432"),
+        "NAME": RUNTIME_CONFIG.db_name,
+        "USER": RUNTIME_CONFIG.db_user,
+        "PASSWORD": RUNTIME_CONFIG.db_password,
+        "HOST": RUNTIME_CONFIG.db_host,
+        "PORT": RUNTIME_CONFIG.db_port,
     }
 }
 
