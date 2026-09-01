@@ -175,6 +175,8 @@ def gateway(tmp_path_factory: pytest.TempPathFactory) -> Iterator[GatewayHarness
             "ALL",
             "--security-opt",
             "no-new-privileges:true",
+            "--env",
+            "NGINX_ENTRYPOINT_QUIET_LOGS=1",
             "--publish",
             "127.0.0.1::8080",
             "--mount",
@@ -359,25 +361,38 @@ def test_protected_aliases_cannot_be_requested_directly(
     assert_security_headers(response)
 
 
-def test_gateway_logs_omit_request_path_query_and_header_canaries(
+def test_every_gateway_log_line_is_bounded_json_without_canaries(
     gateway: GatewayHarness,
 ) -> None:
-    canary = "nginx-credential-canary"
+    request_canary = "nginx-credential-canary"
     header_canary = "invalid credential canary"
+    filesystem_canary = "filesystem-secret-canary"
 
     response = gateway.request(
-        f"/missing/{canary}?credentials={canary}",
+        f"/admin-static/admin/{filesystem_canary}/{request_canary}"
+        f"?credentials={request_canary}",
         headers={"X-Request-ID": header_canary},
     )
     logs = docker("logs", gateway.container_name)
     rendered = f"{logs.stdout}\n{logs.stderr}"
-    access_lines = [
-        line for line in rendered.splitlines() if '"logger":"nginx.access"' in line
-    ]
+    lines = [line for line in rendered.splitlines() if line]
 
-    assert response.status == 200
-    assert canary not in rendered
+    assert response.status == 404
+    assert request_canary not in rendered
     assert header_canary not in rendered
-    assert access_lines
-    assert all(len(line.encode("utf-8")) < 512 for line in access_lines)
-    assert all(isinstance(json.loads(line), dict) for line in access_lines)
+    assert filesystem_canary not in rendered
+    assert lines
+    for line in lines:
+        assert len(line.encode("utf-8")) < 512
+        payload = json.loads(line)
+        assert set(payload) == {
+            "timestamp",
+            "level",
+            "logger",
+            "message",
+            "request_id",
+            "status",
+        }
+        assert payload["level"] == "INFO"
+        assert payload["logger"] == "nginx.access"
+        assert payload["message"] == "HTTP request completed"

@@ -169,6 +169,8 @@ services:
       context: .
       dockerfile: docker/gateway.Dockerfile
     user: "101:101"
+    environment:
+      NGINX_ENTRYPOINT_QUIET_LOGS: "1"
     networks: [backend, edge]
     ports:
       - "${AEGIS_HTTP_PORT:-8080}:8080"

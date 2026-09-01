@@ -50,6 +50,43 @@ def test_nginx_configuration_parses_with_pinned_runtime() -> None:
     )
 
 
+def test_nginx_configuration_failure_remains_visible_to_ci(tmp_path: Path) -> None:
+    config = (REPOSITORY / "deploy" / "nginx" / "nginx.conf").read_text(
+        encoding="utf-8"
+    )
+    invalid = tmp_path / "invalid-nginx.conf"
+    invalid.write_text(
+        config.replace("worker_processes auto;", "invalid_directive;", 1),
+        encoding="utf-8",
+    )
+    image = (
+        "nginxinc/nginx-unprivileged:1.30.4-alpine@"
+        "sha256:45ce1e2e699234253d1def7baa96218a5d00b498d1ba0cbb1a17b6bdf73d1351"
+    )
+
+    result = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--add-host",
+            "web:127.0.0.1",
+            "--volume",
+            f"{invalid}:/etc/nginx/nginx.conf:ro",
+            "--entrypoint",
+            "nginx",
+            image,
+            "-t",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "invalid_directive" in result.stderr
+
+
 def test_gateway_build_collects_only_admin_static_with_pinned_python_stage() -> None:
     dockerfile = (REPOSITORY / "docker" / "gateway.Dockerfile").read_text(encoding="utf-8")
     final_stage = dockerfile.split(

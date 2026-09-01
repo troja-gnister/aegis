@@ -24,6 +24,7 @@ RUN python manage.py collectstatic --noinput
 
 FROM nginxinc/nginx-unprivileged:1.30.4-alpine@sha256:45ce1e2e699234253d1def7baa96218a5d00b498d1ba0cbb1a17b6bdf73d1351
 
+ENV NGINX_ENTRYPOINT_QUIET_LOGS=1
 COPY deploy/nginx/nginx.conf /etc/nginx/nginx.conf
 COPY --from=frontend-build /frontend/dist/ /usr/share/nginx/html/
 COPY --from=admin-static-build /app/backend/staticfiles/admin/ /usr/share/nginx/html/admin-static/admin/
