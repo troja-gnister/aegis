@@ -10,16 +10,7 @@ from django.forms import ModelForm
 
 from aegis_apps.audit.services import record_event
 
-from .models import User
-
-_GROUP_SUBJECT_NAMESPACE = uuid.UUID("f57fae28-80bc-4d62-8a0d-f00f4275d810")
-
-
-def group_subject_id(group_id: int) -> uuid.UUID:
-    """Map an auth Group PK into the stable aegis.identity.auth-group.v1 UUID domain."""
-    if isinstance(group_id, bool) or not isinstance(group_id, int) or group_id <= 0:
-        raise ValueError("group ID must be a positive integer")
-    return uuid.uuid5(_GROUP_SUBJECT_NAMESPACE, f"aegis.identity.auth-group.v1:{group_id}")
+from .models import GroupIdentity, User
 
 
 def _metadata(subject_id: uuid.UUID) -> dict[str, str]:
@@ -78,7 +69,8 @@ def save_group_from_admin(
             raise ValueError("group members are invalid")
         group.user_set.set(members)
 
-        subject_id = group_subject_id(group.pk)
+        identity, _ = GroupIdentity.objects.select_for_update().get_or_create(group=group)
+        subject_id = identity.pk
         if created:
             event_type = "identity.group.created"
         elif changes - {"members"}:

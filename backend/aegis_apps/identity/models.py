@@ -1,7 +1,7 @@
 import uuid
 from typing import ClassVar
 
-from django.contrib.auth.models import AbstractUser
+from django.contrib.auth.models import AbstractUser, Group
 from django.db import models
 from django.utils.translation import gettext_lazy as _
 
@@ -19,3 +19,12 @@ class User(AbstractUser):
                 name="identity_user_username_nonempty",
             )
         ]
+
+
+class GroupIdentity(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    group = models.OneToOneField(
+        Group,
+        on_delete=models.PROTECT,
+        related_name="aegis_identity",
+    )

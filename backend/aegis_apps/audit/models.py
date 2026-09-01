@@ -8,7 +8,9 @@ from typing import Any
 from django.conf import settings
 from django.db import models
 
-_audit_write_allowed: ContextVar[bool] = ContextVar("aegis_audit_write_allowed", default=False)
+_audit_write_capability: ContextVar[object | None] = ContextVar(
+    "aegis_audit_write_capability", default=None
+)
 
 
 def _immutable() -> PermissionError:
@@ -96,16 +98,18 @@ class AuditEvent(models.Model):
     objects = AuditEventManager()
 
     class Meta:
+        base_manager_name = "objects"
+        default_manager_name = "objects"
         ordering = ("-occurred_at", "-id")
 
     def save(self, *args: Any, **kwargs: Any) -> None:
-        if not self._state.adding or not _audit_write_allowed.get():
+        if not self._state.adding or _audit_write_capability.get() is not self:
             raise _immutable()
         kwargs["force_insert"] = True
         super().save(*args, **kwargs)
 
     def save_base(self, *args: Any, **kwargs: Any) -> None:
-        if not self._state.adding or not _audit_write_allowed.get():
+        if not self._state.adding or _audit_write_capability.get() is not self:
             raise _immutable()
         super().save_base(*args, **kwargs)
 

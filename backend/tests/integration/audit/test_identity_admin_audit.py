@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import uuid
 from collections.abc import Iterator
 from typing import Any
 
 import pytest
 from aegis_apps.audit.models import AuditEvent
-from aegis_apps.identity.admin_services import group_subject_id
-from aegis_apps.identity.models import User
+from aegis_apps.identity.models import GroupIdentity, User
 from django.contrib import admin
 from django.contrib.auth.models import Group, Permission
 from django.test import Client
@@ -66,13 +64,16 @@ def _event_types() -> list[str]:
     return list(AuditEvent.objects.order_by("occurred_at").values_list("event_type", flat=True))
 
 
-def test_group_subject_id_is_stable_domain_separated_uuid5() -> None:
-    first = group_subject_id(41)
+def test_group_identity_is_persisted_random_uuid_not_derived_from_group_pk() -> None:
+    first_group = Group.objects.create(name="Random Identity One")
+    second_group = Group.objects.create(name="Random Identity Two")
+    first = GroupIdentity.objects.create(group=first_group)
+    second = GroupIdentity.objects.create(group=second_group)
 
-    assert first == group_subject_id(41)
-    assert first != group_subject_id(42)
-    assert first.version == 5
-    assert first != uuid.uuid5(uuid.NAMESPACE_URL, "41")
+    assert first.id.version == 4
+    assert second.id.version == 4
+    assert first.id != second.id
+    assert str(first_group.pk) not in first.__dict__.values()
 
 
 def test_real_user_add_post_hashes_password_once_and_records_one_event(
@@ -210,6 +211,7 @@ def test_group_create_and_combined_change_use_stable_subject_and_one_event(
         headers={"X-Request-ID": REQUEST_ID},
     )
     group = Group.objects.get(name="Reviewers")
+    identity = GroupIdentity.objects.get(group=group)
     create_event = AuditEvent.objects.get()
     changed = client.post(
         reverse("admin:auth_group_change", args=[group.pk]),
@@ -226,10 +228,13 @@ def test_group_create_and_combined_change_use_stable_subject_and_one_event(
     events = list(AuditEvent.objects.order_by("occurred_at"))
     assert created.status_code == changed.status_code == 302
     assert create_event.event_type == "identity.group.created"
-    assert all(event.object_id == group_subject_id(group.pk) for event in events)
+    assert identity.id.version == 4
+    assert all(event.object_id == identity.id for event in events)
     assert all(
-        event.metadata == {"subject_id": str(group_subject_id(group.pk))} for event in events
+        event.metadata == {"subject_id": str(identity.id)} for event in events
     )
+    assert all(group.name not in str(event.metadata) for event in events)
+    assert all("group_id" not in event.metadata for event in events)
     assert [event.event_type for event in events] == [
         "identity.group.created",
         "identity.group.changed",
@@ -256,6 +261,8 @@ def test_group_membership_only_change_is_one_event_and_noop_is_silent(client: Cl
 
     assert changed.status_code == unchanged.status_code == 302
     assert _event_types() == ["identity.group.membership.changed"]
+    identity = GroupIdentity.objects.get(group=group)
+    assert AuditEvent.objects.get().object_id == identity.id
 
 
 def test_admin_audit_failure_rolls_back_model_m2m_and_event(
@@ -281,4 +288,5 @@ def test_admin_audit_failure_rolls_back_model_m2m_and_event(
         )
 
     assert not Group.objects.filter(name="Must Roll Back").exists()
+    assert GroupIdentity.objects.count() == 0
     assert AuditEvent.objects.count() == 0

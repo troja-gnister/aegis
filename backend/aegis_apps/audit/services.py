@@ -12,7 +12,7 @@ from aegis_apps.common.middleware import REQUEST_ID
 from aegis_apps.common.redaction import redact
 from aegis_apps.identity.models import User
 
-from .models import AuditEvent, _audit_write_allowed
+from .models import AuditEvent, _audit_write_capability
 
 _EVENT_TYPE = re.compile(r"^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*){1,15}$")
 _OUTCOMES = frozenset({"success", "failure", "denied"})
@@ -65,11 +65,19 @@ def record_event(
     object_id: UUID | str | None = None,
     metadata: Mapping[str, Any] | None = None,
 ) -> AuditEvent:
-    if not isinstance(event_type, str) or _EVENT_TYPE.fullmatch(event_type) is None:
+    if (
+        not isinstance(event_type, str)
+        or not 1 <= len(event_type) <= 96
+        or _EVENT_TYPE.fullmatch(event_type) is None
+    ):
         raise ValueError("invalid audit event type")
-    if outcome not in _OUTCOMES:
+    if not isinstance(outcome, str) or not 1 <= len(outcome) <= 24 or outcome not in _OUTCOMES:
         raise ValueError("invalid audit outcome")
-    if not isinstance(request_id, str) or REQUEST_ID.fullmatch(request_id) is None:
+    if (
+        not isinstance(request_id, str)
+        or not 8 <= len(request_id) <= 64
+        or REQUEST_ID.fullmatch(request_id) is None
+    ):
         raise ValueError("invalid audit request ID")
     if actor is not None and (not isinstance(actor, User) or actor.pk is None):
         raise ValueError("invalid audit actor")
@@ -84,9 +92,9 @@ def record_event(
         metadata=_metadata(metadata),
     )
     with transaction.atomic():
-        token = _audit_write_allowed.set(True)
+        token = _audit_write_capability.set(event)
         try:
             event.save()
         finally:
-            _audit_write_allowed.reset(token)
+            _audit_write_capability.reset(token)
     return event
