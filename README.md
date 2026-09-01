@@ -2,7 +2,7 @@
 
 Aegis is a planned self-hosted, mobile-first file drive and media library. It will combine the focused drive features of Nextcloud with the browsing, filtering, and local organization features of PhotoPrism, without taking ownership of users' files or requiring cloud AI.
 
-> **Project status: Phase 0 design and legacy checkpoint verified; rewrite not yet implemented.** The current source tree remains the legacy Arch Linux hardening CLI, preserved as `legacy-hardening-cli-v0.1.0` at commit `1cb4277`. The approved Phase 1 plan will replace the active tree with the web platform foundation. Do not treat the current binary as the product described below.
+> **Project status: Phase 1 secure-platform foundation in progress.** The legacy Arch Linux hardening CLI remains recoverable as `legacy-hardening-cli-v0.1.0` at commit `1cb4277`. The active tree is now being replaced according to the [approved Phase 1 plan](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md).
 
 The canonical platform design is [docs/superpowers/specs/2026-08-31-aegis-platform-rewrite-design.md](docs/superpowers/specs/2026-08-31-aegis-platform-rewrite-design.md). Its first bounded delivery plan is [docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md).
 
@@ -60,22 +60,22 @@ Every feature pull request must update its row. Implemented and Verified rows li
 
 | ID | Capability | Status | Target | Evidence |
 | --- | --- | --- | --- | --- |
-| PLAT-001 | Docker Compose deployment with gateway, web, workers, PostgreSQL, and explicit roots | Planned | Phase 1 | — |
-| PLAT-002 | Dependency-aware liveness, readiness, and schema gates | Planned | Phase 1 | — |
-| OPS-002 | Structured logs, worker heartbeat, queue age, scan progress, and disk-pressure visibility | Planned | Phase 1 | — |
-| AUTH-001 | Credential login with Argon2id and revocable server-side sessions | Planned | Phase 1 | — |
-| AUTH-002 | Multiple users and groups with administrative management | Planned | Phase 1 | — |
-| AUTH-003 | Additive per-user/group root grants with explicit cross-root operation rules | Planned | Phase 1 | — |
+| PLAT-001 | Docker Compose deployment with gateway, web, workers, PostgreSQL, and explicit roots | In progress | Phase 1 | [Phase 1 plan](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md) |
+| PLAT-002 | Dependency-aware liveness, readiness, and schema gates | In progress | Phase 1 | [Phase 1 plan](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md) |
+| OPS-002 | Structured logs, worker heartbeat, queue age, scan progress, and disk-pressure visibility | In progress | Phase 1 | [Phase 1 plan](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md) |
+| AUTH-001 | Credential login with Argon2id and revocable server-side sessions | In progress | Phase 1 | [Phase 1 plan](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md) |
+| AUTH-002 | Multiple users and groups with administrative management | In progress | Phase 1 | [Phase 1 plan](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md) |
+| AUTH-003 | Additive per-user/group root grants with explicit cross-root operation rules | In progress | Phase 1 | [Phase 1 plan](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md) |
 | AUTH-004 | Optional administrator-enforced TOTP | Planned | Phase 6 | — |
 | FILE-001 | Indexed directory API with stable keyset cursor pagination | Planned | Phase 2 | — |
-| FILE-002 | Deployment-declared mount slots, logical roots, and safe path containment | Planned | Phase 1 | — |
+| FILE-002 | Deployment-declared mount slots, logical roots, and safe path containment | In progress | Phase 1 | [Phase 1 plan](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md) |
 | FILE-003 | Resumable uploads with staging, progress, and conflict handling | Planned | Phase 2 | — |
 | FILE-004 | Create folder, rename, move, copy, and idempotent operation recovery | Planned | Phase 2 | — |
 | FILE-005 | Authorized downloads and browser-compatible byte-range streaming | Planned | Phase 2 | — |
 | FILE-006 | Root-local recycle bin, restore, and configurable retention | Planned | Phase 2 | — |
 | FILE-007 | Filesystem event ingestion plus checkpointed full reconciliation | Planned | Phase 2 | — |
 | FILE-008 | Permission-safe filename and path search | Planned | Phase 2 | — |
-| UX-001 | Dark responsive authenticated application shell | Planned | Phase 1 | — |
+| UX-001 | Dark responsive authenticated application shell | In progress | Phase 1 | [Phase 1 plan](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md) |
 | UX-002 | Virtualized mobile Files UI and persistent resumable transfer manager | Planned | Phase 2 | — |
 | UX-003 | Installable PWA with Files, Photos, Search, and More navigation | Planned | Phase 3 | — |
 | UX-004 | Reconnectable server-sent operation, transfer, and job progress | Planned | Phase 2 | — |
@@ -94,8 +94,8 @@ Every feature pull request must update its row. Implemented and Verified rows li
 | AI-002 | Optional GPU acceleration using a deployment profile | Planned | Phase 5 | — |
 | AI-003 | Semantic search and virtual smart albums with provenance and confidence | Planned | Phase 5 | — |
 | AI-004 | Explicit per-capability frontier API connector | Planned | Phase 5 | — |
-| SEC-001 | Hardened same-origin edge, least-privilege containers, and safe content handling | Planned | Phase 1 | — |
-| SEC-002 | Authentication, grant, and administration audit trail | Planned | Phase 1 | — |
+| SEC-001 | Hardened same-origin edge, least-privilege containers, and safe content handling | In progress | Phase 1 | [Phase 1 plan](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md) |
+| SEC-002 | Authentication, grant, and administration audit trail | In progress | Phase 1 | [Phase 1 plan](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md) |
 | SEC-003 | File mutation, trash, and restore audit trail | Planned | Phase 2 | — |
 | SEC-004 | Frontier egress audit trail and isolation tests | Planned | Phase 5 | — |
 | SEC-005 | Release security/rate-limit review and hostile-content gate | Planned | Phase 6 | — |
@@ -108,12 +108,12 @@ Every feature pull request must update its row. Implemented and Verified rows li
 
 ## Roadmap
 
-The current focus is **Phase 1 — Secure foundation**. Its plan is approved, but implementation has not started. A phase is complete only when its acceptance gate passes; landing some listed features is not enough.
+The current focus is **[Phase 1 — Secure foundation](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md)**. Implementation is in progress. A phase is complete only when its acceptance gate passes; landing some listed features is not enough.
 
 | Phase | Deliverable | Acceptance gate | Status |
 | --- | --- | --- | --- |
 | 0 — Design and checkpoint | Canonical README/specification, legacy release tag, and first bounded implementation plan | Design reviewed, legacy state recoverable by name, and clean documentation checkpoint | Verified |
-| 1 — Secure foundation | Django/React/PostgreSQL/Compose skeleton, same-origin auth, role-scoped credentials/volumes, mount slots, users/groups/grants, fenced job/operation primitives, health, and CI | A user can sign in and reach only an authorized root shell through the least-privilege deployed stack | Planned |
+| 1 — Secure foundation | Django/React/PostgreSQL/Compose skeleton, same-origin auth, role-scoped credentials/volumes, mount slots, users/groups/grants, fenced job/operation primitives, health, and CI | A user can sign in and reach only an authorized root shell through the least-privilege deployed stack | In progress |
 | 2 — Scalable drive core | Indexer, cursor browser, functional mobile Files/transfers UI, search, resumable upload, full mutations, trash, reconciliation, and audit | Complete UI and API workflows pass against 1M total entries and a 50K-entry folder | Planned |
 | 3 — Mobile media and documents | Installable PWA navigation, thumbnails, photo timeline, photo/video viewers, range/HLS delivery, and PDF/text/CSV viewers | Mobile interaction budgets and Chromium/WebKit browser journeys pass | Planned |
 | 4 — Search and human organization | Rich metadata, albums, tags, ratings, favorites, duplicates, and full-text search | Combined search remains correct and permission-safe across users and roots | Planned |
