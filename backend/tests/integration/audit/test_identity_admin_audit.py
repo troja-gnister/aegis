@@ -1,26 +1,17 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import Any
 
 import pytest
 from aegis_apps.audit.models import AuditEvent
 from aegis_apps.identity.models import GroupIdentity, User
-from django.contrib import admin
 from django.contrib.auth.models import Group, Permission
 from django.test import Client
-from django.urls import path, reverse
+from django.urls import reverse
 
 pytestmark = [pytest.mark.integration, pytest.mark.django_db(transaction=True)]
 REQUEST_ID = "admin_request-1234"
 PASSWORD = "Maple-Cloud-Anchor-731!"
-
-urlpatterns = [path("test-admin/", admin.site.urls)]
-
-
-@pytest.fixture(autouse=True)
-def _admin_urls(settings: Any) -> None:
-    settings.ROOT_URLCONF = __name__
 
 
 @pytest.fixture
@@ -62,6 +53,20 @@ def _user_change_data(user: User, **overrides: object) -> dict[str, object]:
 
 def _event_types() -> list[str]:
     return list(AuditEvent.objects.order_by("occurred_at").values_list("event_type", flat=True))
+
+
+def test_production_admin_route_is_mounted_with_no_store_and_request_id(
+    client: Client,
+) -> None:
+    response = client.get(
+        reverse("admin:index"), headers={"X-Request-ID": REQUEST_ID}
+    )
+
+    assert response.request["PATH_INFO"] == "/admin/"
+    assert response.status_code == 200
+    assert "no-store" in response.headers["Cache-Control"]
+    assert response.headers["X-Request-ID"] == REQUEST_ID
+    assert b'href="/admin-static/admin/css/base.css"' in response.content
 
 
 def test_group_identity_is_persisted_random_uuid_not_derived_from_group_pk() -> None:
@@ -153,7 +158,7 @@ def test_default_password_change_bypass_is_not_routable_or_linked(client: Client
     change_page = client.get(reverse("admin:identity_user_change", args=[user.pk]))
 
     response = client.post(
-        f"/test-admin/identity/user/{user.pk}/password/",
+        f"/admin/identity/user/{user.pk}/password/",
         {
             "password1": "Ocean-Quartz-Bridge-884!",
             "password2": "Ocean-Quartz-Bridge-884!",

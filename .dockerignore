@@ -14,5 +14,6 @@
 deploy/secrets
 frontend/node_modules
 frontend/dist
+backend/staticfiles
 tests
 docs

@@ -2,6 +2,16 @@ import json
 import subprocess
 from pathlib import Path
 
+REPOSITORY = Path(__file__).resolve().parents[2]
+UV_IMAGE = (
+    "ghcr.io/astral-sh/uv:0.12.8@"
+    "sha256:d1cbaeadc234fe19c0d93daabcf5e98738cd93c6d1dd4918ef6aa30735feb23a"
+)
+PYTHON_IMAGE = (
+    "python:3.13.15-slim-trixie@"
+    "sha256:881d80734ee05dca6f7f42dcb080975652a53c7eda9ba1f03bb8da31aa6a6ec2"
+)
+
 
 def rendered_compose() -> dict:
     result = subprocess.run(
@@ -14,8 +24,7 @@ def rendered_compose() -> dict:
 
 
 def test_nginx_configuration_parses_with_pinned_runtime() -> None:
-    repository = Path(__file__).resolve().parents[2]
-    config = repository / "deploy" / "nginx" / "nginx.conf"
+    config = REPOSITORY / "deploy" / "nginx" / "nginx.conf"
     image = (
         "nginxinc/nginx-unprivileged:1.30.4-alpine@"
         "sha256:45ce1e2e699234253d1def7baa96218a5d00b498d1ba0cbb1a17b6bdf73d1351"
@@ -40,6 +49,22 @@ def test_nginx_configuration_parses_with_pinned_runtime() -> None:
         text=True,
     )
 
+
+def test_gateway_build_collects_only_admin_static_with_pinned_python_stage() -> None:
+    dockerfile = (REPOSITORY / "docker" / "gateway.Dockerfile").read_text(encoding="utf-8")
+    final_stage = dockerfile.split(
+        "FROM nginxinc/nginx-unprivileged:1.30.4-alpine@", maxsplit=1
+    )[1]
+
+    assert f"FROM {UV_IMAGE} AS admin-static-uv" in dockerfile
+    assert f"FROM {PYTHON_IMAGE} AS admin-static-build" in dockerfile
+    assert "python manage.py collectstatic --noinput" in dockerfile
+    assert (
+        "COPY --from=admin-static-build /app/backend/staticfiles/admin/ "
+        "/usr/share/nginx/html/admin-static/admin/"
+    ) in final_stage
+    assert "/app/backend/staticfiles/ /usr/share/nginx/html/admin-static/" not in final_stage
+    assert "COPY --from=admin-static-build /app/.venv" not in final_stage
 
 def test_core_services_are_unprivileged_and_postgres_is_private() -> None:
     config = rendered_compose()

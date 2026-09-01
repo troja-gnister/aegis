@@ -115,11 +115,15 @@ def gateway(tmp_path_factory: pytest.TempPathFactory) -> Iterator[GatewayHarness
     gateway_name = f"{prefix}-nginx"
     static_root = tmp_path_factory.mktemp("gateway-static")
     assets = static_root / "assets"
+    admin_css = static_root / "admin-static" / "admin" / "css"
     assets.mkdir()
+    admin_css.mkdir(parents=True)
     static_root.chmod(0o755)
     assets.chmod(0o755)
+    admin_css.chmod(0o755)
     (static_root / "index.html").write_text("spa-shell", encoding="utf-8")
     (assets / "app-abcdefgh.js").write_text("asset-body", encoding="utf-8")
+    (admin_css / "base.css").write_text("admin-css", encoding="utf-8")
 
     try:
         docker("network", "create", "--label", f"aegis.test.scope={suffix}", network_name)
@@ -267,6 +271,47 @@ def test_login_rate_limit_rejects_excess_without_limiting_other_api(
     assert_security_headers(rejected)
     assert_private_no_store(rejected)
     assert gateway.request("/api/not-login", method="POST").status == 200
+
+
+def test_admin_login_rate_limit_is_exact_and_other_admin_routes_are_unlimited(
+    gateway: GatewayHarness,
+) -> None:
+    login_responses = [
+        gateway.request("/admin/login/", method="POST") for _ in range(25)
+    ]
+    rejected = next(
+        response for response in login_responses if response.status in {429, 503}
+    )
+
+    assert any(response.status == 200 for response in login_responses)
+    assert_security_headers(rejected)
+    assert_private_no_store(rejected)
+    assert SAFE_REQUEST_ID.fullmatch(rejected.headers["X-Request-ID"])
+    assert gateway.request("/admin/auth/group/", method="POST").status == 200
+
+
+def test_admin_proxy_is_private_and_preserves_bounded_request_identity(
+    gateway: GatewayHarness,
+) -> None:
+    request_id = "AdminRequest_1234"
+    response = gateway.request("/admin/", headers={"X-Request-ID": request_id})
+
+    assert response.status == 200
+    assert response.json()["request_id"] == request_id
+    assert response.headers["X-Request-ID"] == request_id
+    assert_security_headers(response)
+    assert_private_no_store(response)
+
+
+def test_only_collected_admin_static_subtree_is_public(gateway: GatewayHarness) -> None:
+    asset = gateway.request("/admin-static/admin/css/base.css")
+    outside = gateway.request("/admin-static/not-admin.css")
+
+    assert asset.status == 200
+    assert asset.body == b"admin-css"
+    assert_security_headers(asset)
+    assert outside.status == 404
+    assert_security_headers(outside)
 
 
 @pytest.mark.parametrize("path", ["/api/headers", "/health/live"])
