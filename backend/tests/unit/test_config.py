@@ -87,6 +87,65 @@ def test_secret_file_rejects_more_than_4096_bytes(tmp_path: Path) -> None:
         read_secret({"TOKEN_FILE": str(secret)}, "TOKEN", production=False)
 
 
+def test_secret_read_stays_bound_to_opened_file_during_path_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = _write_secret(tmp_path / "secret", "trusted")
+    original = tmp_path / "original"
+    real_lstat = Path.lstat
+    real_open = os.open
+    replaced = False
+
+    def replace_path() -> None:
+        nonlocal replaced
+        if replaced:
+            return
+        secret.replace(original)
+        _write_secret(secret, "attacker")
+        replaced = True
+
+    def racing_lstat(path: Path) -> os.stat_result:
+        info = real_lstat(path)
+        if path == secret:
+            replace_path()
+        return info
+
+    def racing_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+        if os.fsdecode(path) == str(secret):
+            replace_path()
+        return descriptor
+
+    monkeypatch.setattr(Path, "lstat", racing_lstat)
+    monkeypatch.setattr(os, "open", racing_open)
+
+    assert read_secret({"TOKEN_FILE": str(secret)}, "TOKEN", production=False) == "trusted"
+
+
+def test_secret_bounded_read_rejects_growth_after_fstat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = _write_secret(tmp_path / "secret", "trusted")
+    real_fstat = os.fstat
+
+    def grow_after_fstat(descriptor: int) -> os.stat_result:
+        info = real_fstat(descriptor)
+        with secret.open("ab") as stream:
+            stream.write(b"a" * 4097)
+        return info
+
+    monkeypatch.setattr(os, "fstat", grow_after_fstat)
+
+    with pytest.raises(ConfigurationError, match="exceeds 4096 bytes"):
+        read_secret({"TOKEN_FILE": str(secret)}, "TOKEN", production=False)
+
+
 @pytest.mark.parametrize("value", ["", "\n"])
 def test_secret_file_rejects_empty_value(tmp_path: Path, value: str) -> None:
     secret = _write_secret(tmp_path / "secret", value)
@@ -115,6 +174,24 @@ def test_production_requires_https(tmp_path: Path) -> None:
 
     with pytest.raises(ConfigurationError, match="HTTPS"):
         RuntimeConfig.from_environ(environ)
+
+
+@pytest.mark.parametrize(
+    "public_url",
+    [
+        "https://files.example.test:not-a-port",
+        "https://files.example.test:99999",
+    ],
+)
+def test_public_url_rejects_invalid_port(public_url: str) -> None:
+    with pytest.raises(ConfigurationError, match="AEGIS_PUBLIC_URL"):
+        RuntimeConfig.from_environ(
+            {
+                "AEGIS_DJANGO_SECRET_KEY": "dev-secret",
+                "AEGIS_DB_PASSWORD": "dev-password",
+                "AEGIS_PUBLIC_URL": public_url,
+            }
+        )
 
 
 def test_environment_is_normalized(tmp_path: Path) -> None:

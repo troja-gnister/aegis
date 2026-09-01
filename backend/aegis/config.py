@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import errno
+import os
 import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Literal, overload
 from urllib.parse import urlparse
 
@@ -43,21 +44,41 @@ def read_secret(
     if production and name in environ:
         raise ConfigurationError(f"{name} must be file-backed in production")
     if file_name in environ:
-        path = Path(environ[file_name])
+        no_follow = getattr(os, "O_NOFOLLOW", None)
+        if no_follow is None:
+            raise ConfigurationError(f"{file_name} could not be read safely")
+        flags = os.O_RDONLY | no_follow
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NONBLOCK", 0)
         try:
-            info = path.lstat()
-        except OSError:
+            descriptor = os.open(environ[file_name], flags)
+        except OSError as error:
+            if error.errno == errno.ELOOP:
+                raise ConfigurationError(f"{file_name} must name a regular file") from None
             raise ConfigurationError(f"{file_name} could not be read") from None
-        if not stat.S_ISREG(info.st_mode) or path.is_symlink():
-            raise ConfigurationError(f"{file_name} must name a regular file")
-        if stat.S_IMODE(info.st_mode) != 0o600:
-            raise ConfigurationError(f"{file_name} must have mode 0600")
-        if info.st_size > 4096:
-            raise ConfigurationError(f"{file_name} exceeds 4096 bytes")
         try:
-            value = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
-            raise ConfigurationError(f"{file_name} could not be read") from None
+            try:
+                info = os.fstat(descriptor)
+                if not stat.S_ISREG(info.st_mode):
+                    raise ConfigurationError(f"{file_name} must name a regular file")
+                if stat.S_IMODE(info.st_mode) != 0o600:
+                    raise ConfigurationError(f"{file_name} must have mode 0600")
+                if info.st_size > 4096:
+                    raise ConfigurationError(f"{file_name} exceeds 4096 bytes")
+
+                content = bytearray()
+                while len(content) <= 4096:
+                    chunk = os.read(descriptor, 4097 - len(content))
+                    if not chunk:
+                        break
+                    content.extend(chunk)
+                if len(content) > 4096:
+                    raise ConfigurationError(f"{file_name} exceeds 4096 bytes")
+                value = content.decode("utf-8")
+            except (OSError, UnicodeError):
+                raise ConfigurationError(f"{file_name} could not be read") from None
+        finally:
+            os.close(descriptor)
         if value.endswith("\n"):
             value = value[:-1]
         if not value:
@@ -96,11 +117,19 @@ class RuntimeConfig:
 
         public_url = environ.get("AEGIS_PUBLIC_URL", "http://localhost:8080").strip()
         parsed = urlparse(public_url)
+        try:
+            hostname = parsed.hostname
+            port = parsed.port
+        except ValueError:
+            raise ConfigurationError(
+                "AEGIS_PUBLIC_URL must be an absolute HTTP(S) URL"
+            ) from None
         if (
             parsed.scheme not in {"http", "https"}
-            or not parsed.hostname
+            or not hostname
             or parsed.username is not None
             or parsed.password is not None
+            or (port is not None and not 1 <= port <= 65535)
         ):
             raise ConfigurationError("AEGIS_PUBLIC_URL must be an absolute HTTP(S) URL")
         if production and parsed.scheme != "https":
@@ -108,7 +137,7 @@ class RuntimeConfig:
 
         hosts = tuple(
             host.strip()
-            for host in environ.get("AEGIS_ALLOWED_HOSTS", parsed.hostname).split(",")
+            for host in environ.get("AEGIS_ALLOWED_HOSTS", hostname).split(",")
             if host.strip()
         )
         if production and (not hosts or "*" in hosts):
