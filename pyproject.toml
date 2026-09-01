@@ -1,0 +1,57 @@
+[project]
+name = "aegis-platform"
+version = "0.1.0"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+  "Django>=5.2.17,<5.3",
+  "djangorestframework>=3.16.1,<3.17",
+  "psycopg[binary,pool]>=3.2,<3.3",
+  "argon2-cffi>=25.1,<26",
+  "PyYAML>=6.0,<7",
+  "uvicorn[standard]>=0.35,<1",
+]
+
+[dependency-groups]
+dev = [
+  "django-stubs>=5.2,<6",
+  "hypothesis>=6.138,<7",
+  "mypy>=1.17,<2",
+  "pytest>=8.4,<9",
+  "pytest-django>=4.11,<5",
+  "pytest-xdist>=3.8,<4",
+  "ruff>=0.12,<1",
+]
+
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["backend/aegis", "backend/aegis_apps"]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "aegis.settings.test"
+pythonpath = ["backend"]
+testpaths = ["backend/tests", "tests/deployment"]
+addopts = "-ra --strict-markers"
+markers = [
+  "integration: requires real PostgreSQL or the Compose stack",
+]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"backend/aegis_apps/identity/migrations/*.py" = ["E501", "RUF012"]
+
+[tool.mypy]
+python_version = "3.13"
+plugins = ["mypy_django_plugin.main"]
+strict = true
+
+[tool.django-stubs]
+django_settings_module = "aegis.settings.test"
