@@ -530,16 +530,34 @@ def render_artifacts(
         "operations": {
             "user": identity,
             "environment": backend_environment,
+            "command": [
+                "/bin/sh",
+                "-ec",
+                "aegisctl mounts attest --manifest /run/aegis/mounts.manifest.json "
+                "--role operations && exec python manage.py run_role --role operations",
+            ],
             "volumes": service_volumes["operations"],
         },
         "indexer": {
             "user": identity,
             "environment": backend_environment,
+            "command": [
+                "/bin/sh",
+                "-ec",
+                "aegisctl mounts attest --manifest /run/aegis/mounts.manifest.json "
+                "--role indexer && exec python manage.py run_role --role indexer",
+            ],
             "volumes": service_volumes["indexer"],
         },
         "media": {
             "user": identity,
             "environment": backend_environment,
+            "command": [
+                "/bin/sh",
+                "-ec",
+                "aegisctl mounts attest --manifest /run/aegis/mounts.manifest.json "
+                "--role media && exec python manage.py run_role --role media",
+            ],
             "volumes": service_volumes["media"],
         },
         "gateway": {

@@ -132,3 +132,32 @@ def test_gateway_rejects_invalid_or_excessive_attempt_override(tmp_path: Path) -
         assert not wget_call.exists()
         log = json.loads(result.stderr)
         assert log["message"] == "Gateway startup configuration invalid"
+
+
+def test_gateway_mount_attestation_runs_before_proxy_probe(tmp_path: Path) -> None:
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    wget_call = tmp_path / "wget-call"
+    nginx_call = tmp_path / "nginx-call"
+    _write_command(commands, "wget", f"touch {wget_call}")
+    _write_command(commands, "nginx", f"touch {nginx_call}")
+
+    result = subprocess.run(
+        ["/bin/sh", START_SCRIPT],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=os.environ
+        | {
+            "PATH": f"{commands}:/bin:/usr/bin",
+            "AEGIS_PUBLIC_URL": "https://public.example.test",
+            "AEGIS_GATEWAY_MOUNT_ATTESTATION": str(tmp_path / "private-canary"),
+        },
+    )
+
+    assert result.returncode != 0
+    assert not wget_call.exists()
+    assert not nginx_call.exists()
+    log = json.loads(result.stderr)
+    assert log["message"] == "Gateway mount attestation failed"
+    assert "private-canary" not in result.stderr

@@ -25,6 +25,9 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 /backend/staticfiles/
+/deploy/mounts.manifest.json
+/deploy/mounts.gateway.attestation
+/compose.mounts.generated.yaml
 
 # Frontend dependencies and build output
 /frontend/node_modules/

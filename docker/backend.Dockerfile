@@ -9,6 +9,7 @@ COPY pyproject.toml uv.lock ./
 COPY backend/manage.py ./backend/manage.py
 COPY backend/aegis ./backend/aegis
 COPY backend/aegis_apps ./backend/aegis_apps
+COPY backend/aegisctl ./backend/aegisctl
 RUN uv sync --locked --no-dev --no-editable
 
 FROM python:3.13.15-slim-trixie@sha256:881d80734ee05dca6f7f42dcb080975652a53c7eda9ba1f03bb8da31aa6a6ec2

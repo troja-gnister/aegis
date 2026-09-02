@@ -12,6 +12,14 @@ log_event() {
         "$timestamp" "$level" "$message" >&2
 }
 
+mount_attest="/usr/local/bin/aegis-mount-attest"
+if [ ! -x "$mount_attest" ]; then
+    mount_attest="$(dirname "$0")/entrypoint/10-aegis-mount-attestation.sh"
+fi
+if ! /bin/sh "$mount_attest"; then
+    exit 1
+fi
+
 public_url="${AEGIS_PUBLIC_URL:-}"
 case "$public_url" in
     http://*)

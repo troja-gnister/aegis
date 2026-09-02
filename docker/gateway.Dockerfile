@@ -18,6 +18,7 @@ COPY pyproject.toml uv.lock ./
 COPY backend/manage.py ./backend/manage.py
 COPY backend/aegis ./backend/aegis
 COPY backend/aegis_apps ./backend/aegis_apps
+COPY backend/aegisctl ./backend/aegisctl
 RUN uv sync --locked --no-dev --no-editable
 WORKDIR /app/backend
 RUN python manage.py collectstatic --noinput
@@ -28,6 +29,7 @@ ENV NGINX_ENTRYPOINT_QUIET_LOGS=1
 COPY deploy/nginx/nginx.conf /etc/nginx/nginx.conf
 COPY deploy/nginx/aegis-server.conf /etc/nginx/aegis-server.conf
 COPY --chmod=0555 deploy/nginx/start-gateway.sh /usr/local/bin/aegis-gateway-start
+COPY --chmod=0555 deploy/nginx/entrypoint/10-aegis-mount-attestation.sh /usr/local/bin/aegis-mount-attest
 COPY --from=frontend-build /frontend/dist/ /usr/share/nginx/html/
 COPY --from=admin-static-build /app/backend/staticfiles/admin/ /usr/share/nginx/html/admin-static/admin/
 EXPOSE 8080
