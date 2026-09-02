@@ -35,21 +35,26 @@ def _clear_decision_cache() -> Iterator[None]:
 
 
 def _configure_manifest(
-    *, path: Path, monkeypatch: pytest.MonkeyPatch, mode: str = "read_write"
+    *,
+    path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str = "read_write",
+    slot_ids: tuple[str, ...] = ("photos",),
 ) -> None:
     payload = {
         "version": 1,
         "generatedAt": "2026-09-02T12:34:56Z",
         "slots": [
             {
-                "slotId": "photos",
-                "containerPath": "/srv/aegis/roots/photos",
+                "slotId": slot_id,
+                "containerPath": f"/srv/aegis/roots/{slot_id}",
                 "mode": mode,
-                "filesystemId": 123,
-                "rootInode": 456,
-                "expectedIdentity": "remote:nas.invalid:/opaque",
-                "mountFingerprint": "a" * 64,
+                "filesystemId": 123 + index,
+                "rootInode": 456 + index,
+                "expectedIdentity": f"remote:nas.invalid:/opaque/{index}",
+                "mountFingerprint": f"{index + 1:x}" * 64,
             }
+            for index, slot_id in enumerate(slot_ids)
         ],
     }
     raw = (json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n").encode()
@@ -122,6 +127,79 @@ def test_set_user_grant_is_idempotent_audited_and_invalidates_only_on_commit(
     assert root.authorization_epoch == subject.authorization_epoch == 2
     assert AuditEvent.objects.count() == 2
     assert effective_permissions(user_id=subject.id, root_id=root.id) == Permission.PREVIEW
+
+
+def test_create_root_exact_repeat_is_a_silent_idempotent_noop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _configure_manifest(path=tmp_path / "manifest.json", monkeypatch=monkeypatch)
+    actor = User.objects.create_superuser(username="idempotent-create-actor")
+
+    first = create_root(
+        actor=actor,
+        slot_id="photos",
+        display_name="Photos",
+        mode=Root.Mode.READ_ONLY,
+        active=True,
+        request_id=REQUEST_ID,
+    )
+    repeated = create_root(
+        actor=actor,
+        slot_id="photos",
+        display_name="Photos",
+        mode=Root.Mode.READ_ONLY,
+        active=True,
+        request_id=REQUEST_ID,
+    )
+
+    assert repeated.id == first.id
+    assert Root.objects.count() == 1
+    assert Root.objects.get().authorization_epoch == 0
+    assert list(AuditEvent.objects.values_list("event_type", flat=True)) == [
+        "authorization.root.created"
+    ]
+
+
+def test_update_root_changes_only_to_another_live_manifest_slot_and_advances_epochs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _configure_manifest(
+        path=tmp_path / "manifest.json",
+        monkeypatch=monkeypatch,
+        slot_ids=("photos", "documents"),
+    )
+    actor = User.objects.create_superuser(username="slot-change-actor")
+    subject = User.objects.create_user(username="slot-change-subject")
+    root = _root()
+    RootGrant.objects.create(root=root, user=subject, permissions=Permission.BROWSE)
+
+    changed = update_root(
+        actor=actor,
+        root_id=root.id,
+        slot_id="documents",
+        request_id=REQUEST_ID,
+    )
+    repeated = update_root(
+        actor=actor,
+        root_id=root.id,
+        slot_id="documents",
+        request_id=REQUEST_ID,
+    )
+
+    subject.refresh_from_db()
+    assert changed.id == repeated.id == root.id
+    assert changed.slot_id == "documents"
+    assert changed.authorization_epoch == 1
+    assert subject.authorization_epoch == 1
+    assert AuditEvent.objects.count() == 1
+
+    with pytest.raises(ValueError, match="manifest slot"):
+        update_root(
+            actor=actor,
+            root_id=root.id,
+            slot_id="missing-slot",
+            request_id=REQUEST_ID,
+        )
 
 
 def test_set_group_grant_uses_opaque_identity_and_only_current_members(

@@ -32,6 +32,17 @@ class RootListView(APIView):
     permission_classes = ()
     renderer_classes = (JSONRenderer,)
 
+    def finalize_response(
+        self,
+        request: Request,
+        response: Response,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Response:
+        finalized = super().finalize_response(request, response, *args, **kwargs)
+        finalized["Cache-Control"] = "private, no-store"
+        return finalized
+
     def get(self, request: Request) -> Response:
         user = request.user
         if not isinstance(user, User) or not user.is_authenticated:

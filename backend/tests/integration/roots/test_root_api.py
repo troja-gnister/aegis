@@ -81,6 +81,13 @@ def test_root_list_requires_authentication_and_never_caches() -> None:
     assert response.headers["Cache-Control"] == "private, no-store"
 
 
+def test_root_list_framework_errors_are_also_never_cached() -> None:
+    response = Client().post("/api/v1/roots")
+
+    assert response.status_code == 405
+    assert response.headers["Cache-Control"] == "private, no-store"
+
+
 def test_root_list_returns_empty_for_intentionally_unconfigured_mounts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

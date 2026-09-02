@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import uuid
 from collections.abc import Collection, Iterable
 from functools import partial
@@ -7,7 +8,7 @@ from functools import partial
 from aegisctl.mounts import SLOT_ID_RE
 from django.contrib.auth.models import Group
 from django.core.exceptions import ValidationError
-from django.db import transaction
+from django.db import connection, transaction
 from django.db.models import F, Q
 
 from aegis_apps.audit.services import record_event
@@ -25,6 +26,7 @@ class _Unset:
 
 
 _UNSET = _Unset()
+_ROOT_SLOT_LOCK_DOMAIN = b"aegis.authorization.root-slot.v1\x00"
 
 
 def _validate_common(*, actor: User, request_id: str) -> None:
@@ -48,6 +50,13 @@ def _validate_group_id(value: object) -> int:
     if type(value) is not int or value <= 0:
         raise ValueError("invalid group ID")
     return value
+
+
+def _lock_root_slot(slot_id: str) -> None:
+    digest = hashlib.sha256(_ROOT_SLOT_LOCK_DOMAIN + slot_id.encode("ascii")).digest()
+    lock_key = int.from_bytes(digest[:8], byteorder="big", signed=True)
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT pg_advisory_xact_lock(%s)", [lock_key])
 
 
 def _validate_root_definition(root: Root) -> None:
@@ -146,6 +155,7 @@ def create_root(
     if not isinstance(active, bool):
         raise ValueError("invalid root active state")
     with transaction.atomic():
+        _lock_root_slot(slot_id)
         root = Root(
             slot_id=slot_id,
             display_name=display_name,
@@ -153,6 +163,15 @@ def create_root(
             active=active,
         )
         _validate_root_definition(root)
+        existing = Root.objects.filter(slot_id=slot_id).first()
+        if existing is not None:
+            if (
+                existing.display_name == display_name
+                and existing.mode == mode
+                and existing.active is active
+            ):
+                return existing
+            raise ValueError("root manifest slot is already configured")
         root.save(force_insert=True)
         _root_audit(
             event_type="authorization.root.created",
@@ -168,6 +187,7 @@ def update_root(
     actor: User,
     root_id: uuid.UUID,
     request_id: str,
+    slot_id: str | _Unset = _UNSET,
     display_name: str | _Unset = _UNSET,
     mode: str | _Unset = _UNSET,
     active: bool | _Unset = _UNSET,
@@ -176,9 +196,14 @@ def update_root(
     root_uuid = _validate_uuid(root_id, field_name="root ID")
     with transaction.atomic():
         root = Root.objects.select_for_update().get(pk=root_uuid)
+        original_slot_id = root.slot_id
         original_display_name = root.display_name
         original_mode = root.mode
         original_active = root.active
+        if not isinstance(slot_id, _Unset):
+            if not isinstance(slot_id, str) or SLOT_ID_RE.fullmatch(slot_id) is None:
+                raise ValueError("invalid root slot ID")
+            root.slot_id = slot_id
         if not isinstance(display_name, _Unset):
             if (
                 not isinstance(display_name, str)
@@ -196,9 +221,14 @@ def update_root(
                 raise ValueError("invalid root active state")
             root.active = active
         _validate_root_definition(root)
+        if root.slot_id != original_slot_id:
+            _lock_root_slot(root.slot_id)
+            if Root.objects.filter(slot_id=root.slot_id).exclude(pk=root.id).exists():
+                raise ValueError("root manifest slot is already configured")
         changed_fields = {
             field_name
             for field_name, previous, current in (
+                ("slot_id", original_slot_id, root.slot_id),
                 ("display_name", original_display_name, root.display_name),
                 ("mode", original_mode, root.mode),
                 ("active", original_active, root.active),
@@ -207,7 +237,7 @@ def update_root(
         }
         if not changed_fields:
             return root
-        authorization_changed = bool(changed_fields & {"mode", "active"})
+        authorization_changed = bool(changed_fields & {"slot_id", "mode", "active"})
         affected_users: frozenset[uuid.UUID] = frozenset()
         if authorization_changed:
             affected_users = _lock_users(_affected_user_ids(root.id))

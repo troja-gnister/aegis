@@ -66,6 +66,8 @@ class Root(models.Model):
     objects = RootQuerySet.as_manager()
 
     class Meta:
+        base_manager_name = "objects"
+        default_manager_name = "objects"
         ordering = ("display_name", "id")
         constraints: ClassVar[list[models.BaseConstraint]] = [
             models.CheckConstraint(
@@ -138,6 +140,8 @@ class RootGrant(models.Model):
     objects = RootGrantQuerySet.as_manager()
 
     class Meta:
+        base_manager_name = "objects"
+        default_manager_name = "objects"
         constraints: ClassVar[list[models.BaseConstraint]] = [
             models.CheckConstraint(
                 condition=(

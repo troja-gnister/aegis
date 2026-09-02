@@ -187,3 +187,18 @@ def test_root_and_grant_generic_deletion_are_disabled_and_principals_are_protect
         user.delete()
     with pytest.raises(ProtectedError):
         group.delete()
+
+
+def test_root_and_grant_base_managers_cannot_bypass_guarded_deletion() -> None:
+    orphan = _root(slot_id="orphan")
+    root = _root(slot_id="protected")
+    user = User.objects.create_user(username="base-manager-user")
+    grant = RootGrant.objects.create(root=root, user=user, permissions=1)
+
+    with pytest.raises(PermissionError, match="service"):
+        Root._base_manager.filter(pk=orphan.pk).delete()
+    with pytest.raises(PermissionError, match="service"):
+        RootGrant._base_manager.filter(pk=grant.pk).delete()
+
+    assert Root.objects.filter(pk=orphan.pk).exists()
+    assert RootGrant.objects.filter(pk=grant.pk).exists()

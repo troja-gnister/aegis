@@ -63,6 +63,8 @@ class Migration(migrations.Migration):
                 ("updated_at", models.DateTimeField(auto_now=True)),
             ],
             options={
+                "base_manager_name": "objects",
+                "default_manager_name": "objects",
                 "ordering": ("display_name", "id"),
                 "constraints": [
                     models.CheckConstraint(
@@ -135,6 +137,8 @@ class Migration(migrations.Migration):
                 ),
             ],
             options={
+                "base_manager_name": "objects",
+                "default_manager_name": "objects",
                 "constraints": [
                     models.CheckConstraint(
                         condition=(

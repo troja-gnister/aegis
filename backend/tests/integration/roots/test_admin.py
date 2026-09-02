@@ -24,21 +24,26 @@ PASSWORD = "Admin-Root-Test-731!"
 
 
 def _configure_manifest(
-    *, path: Path, monkeypatch: pytest.MonkeyPatch, mode: str = "read_write"
+    *,
+    path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str = "read_write",
+    slot_ids: tuple[str, ...] = ("photos",),
 ) -> None:
     payload = {
         "version": 1,
         "generatedAt": "2026-09-02T12:34:56Z",
         "slots": [
             {
-                "slotId": "photos",
-                "containerPath": "/srv/aegis/roots/photos",
+                "slotId": slot_id,
+                "containerPath": f"/srv/aegis/roots/{slot_id}",
                 "mode": mode,
-                "filesystemId": 123,
-                "rootInode": 456,
-                "expectedIdentity": "remote:secret-host.invalid:/private/photos",
-                "mountFingerprint": "a" * 64,
+                "filesystemId": 123 + index,
+                "rootInode": 456 + index,
+                "expectedIdentity": f"remote:secret-host.invalid:/private/{index}",
+                "mountFingerprint": f"{index + 1:x}" * 64,
             }
+            for index, slot_id in enumerate(slot_ids)
         ],
     }
     raw = (json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n").encode()
@@ -87,13 +92,20 @@ def test_root_admin_exposes_internal_fields_read_only_and_disables_unsafe_action
 def test_root_admin_form_offers_only_live_manifest_slots_and_no_text_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _configure_manifest(path=tmp_path / "manifest.json", monkeypatch=monkeypatch)
+    _configure_manifest(
+        path=tmp_path / "manifest.json",
+        monkeypatch=monkeypatch,
+        slot_ids=("photos", "documents"),
+    )
 
     valid = RootAdminForm()
     valid_slot = cast(ChoiceField, valid.fields["slot_id"])
     valid_select = cast(Select, valid_slot.widget)
 
-    assert list(valid_select.choices) == [("photos", "photos")]
+    assert list(valid_select.choices) == [
+        ("documents", "documents"),
+        ("photos", "photos"),
+    ]
 
     monkeypatch.setenv("AEGIS_MOUNT_MANIFEST_SHA256", "b" * 64)
     invalid = RootAdminForm()
@@ -108,7 +120,11 @@ def test_root_admin_create_and_change_route_through_one_audited_service_each(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _configure_manifest(path=tmp_path / "manifest.json", monkeypatch=monkeypatch)
+    _configure_manifest(
+        path=tmp_path / "manifest.json",
+        monkeypatch=monkeypatch,
+        slot_ids=("photos", "documents"),
+    )
     created_response = client.post(
         reverse("admin:roots_root_add"),
         {
@@ -134,7 +150,7 @@ def test_root_admin_create_and_change_route_through_one_audited_service_each(
     changed_response = client.post(
         reverse("admin:roots_root_change", args=[root.pk]),
         {
-            "slot_id": "photos",
+            "slot_id": "documents",
             "display_name": "Family Photos",
             "mode": "read_only",
             "active": "on",
@@ -145,6 +161,7 @@ def test_root_admin_create_and_change_route_through_one_audited_service_each(
 
     root.refresh_from_db()
     assert changed_response.status_code == 302
+    assert root.slot_id == "documents"
     assert root.display_name == "Family Photos"
     assert root.active is True
     assert root.authorization_epoch == 1

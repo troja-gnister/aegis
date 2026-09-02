@@ -143,6 +143,7 @@ class RootAdmin(CanonicalAuditOnlyAdminMixin, admin.ModelAdmin):  # type: ignore
             saved = update_root(
                 actor=_actor(request),
                 root_id=obj.id,
+                slot_id=obj.slot_id,
                 display_name=obj.display_name,
                 mode=obj.mode,
                 active=obj.active,
