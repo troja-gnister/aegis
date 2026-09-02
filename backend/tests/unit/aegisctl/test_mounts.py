@@ -307,3 +307,29 @@ def test_oversized_config_is_rejected_after_only_the_bounded_prefix(tmp_path: Pa
 
     with pytest.raises(ConfigError, match="size"):
         parse_config(config)
+
+
+def test_manifest_atomic_write_forces_invoking_group_in_inherited_group_directory(
+    tmp_path: Path,
+) -> None:
+    inherited_groups = [group for group in os.getgroups() if group != os.getegid()]
+    if not inherited_groups:
+        pytest.skip("requires a supplementary group to exercise inherited ownership")
+    destination = tmp_path / "inherited-group"
+    destination.mkdir()
+    os.chown(destination, os.geteuid(), inherited_groups[0])
+    destination.chmod(0o2770)
+    source = tmp_path / "source"
+    source.mkdir()
+    slots = tuple(
+        replace(slot, mount_fingerprint="0" * 64)
+        for slot in preflight_slots([_slot(source, "photos")])
+    )
+    manifest = destination / "manifest.json"
+
+    write_manifest(manifest, slots, uid=os.geteuid(), gid=os.getegid())
+
+    info = manifest.stat()
+    assert info.st_uid == os.geteuid()
+    assert info.st_gid == os.getegid()
+    assert info.st_mode & 0o777 == 0o600

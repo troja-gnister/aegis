@@ -378,6 +378,7 @@ def _atomic_write(path: Path, data: bytes, mode: int) -> None:
             mode,
             dir_fd=directory_fd,
         )
+        os.fchown(temp_fd, os.geteuid(), os.getegid())
         os.fchmod(temp_fd, mode)
         view = memoryview(data)
         while view:
