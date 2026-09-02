@@ -1,4 +1,5 @@
 import os
+from datetime import timedelta
 from pathlib import Path
 
 from aegis.config import RuntimeConfig
@@ -71,6 +72,9 @@ DATABASES = {
 }
 
 AUTH_USER_MODEL = "identity.User"
+
+AEGIS_SESSION_IDLE_AGE = timedelta(minutes=30)
+AEGIS_SESSION_ABSOLUTE_AGE = timedelta(hours=12)
 
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
