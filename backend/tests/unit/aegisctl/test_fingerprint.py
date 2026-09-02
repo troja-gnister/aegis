@@ -6,6 +6,7 @@ import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
+from typing import Any, NoReturn
 
 import pytest
 from aegis_apps.roots.manifest import MountManifest
@@ -124,7 +125,7 @@ expected_identity = "{local_identity(source)}"
         )
         stderr = ""
 
-    def fake_run(arguments, **kwargs):
+    def fake_run(arguments: list[str], **kwargs: Any) -> Result:
         calls.append(arguments)
         if "run" in arguments:
             compose_path = Path(arguments[arguments.index("-f") + 1])
@@ -170,7 +171,7 @@ expected_identity = "{local_identity(source)}"
     class Result:
         returncode = 0
 
-    def fake_run(arguments, **kwargs):
+    def fake_run(arguments: list[str], **kwargs: Any) -> Result:
         if "run" in arguments:
             assert kwargs.get("capture_output") is not True
             assert kwargs.get("stderr") is subprocess.DEVNULL
@@ -228,7 +229,7 @@ expected_identity = "{local_identity(source)}"
     )
     validated = preflight_slots(parse_config(config))
 
-    def fail_run(*args, **kwargs):
+    def fail_run(*args: object, **kwargs: object) -> NoReturn:
         raise subprocess.SubprocessError(str(source))
 
     monkeypatch.setattr("aegisctl.mounts.subprocess.run", fail_run)

@@ -70,7 +70,11 @@ expected_identity = "{local_identity(writable)}"
 def _root_mount(service: dict[str, object], target: str) -> dict[str, object]:
     volumes = service["volumes"]
     assert isinstance(volumes, list)
-    return next(volume for volume in volumes if volume["target"] == target)  # type: ignore[index,union-attr,no-any-return]
+    for volume in volumes:
+        assert isinstance(volume, dict)
+        if volume.get("target") == target:
+            return volume
+    raise AssertionError(f"missing generated mount target: {target}")
 
 
 def test_render_is_deterministic_and_enforces_role_scoped_long_bind_mounts(
