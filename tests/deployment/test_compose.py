@@ -355,8 +355,22 @@ def test_base_profile_does_not_require_tls_host_but_production_startup_does() ->
         "files.example",
         "files.example.test",
         "files.example.invalid",
+        "files.alt",
+        "FILES.ALT",
+        "files.arpa",
         "FILES.EXAMPLE.TEST",
         "files.example.com",
+        "files.xn--kgbechtv",
+        "files.xn--hgbk6aj7f53bba",
+        "files.xn--0zwm56d",
+        "files.xn--g6w251d",
+        "files.xn--80akhbyknj4f",
+        "files.xn--11b5bs3a9aj6g",
+        "files.xn--jxalpdlp",
+        "files.xn--9t4b11yi5a",
+        "files.xn--deba0ad",
+        "files.xn--zckzah",
+        "files.xn--hlcj6aya9esc7a",
         "-files.public.dev",
         "files-.public.dev",
         f"{'a' * 64}.public.dev",
@@ -388,7 +402,13 @@ def test_production_caddy_start_rejects_non_public_hosts(
     )
 
 
-def test_production_tls_profile_rejects_reserved_host_before_acme() -> None:
+@pytest.mark.parametrize(
+    "reserved_host",
+    ["files.example.test", "files.alt", "FILES.ALT", "files.arpa"],
+)
+def test_production_tls_profile_rejects_reserved_host_before_acme(
+    reserved_host: str,
+) -> None:
     project = f"aegis-production-tls-probe-{uuid.uuid4().hex[:10]}"
     compose = [
         "docker",
@@ -402,7 +422,7 @@ def test_production_tls_profile_rejects_reserved_host_before_acme() -> None:
         "--profile",
         "tls",
     ]
-    environment = os.environ | {"AEGIS_TLS_HOST": "files.example.test"}
+    environment = os.environ | {"AEGIS_TLS_HOST": reserved_host}
 
     try:
         result = subprocess.run(

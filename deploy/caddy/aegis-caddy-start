@@ -10,6 +10,7 @@ fail_host() {
 tls_host=${AEGIS_TLS_HOST:-}
 tls_host_normalized=$(printf '%s' "$tls_host" | tr '[:upper:]' '[:lower:]')
 
+# IANA special-use designations apply to each name and all of its subdomains.
 case "$tls_host_normalized" in
     "" | localhost | *.localhost | *:* | */* | *\\* | *_* | *" "* | .* | *. | *..*)
         fail_host
@@ -17,7 +18,8 @@ case "$tls_host_normalized" in
 esac
 
 case "$tls_host_normalized" in
-    local | *.local | test | *.test | invalid | *.invalid | example | *.example \
+    alt | *.alt | arpa | *.arpa | local | *.local | test | *.test \
+        | invalid | *.invalid | example | *.example \
         | internal | *.internal | onion | *.onion | home.arpa | *.home.arpa \
         | example.com | *.example.com | example.net | *.example.net \
         | example.org | *.example.org)
@@ -47,5 +49,14 @@ top_level=${tls_host_normalized##*.}
 if ! printf '%s\n' "$top_level" | grep -Eq '[a-z]'; then
     fail_host
 fi
+
+# IANA's policy-reserved IDN test TLDs, expressed as DNS A-labels.
+case "$top_level" in
+    xn--kgbechtv | xn--hgbk6aj7f53bba | xn--0zwm56d | xn--g6w251d \
+        | xn--80akhbyknj4f | xn--11b5bs3a9aj6g | xn--jxalpdlp \
+        | xn--9t4b11yi5a | xn--deba0ad | xn--zckzah | xn--hlcj6aya9esc7a)
+        fail_host
+        ;;
+esac
 
 exec /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
