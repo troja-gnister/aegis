@@ -52,6 +52,7 @@ select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
 [tool.ruff.lint.per-file-ignores]
 "backend/aegis_apps/identity/migrations/*.py" = ["E501", "RUF012"]
 "backend/aegis_apps/audit/migrations/*.py" = ["E501", "RUF012"]
+"backend/aegis_apps/roots/migrations/*.py" = ["E501", "RUF012"]
 
 [tool.mypy]
 python_version = "3.13"
