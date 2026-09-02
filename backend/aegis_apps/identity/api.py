@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any
 
 from django.contrib.auth import authenticate, login, logout
-from django.db import transaction
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.middleware.csrf import get_token
 from django.utils import timezone
@@ -21,7 +20,7 @@ from aegis_apps.audit.services import record_event
 from .models import User
 from .serializers import BoundedJSONParser, LoginSerializer
 from .session_policy import cache_namespace, initialize_session
-from .throttling import FailureRecord, LoginThrottle
+from .throttling import FailureRecord, LoginThrottle, ThrottleUnavailable
 
 AUTHENTICATION_REQUIRED = {
     "type": "authentication_required",
@@ -116,39 +115,36 @@ class LoginView(JSONAPIView):
         password = serializer.validated_data["password"]
         throttle = LoginThrottle()
         try:
-            decision = throttle.check(
+            admission_context = throttle.admission(
                 username=username,
                 client_ip=_client_ip(request),
             )
-        except RuntimeError:
-            return _response(AUTHENTICATION_UNAVAILABLE, status=503)
-        if not decision.allowed:
-            response = _response(LOGIN_THROTTLED_PROBLEM, status=429)
-            response["Retry-After"] = str(decision.retry_after_seconds)
-            return response
+            with admission_context as admission:
+                decision = admission.decision
+                if not decision.allowed:
+                    response = _response(LOGIN_THROTTLED_PROBLEM, status=429)
+                    response["Retry-After"] = str(decision.retry_after_seconds)
+                    return response
 
-        user = authenticate(request=request, username=username, password=password)
-        if not isinstance(user, User):
-            with transaction.atomic():
-                failure = throttle.record_failure(
-                    username=username,
-                    client_ip=_client_ip(request),
+                user = authenticate(request=request, username=username, password=password)
+                if not isinstance(user, User):
+                    failure = admission.record_failure()
+                    _audit_failure(request, failure)
+                    return _response(INVALID_LOGIN_PROBLEM, status=401)
+
+                admission.record_success()
+                login(request, user)
+                request.session.cycle_key()
+                initialize_session(session=request.session, user=user, now=timezone.now())
+                record_event(
+                    event_type="auth.login.succeeded",
+                    outcome="success",
+                    actor=user,
+                    request_id=_request_id(request),
                 )
-                _audit_failure(request, failure)
-            return _response(INVALID_LOGIN_PROBLEM, status=401)
-
-        with transaction.atomic():
-            throttle.record_success(username=username)
-            login(request, user)
-            request.session.cycle_key()
-            initialize_session(session=request.session, user=user, now=timezone.now())
-            record_event(
-                event_type="auth.login.succeeded",
-                outcome="success",
-                actor=user,
-                request_id=_request_id(request),
-            )
-        return _response({"user": _user_payload(user)})
+                return _response({"user": _user_payload(user)})
+        except ThrottleUnavailable:
+            return _response(AUTHENTICATION_UNAVAILABLE, status=503)
 
 
 @method_decorator(csrf_protect, name="dispatch")

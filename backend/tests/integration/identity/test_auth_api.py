@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, Event, Lock
 
 import pytest
 from aegis_apps.audit.models import AuditEvent
 from aegis_apps.identity.models import LoginThrottleBucket, User
 from django.contrib.auth import authenticate
 from django.contrib.sessions.models import Session
+from django.db import close_old_connections
 from django.test import Client, override_settings
 
 pytestmark = pytest.mark.integration
@@ -428,6 +431,59 @@ def test_account_throttle_returns_429_after_five_failures(
     ]
     assert all(event.actor is None for event in events)
     assert all(set(event.metadata) == {"bucket_type", "request_id"} for event in events)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_concurrent_login_admission_allows_only_account_limit_authentications(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker_count = 10
+    start = Barrier(worker_count)
+    all_old_code_calls_entered = Event()
+    call_lock = Lock()
+    authentication_calls = 0
+
+    def invalid_credentials(**_kwargs: object) -> None:
+        nonlocal authentication_calls
+        with call_lock:
+            authentication_calls += 1
+            if authentication_calls == worker_count:
+                all_old_code_calls_entered.set()
+        all_old_code_calls_entered.wait(timeout=0.2)
+        return None
+
+    monkeypatch.setattr("aegis_apps.identity.api.authenticate", invalid_credentials)
+
+    def attempt(_index: int) -> int:
+        close_old_connections()
+        try:
+            client = Client(enforce_csrf_checks=True)
+            token = _csrf_token(client)
+            start.wait(timeout=10)
+            response = client.post(
+                "/api/v1/auth/login",
+                {"username": "concurrent-limited", "password": PASSWORD},
+                content_type="application/json",
+                headers={"X-CSRFToken": token},
+                REMOTE_ADDR="192.0.2.71",
+            )
+            return response.status_code
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        statuses = list(executor.map(attempt, range(worker_count)))
+
+    observed = {
+        "authentication_calls": authentication_calls,
+        "401": statuses.count(401),
+        "429": statuses.count(429),
+    }
+    assert observed == {"authentication_calls": 5, "401": 5, "429": 5}
+    account = LoginThrottleBucket.objects.get(kind=LoginThrottleBucket.Kind.ACCOUNT)
+    ip = LoginThrottleBucket.objects.get(kind=LoginThrottleBucket.Kind.IP)
+    assert account.failures == 5
+    assert ip.failures == 5
 
 
 @pytest.mark.django_db(transaction=True)
