@@ -1,10 +1,12 @@
 #!/bin/sh
 set -eu
 
+attestation_defined="${AEGIS_GATEWAY_MOUNT_ATTESTATION+x}"
+expected_digest_defined="${AEGIS_GATEWAY_MOUNT_ATTESTATION_SHA256+x}"
 attestation="${AEGIS_GATEWAY_MOUNT_ATTESTATION:-}"
 expected_digest="${AEGIS_GATEWAY_MOUNT_ATTESTATION_SHA256:-}"
 
-if [ -z "$attestation" ] && [ -z "$expected_digest" ]; then
+if [ -z "$attestation_defined" ] && [ -z "$expected_digest_defined" ]; then
     exit 0
 fi
 

@@ -35,33 +35,62 @@ def _docker(*arguments: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_gateway_mount_attestation_is_noop_only_when_all_settings_are_absent(
-    tmp_path: Path,
-) -> None:
-    absent = subprocess.run(
-        ["/bin/sh", GATEWAY_ATTEST],
-        check=False,
-        capture_output=True,
-        text=True,
-        env={"PATH": os.environ["PATH"]},
-    )
-    partial = subprocess.run(
-        ["/bin/sh", GATEWAY_ATTEST],
-        check=False,
-        capture_output=True,
-        text=True,
-        env={
-            "PATH": os.environ["PATH"],
-            "AEGIS_GATEWAY_MOUNT_ATTESTATION": str(tmp_path / "private-canary"),
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {},
+        {"AEGIS_GATEWAY_MOUNT_ATTESTATION": ""},
+        {"AEGIS_GATEWAY_MOUNT_ATTESTATION_SHA256": ""},
+        {
+            "AEGIS_GATEWAY_MOUNT_ATTESTATION": "",
+            "AEGIS_GATEWAY_MOUNT_ATTESTATION_SHA256": "",
         },
+        {"AEGIS_GATEWAY_MOUNT_ATTESTATION": "/private-canary"},
+        {"AEGIS_GATEWAY_MOUNT_ATTESTATION_SHA256": "0" * 64},
+        {
+            "AEGIS_GATEWAY_MOUNT_ATTESTATION": "/private-canary",
+            "AEGIS_GATEWAY_MOUNT_ATTESTATION_SHA256": "",
+        },
+        {
+            "AEGIS_GATEWAY_MOUNT_ATTESTATION": "",
+            "AEGIS_GATEWAY_MOUNT_ATTESTATION_SHA256": "0" * 64,
+        },
+        {
+            "AEGIS_GATEWAY_MOUNT_ATTESTATION": "/private-canary",
+            "AEGIS_GATEWAY_MOUNT_ATTESTATION_SHA256": "0" * 64,
+        },
+    ],
+    ids=(
+        "both-unset",
+        "attestation-empty-digest-unset",
+        "attestation-unset-digest-empty",
+        "both-empty",
+        "attestation-value-digest-unset",
+        "attestation-unset-digest-value",
+        "attestation-value-digest-empty",
+        "attestation-empty-digest-value",
+        "both-values",
+    ),
+)
+def test_gateway_mount_attestation_is_noop_only_when_both_settings_are_unset(
+    settings: dict[str, str],
+) -> None:
+    result = subprocess.run(
+        ["/bin/sh", GATEWAY_ATTEST],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={"PATH": os.environ["PATH"]} | settings,
     )
 
-    assert absent.returncode == 0
-    assert absent.stdout == absent.stderr == ""
-    assert partial.returncode != 0
-    failure = json.loads(partial.stderr)
+    if not settings:
+        assert result.returncode == 0
+        assert result.stdout == result.stderr == ""
+        return
+    assert result.returncode != 0
+    failure = json.loads(result.stderr)
     assert failure["message"] == "Gateway mount attestation failed"
-    assert "private-canary" not in partial.stderr
+    assert "private-canary" not in result.stderr
 
 
 def test_gateway_shell_attests_real_ro_bind_by_fingerprint(tmp_path: Path) -> None:
