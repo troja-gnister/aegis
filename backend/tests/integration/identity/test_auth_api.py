@@ -166,6 +166,29 @@ def test_oversized_login_body_returns_safe_json_before_authentication(
 
 
 @pytest.mark.django_db(transaction=True)
+def test_malformed_login_json_returns_safe_problem_before_authentication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = Client(enforce_csrf_checks=True)
+    token = _csrf_token(client)
+
+    def authentication_must_not_run(**_kwargs: object) -> None:
+        raise AssertionError("authentication ran for malformed JSON")
+
+    monkeypatch.setattr("aegis_apps.identity.api.authenticate", authentication_must_not_run)
+    response = client.post(
+        "/api/v1/auth/login",
+        b'{"username":"alice","password":',
+        content_type="application/json",
+        headers={"X-CSRFToken": token},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"type": "invalid_request", "title": "Invalid request"}
+    assert AuditEvent.objects.count() == 0
+
+
+@pytest.mark.django_db(transaction=True)
 def test_invalid_accounts_share_problem_and_opaque_audit(
     user: User, caplog: pytest.LogCaptureFixture
 ) -> None:

@@ -10,7 +10,7 @@ from django.utils import timezone
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_protect
 from rest_framework.authentication import SessionAuthentication
-from rest_framework.parsers import JSONParser
+from rest_framework.exceptions import ParseError
 from rest_framework.renderers import JSONRenderer
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -19,7 +19,7 @@ from rest_framework.views import APIView
 from aegis_apps.audit.services import record_event
 
 from .models import User
-from .serializers import LoginSerializer
+from .serializers import BoundedJSONParser, LoginSerializer
 from .session_policy import cache_namespace, initialize_session
 from .throttling import FailureRecord, LoginThrottle
 
@@ -39,6 +39,16 @@ AUTHENTICATION_UNAVAILABLE = {
     "type": "authentication_unavailable",
     "title": "Unable to sign in",
 }
+INVALID_REQUEST_PROBLEM = {"type": "invalid_request", "title": "Invalid request"}
+AUTH_AUDIT_EVENTS = frozenset(
+    {
+        "auth.login.succeeded",
+        "auth.login.failed",
+        "auth.login.throttled",
+        "auth.logout",
+        "auth.session.revoked",
+    }
+)
 
 
 def _request_id(request: Request) -> str:
@@ -82,8 +92,13 @@ def _response(data: Any = None, *, status: int = 200) -> Response:
 class JSONAPIView(APIView):
     authentication_classes = (SessionAuthentication,)
     permission_classes = ()
-    parser_classes = (JSONParser,)
+    parser_classes = (BoundedJSONParser,)
     renderer_classes = (JSONRenderer,)
+
+    def handle_exception(self, exc: Exception) -> Response:
+        if isinstance(exc, ParseError):
+            return _response(INVALID_REQUEST_PROBLEM, status=400)
+        return super().handle_exception(exc)
 
 
 class CsrfView(JSONAPIView):
@@ -96,10 +111,7 @@ class LoginView(JSONAPIView):
     def post(self, request: Request) -> Response:
         serializer = LoginSerializer(data=request.data)
         if not serializer.is_valid():
-            return _response(
-                {"type": "invalid_request", "title": "Invalid request"},
-                status=400,
-            )
+            return _response(INVALID_REQUEST_PROBLEM, status=400)
         username = serializer.validated_data["username"]
         password = serializer.validated_data["password"]
         throttle = LoginThrottle()

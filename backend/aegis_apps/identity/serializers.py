@@ -1,9 +1,31 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, cast
+from io import BytesIO
+from typing import IO, Any, cast, override
 
+from django.conf import settings
 from rest_framework import serializers
+from rest_framework.exceptions import ParseError
+from rest_framework.parsers import JSONParser
+
+
+class BoundedJSONParser(JSONParser):
+    @override
+    def parse(
+        self,
+        stream: IO[Any],
+        media_type: str | None = None,
+        parser_context: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        raw = stream.read(settings.AEGIS_AUTH_REQUEST_BODY_MAX_BYTES + 1)
+        if not isinstance(raw, bytes) or len(raw) > settings.AEGIS_AUTH_REQUEST_BODY_MAX_BYTES:
+            raise ParseError("Invalid request")
+        return super().parse(
+            BytesIO(raw),
+            media_type=media_type,
+            parser_context=parser_context,
+        )
 
 
 class StrictSerializer(serializers.Serializer[Any]):

@@ -83,6 +83,7 @@ AUTH_USER_MODEL = "identity.User"
 AEGIS_SESSION_IDLE_AGE = timedelta(minutes=30)
 AEGIS_SESSION_ABSOLUTE_AGE = timedelta(hours=12)
 AEGIS_SESSION_ACTIVITY_WRITE_INTERVAL = timedelta(minutes=1)
+AEGIS_AUTH_REQUEST_BODY_MAX_BYTES = 4096
 
 SESSION_ENGINE = "django.contrib.sessions.backends.db"
 SESSION_COOKIE_HTTPONLY = True
