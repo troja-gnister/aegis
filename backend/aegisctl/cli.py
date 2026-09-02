@@ -13,6 +13,7 @@ from aegisctl.mounts import (
     MountAttestationError,
     attest_mounts,
     local_identity,
+    observe_mount_fingerprints,
     parse_config,
     preflight_slots,
     render_artifacts,
@@ -87,7 +88,7 @@ def _preflight(config: Path, manifest: Path) -> int:
         raise ConfigError("manifest must not alias config")
     uid, gid = runtime_identity()
     slots = parse_config(config)
-    validated = preflight_slots(slots)
+    validated = observe_mount_fingerprints(preflight_slots(slots))
     digest = write_manifest(manifest, validated, uid=uid, gid=gid)
     print(json.dumps({"status": "preflighted", "manifestSha256": digest}, separators=(",", ":")))
     return 0

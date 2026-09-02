@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,10 @@ from aegisctl.mounts import (
     render_artifacts,
     write_manifest,
 )
+
+
+def _fingerprint(fields: bytes) -> str:
+    return hashlib.sha256(b"aegis.mount-fingerprint.v1\0" + fields).hexdigest()
 
 
 def _preflight_fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
@@ -47,7 +52,17 @@ expected_identity = "{local_identity(writable)}"
         + "\n",
         encoding="utf-8",
     )
-    validated = preflight_slots(parse_config(config))
+    validated = tuple(
+        replace(
+            slot,
+            mount_fingerprint=_fingerprint(
+                b"0:32\0/\0ext4\0/dev/sda\0"
+                if slot.slot_id == "photos"
+                else b"0:33\0/\0ext4\0/dev/sdb\0"
+            ),
+        )
+        for slot in preflight_slots(parse_config(config))
+    )
     write_manifest(manifest, validated, uid=os.geteuid(), gid=os.getegid())
     return config, manifest, readonly, writable
 
@@ -89,9 +104,15 @@ def test_render_is_deterministic_and_enforces_role_scoped_long_bind_mounts(
     assert gateway.read_bytes() == first_attestation
     assert result.manifest_digest == hashlib.sha256(manifest.read_bytes()).hexdigest()
     assert result.gateway_digest == hashlib.sha256(gateway.read_bytes()).hexdigest()
+    photos_fingerprint = _fingerprint(b"0:32\0/\0ext4\0/dev/sda\0")
+    uploads_fingerprint = _fingerprint(b"0:33\0/\0ext4\0/dev/sdb\0")
     assert gateway.read_text(encoding="ascii").splitlines() == [
-        f"photos|/srv/aegis/roots/photos|{readonly.stat().st_dev}|{readonly.stat().st_ino}|read_only",
-        f"uploads|/srv/aegis/roots/uploads|{writable.stat().st_dev}|{writable.stat().st_ino}|read_write",
+        f"photos|/srv/aegis/roots/photos|{readonly.stat().st_dev}|"
+        f"{readonly.stat().st_ino}|read_only|"
+        f"{photos_fingerprint}",
+        f"uploads|/srv/aegis/roots/uploads|{writable.stat().st_dev}|"
+        f"{writable.stat().st_ino}|read_write|"
+        f"{uploads_fingerprint}",
     ]
 
     rendered = yaml.safe_load(first_compose)

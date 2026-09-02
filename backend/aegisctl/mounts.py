@@ -7,6 +7,8 @@ import os
 import re
 import secrets
 import stat
+import subprocess
+import tempfile
 import tomllib
 from collections.abc import Mapping
 from contextlib import suppress
@@ -63,6 +65,7 @@ class ValidatedSlot:
     filesystem_id: int
     root_inode: int
     expected_identity: str
+    mount_fingerprint: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +78,7 @@ class RenderResult:
 class MountInfoRecord:
     mountpoint: str
     effective_mode: Mode
+    mount_fingerprint: str
 
 
 def _safe_slot_error(slot_id: object, message: str) -> ConfigError:
@@ -372,6 +376,8 @@ def write_manifest(
 ) -> str:
     if (uid, gid) != (os.geteuid(), os.getegid()) or uid == 0 or gid == 0:
         raise ConfigError("manifest identity must match invoking identity")
+    if any(not re.fullmatch(r"[0-9a-f]{64}", slot.mount_fingerprint) for slot in slots):
+        raise ConfigError("mount fingerprint is missing or invalid")
     payload = {
         "version": 1,
         "generatedAt": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
@@ -383,6 +389,7 @@ def write_manifest(
                 "filesystemId": slot.filesystem_id,
                 "rootInode": slot.root_inode,
                 "expectedIdentity": slot.expected_identity,
+                "mountFingerprint": slot.mount_fingerprint,
             }
             for slot in sorted(slots, key=lambda item: item.slot_id)
         ],
@@ -481,13 +488,14 @@ def render_artifacts(
                 info.st_dev,
                 info.st_ino,
                 spec.expected_identity,
+                manifest_slot.mount_fingerprint,
             )
         )
 
     attestation_raw = (
         "".join(
             f"{slot.slot_id}|{slot.container_path}|{slot.filesystem_id}|"
-            f"{slot.root_inode}|{slot.mode}\n"
+            f"{slot.root_inode}|{slot.mode}|{slot.mount_fingerprint}\n"
             for slot in validated
         )
     ).encode("ascii")
@@ -613,6 +621,20 @@ def parse_mountinfo(raw: bytes) -> Mapping[str, MountInfoRecord]:
         if len(separators) != 1 or separators[0] < 6 or len(fields) <= separators[0] + 3:
             raise MountAttestationError("mountinfo is malformed")
         mountpoint = _decode_mountinfo_field(fields[4])
+        major_minor = fields[2]
+        if not re.fullmatch(r"(?:0|[1-9][0-9]{0,9}):(?:0|[1-9][0-9]{0,9})", major_minor):
+            raise MountAttestationError("mountinfo is malformed")
+        encoded_root = fields[3]
+        filesystem_type = fields[separators[0] + 1]
+        mount_source = fields[separators[0] + 2]
+        if any(
+            not value or len(value) > MAX_PATH_LENGTH
+            for value in (encoded_root, filesystem_type, mount_source)
+        ):
+            raise MountAttestationError("mountinfo is malformed")
+        _decode_mountinfo_field(encoded_root)
+        _decode_mountinfo_field(filesystem_type)
+        _decode_mountinfo_field(mount_source)
         per_mount = _option_mode(fields[5])
         superblock = _option_mode(fields[separators[0] + 3])
         effective: Mode
@@ -624,7 +646,15 @@ def parse_mountinfo(raw: bytes) -> Mapping[str, MountInfoRecord]:
             raise MountAttestationError("mountinfo contains ambiguous mount flags")
         if mountpoint in records:
             raise MountAttestationError("mountinfo contains an ambiguous mountpoint")
-        records[mountpoint] = MountInfoRecord(mountpoint, effective)
+        fingerprint_payload = b"aegis.mount-fingerprint.v1\0" + b"".join(
+            value.encode("ascii") + b"\0"
+            for value in (major_minor, encoded_root, filesystem_type, mount_source)
+        )
+        records[mountpoint] = MountInfoRecord(
+            mountpoint,
+            effective,
+            hashlib.sha256(fingerprint_payload).hexdigest(),
+        )
     return MappingProxyType(records)
 
 
@@ -641,20 +671,140 @@ def attest_mounts(
         raise MountAttestationError("mountinfo cannot be read") from exc
     records = parse_mountinfo(raw)
     for slot in manifest.slots.values():
-        try:
-            info = os.stat(slot.container_path.as_posix(), follow_symlinks=False)
-        except OSError as exc:
-            raise MountAttestationError(
-                f"mount attestation failed for slot {slot.slot_id}"
-            ) from exc
-        if not stat.S_ISDIR(info.st_mode) or (info.st_dev, info.st_ino) != (
-            slot.filesystem_id,
-            slot.root_inode,
-        ):
-            raise MountAttestationError(f"mount attestation failed for slot {slot.slot_id}")
         record = records.get(slot.container_path.as_posix())
         required_mode: Mode = (
             slot.mode if role == "operations" else "read_only"
         )
-        if record is None or record.effective_mode != required_mode:
+        if (
+            record is None
+            or record.effective_mode != required_mode
+            or not secrets.compare_digest(
+                record.mount_fingerprint, slot.mount_fingerprint
+            )
+        ):
             raise MountAttestationError(f"mount attestation failed for slot {slot.slot_id}")
+
+
+def observe_mount_fingerprints(
+    slots: tuple[ValidatedSlot, ...],
+) -> tuple[ValidatedSlot, ...]:
+    if not slots:
+        raise ConfigError("mount slot observation requires slots")
+    project_name = f"aegis-preflight-{secrets.token_hex(8)}"
+    targets = [slot.container_path for slot in slots]
+    target_expression = " || ".join(f'$5 == "{target}"' for target in targets)
+    observer_script = (
+        "awk '"
+        "length($0) > 16384 { exit 65 } "
+        "NR > 8192 { exit 66 } "
+        f"({target_expression}) {{ print; matched++; if (matched > {len(slots) * 2}) exit 67 }}"
+        "' /proc/self/mountinfo"
+    )
+    service = {
+        "image": "aegis-gateway",
+        "pull_policy": "never",
+        "user": "101:101",
+        "network_mode": "none",
+        "read_only": True,
+        "cap_drop": ["ALL"],
+        "security_opt": ["no-new-privileges:true"],
+        "entrypoint": ["/bin/sh", "-eu", "-c"],
+        "command": [observer_script],
+        "volumes": [
+            _bind(slot.source, slot.container_path, read_only=True) for slot in slots
+        ],
+    }
+    try:
+        with tempfile.TemporaryDirectory(prefix="aegis-mount-preflight-") as temp:
+            compose_path = Path(temp) / "compose.yaml"
+            output_path = Path(temp) / "mountinfo.out"
+            compose_raw = yaml.safe_dump(
+                {"services": {"mount-observer": service}},
+                sort_keys=False,
+                allow_unicode=False,
+            ).encode("ascii")
+            _atomic_write(compose_path, compose_raw, 0o600)
+            _atomic_write(output_path, b"", 0o600)
+            command = [
+                "docker",
+                "compose",
+                "--project-name",
+                project_name,
+                "-f",
+                str(compose_path),
+                "run",
+                "--rm",
+                "--no-deps",
+                "--pull",
+                "never",
+                "mount-observer",
+            ]
+            try:
+                with output_path.open("wb") as observer_output:
+                    result = subprocess.run(
+                        command,
+                        check=False,
+                        stdout=observer_output,
+                        stderr=subprocess.DEVNULL,
+                        timeout=30,
+                    )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise ConfigError("container mount observation failed") from exc
+            finally:
+                with suppress(OSError, subprocess.TimeoutExpired):
+                    subprocess.run(
+                        [
+                            "docker",
+                            "compose",
+                            "--project-name",
+                            project_name,
+                            "-f",
+                            str(compose_path),
+                            "down",
+                            "--remove-orphans",
+                            "--volumes",
+                        ],
+                        check=False,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=15,
+                    )
+            if result.returncode != 0:
+                raise ConfigError("container mount observation failed")
+            try:
+                with output_path.open("rb") as observer_output:
+                    raw = observer_output.read(MAX_MOUNTINFO_BYTES + 1)
+            except OSError as exc:
+                raise ConfigError("container mount observation failed") from exc
+    except ConfigError:
+        raise
+    except OSError as exc:
+        raise ConfigError("container mount observation failed") from exc
+    try:
+        records = parse_mountinfo(raw)
+    except MountAttestationError as exc:
+        raise ConfigError("container mount observation failed") from exc
+    observed: list[ValidatedSlot] = []
+    fingerprints: set[str] = set()
+    for slot in slots:
+        record = records.get(slot.container_path)
+        if record is None or record.effective_mode != "read_only":
+            raise ConfigError(f"mount slot {slot.slot_id}: container observation failed")
+        if record.mount_fingerprint in fingerprints:
+            raise ConfigError(f"mount slot {slot.slot_id}: inconsistent mount fingerprint")
+        fingerprints.add(record.mount_fingerprint)
+        observed.append(
+            ValidatedSlot(
+                slot.slot_id,
+                slot.source,
+                slot.container_path,
+                slot.mode,
+                slot.filesystem_id,
+                slot.root_inode,
+                slot.expected_identity,
+                record.mount_fingerprint,
+            )
+        )
+    if len(records) != len(slots):
+        raise ConfigError("container mount observation is ambiguous")
+    return tuple(observed)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -154,7 +155,10 @@ def test_manifest_write_is_atomic_sanitized_and_exactly_0600(tmp_path: Path) -> 
     validated = preflight_slots([_slot(source, "photos")])
     manifest = tmp_path / "manifest.json"
 
-    digest = write_manifest(manifest, validated, uid=os.geteuid(), gid=os.getegid())
+    fingerprinted = tuple(
+        replace(slot, mount_fingerprint="a" * 64) for slot in validated
+    )
+    digest = write_manifest(manifest, fingerprinted, uid=os.geteuid(), gid=os.getegid())
 
     raw = manifest.read_bytes()
     payload = json.loads(raw)
@@ -217,7 +221,9 @@ def test_cli_inspect_prints_only_local_identity(
 
 
 def test_cli_preflight_atomically_writes_sanitized_manifest(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = tmp_path / "private-name"
     source.mkdir()
@@ -235,6 +241,11 @@ expected_identity = "{local_identity(source)}"
 """.strip()
         + "\n",
         encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "aegisctl.cli.observe_mount_fingerprints",
+        lambda slots: tuple(replace(slot, mount_fingerprint="a" * 64) for slot in slots),
     )
 
     assert (

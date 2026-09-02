@@ -37,6 +37,7 @@ class ManifestSlot:
     expected_identity: str
     filesystem_id: int
     root_inode: int
+    mount_fingerprint: str
 
 
 def _integer(value: object, *, allow_zero: bool) -> int:
@@ -54,6 +55,7 @@ def parse_manifest_slot(item: object) -> ManifestSlot:
         "filesystemId",
         "rootInode",
         "expectedIdentity",
+        "mountFingerprint",
     }:
         raise ManifestError("invalid mount slot schema")
     slot_id = item["slotId"]
@@ -71,6 +73,9 @@ def parse_manifest_slot(item: object) -> ManifestSlot:
         raise ManifestError(f"invalid identity for slot {slot_id}") from None
     filesystem_id = _integer(item["filesystemId"], allow_zero=True)
     root_inode = _integer(item["rootInode"], allow_zero=False)
+    fingerprint = item["mountFingerprint"]
+    if not isinstance(fingerprint, str) or not DIGEST_RE.fullmatch(fingerprint):
+        raise ManifestError(f"invalid mount fingerprint for slot {slot_id}")
     if identity.startswith("local:") and identity != f"local:{filesystem_id}:{root_inode}":
         raise ManifestError(f"invalid identity for slot {slot_id}")
     return ManifestSlot(
@@ -80,6 +85,7 @@ def parse_manifest_slot(item: object) -> ManifestSlot:
         identity,
         filesystem_id,
         root_inode,
+        fingerprint,
     )
 
 
@@ -156,6 +162,7 @@ class MountManifest:
         slots: dict[str, ManifestSlot] = {}
         identities: set[str] = set()
         observed: set[tuple[int, int]] = set()
+        fingerprints: set[str] = set()
         for item in items:
             slot = parse_manifest_slot(item)
             pair = (slot.filesystem_id, slot.root_inode)
@@ -163,11 +170,13 @@ class MountManifest:
                 slot.slot_id in slots
                 or slot.expected_identity in identities
                 or pair in observed
+                or slot.mount_fingerprint in fingerprints
             ):
                 raise ManifestError(f"duplicate mount slot {slot.slot_id}")
             slots[slot.slot_id] = slot
             identities.add(slot.expected_identity)
             observed.add(pair)
+            fingerprints.add(slot.mount_fingerprint)
         return cls(digest=digest, slots=MappingProxyType(slots))
 
     def get(self, slot_id: str) -> ManifestSlot | None:

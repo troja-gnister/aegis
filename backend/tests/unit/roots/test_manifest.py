@@ -24,6 +24,7 @@ def _write_manifest(path: Path, *, slots: list[dict[str, object]] | None = None)
                 "filesystemId": 123,
                 "rootInode": 456,
                 "expectedIdentity": "remote:nas01:/exports/photos",
+                "mountFingerprint": "a" * 64,
             }
         ],
     }
@@ -79,6 +80,7 @@ def test_load_rejects_unknown_fields_and_duplicate_identity_without_disclosure(
         "filesystemId": 123,
         "rootInode": 456,
         "expectedIdentity": "local:123:456",
+        "mountFingerprint": "a" * 64,
     }
     digest = _write_manifest(path, slots=[slot, {**slot, "slotId": "other", "extra": 1}])
 
