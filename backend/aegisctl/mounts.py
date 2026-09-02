@@ -793,10 +793,10 @@ def observe_mount_fingerprints(
                         preexec_fn=set_observer_output_limit,
                         timeout=30,
                     )
-            except (OSError, subprocess.TimeoutExpired) as exc:
+            except (OSError, subprocess.SubprocessError) as exc:
                 raise ConfigError("container mount observation failed") from exc
             finally:
-                with suppress(OSError, subprocess.TimeoutExpired):
+                with suppress(OSError, subprocess.SubprocessError):
                     subprocess.run(
                         [
                             "docker",

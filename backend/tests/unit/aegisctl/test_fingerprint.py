@@ -205,3 +205,35 @@ def test_observer_child_has_a_hard_output_file_size_limit(tmp_path: Path) -> Non
 
     assert result.returncode != 0
     assert output.stat().st_size <= MAX_MOUNTINFO_BYTES + 1
+
+
+def test_observer_preexec_failure_is_translated_without_path_disclosure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "private-canary"
+    source.mkdir()
+    config = tmp_path / "mounts.toml"
+    config.write_text(
+        f"""
+version = 1
+[[slots]]
+slot_id = "photos"
+source = "{source}"
+container_path = "/srv/aegis/roots/photos"
+mode = "read_only"
+expected_identity = "{local_identity(source)}"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    validated = preflight_slots(parse_config(config))
+
+    def fail_run(*args, **kwargs):
+        raise subprocess.SubprocessError(str(source))
+
+    monkeypatch.setattr("aegisctl.mounts.subprocess.run", fail_run)
+
+    with pytest.raises(ConfigError, match="observation") as caught:
+        observe_mount_fingerprints(validated)
+
+    assert str(source) not in str(caught.value)
