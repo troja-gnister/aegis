@@ -430,7 +430,16 @@ def advance_roots_for_user_active_change(*, user_id: uuid.UUID) -> None:
             .filter(pk__in=root_ids)
             .values_list("pk", flat=True)
         )
-        _advance_epochs(root_ids=root_ids, user_ids=())
+        Root.objects.filter(pk__in=root_ids).update(
+            authorization_epoch=F("authorization_epoch") + 1
+        )
+    transaction.on_commit(
+        partial(
+            invalidate_authorization_cache,
+            user_ids=(user_id,),
+            root_ids=root_ids,
+        )
+    )
 
 
 def advance_membership_epochs(

@@ -133,6 +133,8 @@ def test_set_group_grant_uses_opaque_identity_and_only_current_members(
     nonmember = User.objects.create_user(username="not-a-member")
     group = Group.objects.create(name="private-group-name")
     member.groups.add(group)
+    User.objects.filter(pk=member.pk).update(authorization_epoch=0)
+    member.refresh_from_db()
     root = _root()
 
     grant = set_group_grant(
@@ -231,6 +233,7 @@ def test_root_services_validate_manifest_audit_and_advance_only_authorization_ch
     both = User.objects.create_user(username="both-user")
     group = Group.objects.create(name="root-group")
     group.user_set.add(grouped, both)
+    User.objects.filter(pk__in=(grouped.pk, both.pk)).update(authorization_epoch=0)
 
     root = create_root(
         actor=actor,
