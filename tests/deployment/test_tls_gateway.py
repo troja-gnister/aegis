@@ -207,6 +207,55 @@ class TlsStack:
         )
         return json.loads(result.stdout)
 
+    def client_login_status(
+        self, name: str, username: str, *, spoofed_forwarded_for: str | None = None
+    ) -> int:
+        extra_headers = {}
+        if spoofed_forwarded_for is not None:
+            extra_headers["X-Forwarded-For"] = spoofed_forwarded_for
+        script = (
+            "import http.client,http.cookies,json,socket,ssl;"
+            "ctx=ssl._create_unverified_context();"
+            "\nclass CaddyConnection(http.client.HTTPSConnection):\n"
+            " def connect(self):\n"
+            f"  raw=socket.create_connection(('{CADDY_SERVICE}',8443),self.timeout);"
+            "self.sock=self._context.wrap_socket(raw,server_hostname='localhost')\n"
+            "\nconnection=CaddyConnection('localhost',8443,context=ctx,timeout=3);"
+            "connection.request('GET','/api/v1/auth/csrf',headers={'Host':'localhost'});"
+            "response=connection.getresponse();token=json.loads(response.read())['csrfToken'];"
+            "cookies=http.cookies.SimpleCookie();cookies.load(response.getheader('Set-Cookie'));"
+            "csrf_cookie=cookies['csrftoken'].value;connection.close();"
+            f"body=json.dumps({{'username':{username!r},'password':'invalid-password'}}).encode();"
+            "headers={'Host':'localhost','Content-Type':'application/json',"
+            "'X-CSRFToken':token,'Cookie':'csrftoken='+csrf_cookie,"
+            "'Origin':'https://localhost'};"
+            f"headers.update({extra_headers!r});"
+            "connection=CaddyConnection('localhost',8443,context=ctx,timeout=3);"
+            "connection.request('POST','/api/v1/auth/login',body=body,headers=headers);"
+            "response=connection.getresponse();response.read();print(response.status);"
+            "connection.close()"
+        )
+        result = run_command(["docker", "exec", name, "python", "-c", script])
+        return int(result.stdout.strip())
+
+    def ip_throttle_bucket_count(self) -> int:
+        result = self.compose(
+            [
+                "exec",
+                "--no-TTY",
+                "web",
+                "python",
+                "manage.py",
+                "shell",
+                "--command",
+                (
+                    "from aegis_apps.identity.models import LoginThrottleBucket;"
+                    "print(LoginThrottleBucket.objects.filter(kind='ip').count())"
+                ),
+            ]
+        )
+        return int(result.stdout.strip().splitlines()[-1])
+
     def wait_until_ready(self, *, timeout_seconds: int = 30) -> None:
         deadline = time.monotonic() + timeout_seconds
         last_state = "not attempted"
@@ -356,6 +405,9 @@ services:
   web:
     environment:
 {production_environment}
+  gateway:
+    environment:
+      AEGIS_PUBLIC_URL: https://localhost:{https_port}
 secrets:
   admin-password:
     file: {password_file}
@@ -511,6 +563,45 @@ def test_caddy_uses_distinct_actual_client_peer_rate_buckets(tls_stack: TlsStack
     assert first_address != second_address
     assert 503 in first_statuses
     assert second_statuses == [403]
+
+
+def test_gateway_forwards_distinct_unspoofable_client_ips_to_auth_throttle(
+    tls_stack: TlsStack,
+) -> None:
+    web_info = json.loads(
+        run_command(["docker", "inspect", tls_stack.service_container("web")]).stdout
+    )[0]
+    gateway_info = json.loads(
+        run_command(["docker", "inspect", tls_stack.service_container("gateway")]).stdout
+    )[0]
+    caddy_info = json.loads(
+        run_command(["docker", "inspect", tls_stack.service_container(CADDY_SERVICE)]).stdout
+    )[0]
+    assert web_info["State"]["Health"]["Status"] == "healthy"
+    assert gateway_info["State"]["Health"]["Status"] == "healthy"
+    assert caddy_info["State"]["Status"] == "running"
+
+    first = tls_stack.start_client("auth-first")
+    second = tls_stack.start_client("auth-second")
+    second_address = json.loads(run_command(["docker", "inspect", second]).stdout)[0][
+        "NetworkSettings"
+    ]["Networks"][f"{tls_stack.project}_edge"]["IPAddress"]
+    before = tls_stack.ip_throttle_bucket_count()
+
+    first_status = tls_stack.client_login_status(first, f"first-{uuid.uuid4().hex}")
+    second_status = tls_stack.client_login_status(second, f"second-{uuid.uuid4().hex}")
+
+    assert first_status == second_status == 401
+    assert tls_stack.ip_throttle_bucket_count() == before + 2
+
+    spoofed_status = tls_stack.client_login_status(
+        first,
+        f"spoofed-{uuid.uuid4().hex}",
+        spoofed_forwarded_for=second_address,
+    )
+
+    assert spoofed_status == 401
+    assert tls_stack.ip_throttle_bucket_count() == before + 2
 
 
 def test_public_http_ignores_spoofed_forwarding_scheme(tls_stack: TlsStack) -> None:

@@ -163,6 +163,11 @@ def test_gateway_build_collects_only_admin_static_with_pinned_python_stage() -> 
         "COPY --from=admin-static-build /app/backend/staticfiles/admin/ "
         "/usr/share/nginx/html/admin-static/admin/"
     ) in final_stage
+    assert (
+        "COPY --chmod=0555 deploy/nginx/start-gateway.sh "
+        "/usr/local/bin/aegis-gateway-start"
+    ) in final_stage
+    assert 'CMD ["/usr/local/bin/aegis-gateway-start"]' in final_stage
     assert "/app/backend/staticfiles/ /usr/share/nginx/html/admin-static/" not in final_stage
     assert "COPY --from=admin-static-build /app/.venv" not in final_stage
 
@@ -182,7 +187,24 @@ def test_core_services_are_unprivileged_and_postgres_is_private() -> None:
 def test_web_uses_bounded_log_config_from_process_start() -> None:
     command = rendered_compose()["services"]["web"]["command"]
 
-    assert command[-2:] == ["--log-config", "/app/backend/aegis/uvicorn_logging.json"]
+    assert command == ["python", "-m", "aegis.proxy"]
+
+
+def test_gateway_creation_does_not_wait_for_web_health() -> None:
+    services = rendered_compose(
+        "tls", "tls-local", environment={"AEGIS_TLS_HOST": PUBLIC_TLS_HOST}
+    )["services"]
+
+    assert "gateway" not in services["web"].get("depends_on", {})
+    assert "web" not in services["gateway"].get("depends_on", {})
+    assert services["gateway"]["healthcheck"]["test"] == [
+        "CMD-SHELL",
+        "test -f /tmp/aegis-upstream-ready && nc -z 127.0.0.1 8080",
+    ]
+    assert services["caddy"]["depends_on"]["gateway"]["condition"] == "service_healthy"
+    assert services["caddy-local"]["depends_on"]["gateway"]["condition"] == (
+        "service_healthy"
+    )
 
 
 def test_auth_throttle_hmac_secret_is_mounted_only_into_web() -> None:

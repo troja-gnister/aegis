@@ -27,7 +27,9 @@ FROM nginxinc/nginx-unprivileged:1.30.4-alpine@sha256:45ce1e2e699234253d1def7baa
 ENV NGINX_ENTRYPOINT_QUIET_LOGS=1
 COPY deploy/nginx/nginx.conf /etc/nginx/nginx.conf
 COPY deploy/nginx/aegis-server.conf /etc/nginx/aegis-server.conf
+COPY --chmod=0555 deploy/nginx/start-gateway.sh /usr/local/bin/aegis-gateway-start
 COPY --from=frontend-build /frontend/dist/ /usr/share/nginx/html/
 COPY --from=admin-static-build /app/backend/staticfiles/admin/ /usr/share/nginx/html/admin-static/admin/
 EXPOSE 8080
 USER 101:101
+CMD ["/usr/local/bin/aegis-gateway-start"]
