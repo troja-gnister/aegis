@@ -33,6 +33,9 @@ MAX_PATH_LENGTH = 4096
 MAX_IDENTITY_LENGTH = 512
 MAX_INTEGER = (1 << 63) - 1
 MAX_MOUNTINFO_BYTES = 1024 * 1024
+OBSERVER_STOP_TIMEOUT_SECONDS = 3
+OBSERVER_CLEANUP_TIMEOUT_SECONDS = 15
+OBSERVER_INSPECTION_TIMEOUT_SECONDS = 10
 SLOT_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 LOCAL_IDENTITY_RE = re.compile(r"^local:(0|[1-9][0-9]{0,18}):(0|[1-9][0-9]{0,18})$")
 REMOTE_IDENTITY_RE = re.compile(
@@ -728,6 +731,73 @@ def attest_mounts(
             raise MountAttestationError(f"mount attestation failed for slot {slot.slot_id}")
 
 
+def _observer_project_absent(
+    command: list[str], output_path: Path
+) -> bool:
+    try:
+        _atomic_write(output_path, b"", 0o600)
+        with output_path.open("wb") as output:
+            result = subprocess.run(
+                command,
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=output,
+                stderr=subprocess.DEVNULL,
+                preexec_fn=set_observer_output_limit,
+                timeout=OBSERVER_INSPECTION_TIMEOUT_SECONDS,
+            )
+        with output_path.open("rb") as output:
+            raw = output.read(MAX_MOUNTINFO_BYTES + 1)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 and len(raw) <= MAX_MOUNTINFO_BYTES and not raw.strip()
+
+
+def _cleanup_observer_project(
+    project_name: str, compose_path: Path, work_directory: Path
+) -> bool:
+    try:
+        result = subprocess.run(
+            [
+                "docker",
+                "compose",
+                "--project-name",
+                project_name,
+                "-f",
+                str(compose_path),
+                "down",
+                "--timeout",
+                str(OBSERVER_STOP_TIMEOUT_SECONDS),
+                "--remove-orphans",
+                "--volumes",
+            ],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=OBSERVER_CLEANUP_TIMEOUT_SECONDS,
+        )
+        down_succeeded = result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        down_succeeded = False
+    label = f"label=com.docker.compose.project={project_name}"
+    checks = [
+        _observer_project_absent(
+            ["docker", "ps", "--all", "--quiet", "--filter", label],
+            work_directory / "containers.out",
+        ),
+        _observer_project_absent(
+            ["docker", "network", "ls", "--quiet", "--filter", label],
+            work_directory / "networks.out",
+        ),
+        _observer_project_absent(
+            ["docker", "volume", "ls", "--quiet", "--filter", label],
+            work_directory / "volumes.out",
+        ),
+    ]
+    return down_succeeded and all(checks)
+
+
 def observe_mount_fingerprints(
     slots: tuple[ValidatedSlot, ...],
 ) -> tuple[ValidatedSlot, ...]:
@@ -749,6 +819,10 @@ def observe_mount_fingerprints(
         "user": "101:101",
         "network_mode": "none",
         "read_only": True,
+        "cpus": 0.5,
+        "mem_limit": "64m",
+        "pids_limit": 64,
+        "stop_grace_period": "3s",
         "cap_drop": ["ALL"],
         "security_opt": ["no-new-privileges:true"],
         "entrypoint": ["/bin/sh", "-eu", "-c"],
@@ -783,6 +857,7 @@ def observe_mount_fingerprints(
                 "--no-TTY",
                 "mount-observer",
             ]
+            run_succeeded = False
             try:
                 with output_path.open("wb") as observer_output:
                     result = subprocess.run(
@@ -794,29 +869,14 @@ def observe_mount_fingerprints(
                         preexec_fn=set_observer_output_limit,
                         timeout=30,
                     )
-            except (OSError, subprocess.SubprocessError) as exc:
-                raise ConfigError("container mount observation failed") from exc
+                run_succeeded = result.returncode == 0
+            except (OSError, subprocess.SubprocessError):
+                pass
             finally:
-                with suppress(OSError, subprocess.SubprocessError):
-                    subprocess.run(
-                        [
-                            "docker",
-                            "compose",
-                            "--project-name",
-                            project_name,
-                            "-f",
-                            str(compose_path),
-                            "down",
-                            "--remove-orphans",
-                            "--volumes",
-                        ],
-                        check=False,
-                        stdin=subprocess.DEVNULL,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        timeout=15,
-                    )
-            if result.returncode != 0:
+                cleanup_succeeded = _cleanup_observer_project(
+                    project_name, compose_path, Path(temp)
+                )
+            if not run_succeeded or not cleanup_succeeded:
                 raise ConfigError("container mount observation failed")
             try:
                 with output_path.open("rb") as observer_output:
