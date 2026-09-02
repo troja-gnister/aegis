@@ -155,14 +155,18 @@ class LoginView(JSONAPIView):
 class LogoutView(JSONAPIView):
     def post(self, request: Request) -> Response:
         user = request.user
-        if isinstance(user, User) and user.is_authenticated:
-            record_event(
-                event_type="auth.logout",
-                outcome="success",
-                actor=user,
-                request_id=_request_id(request),
-            )
-        logout(request)
+        actor = user if isinstance(user, User) and user.is_authenticated else None
+        request_id = _request_id(request) if actor is not None else None
+        try:
+            if actor is not None and request_id is not None:
+                record_event(
+                    event_type="auth.logout",
+                    outcome="success",
+                    actor=actor,
+                    request_id=request_id,
+                )
+        finally:
+            logout(request)
         return _response(status=204)
 
 

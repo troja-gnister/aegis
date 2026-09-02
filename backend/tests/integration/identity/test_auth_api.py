@@ -199,6 +199,33 @@ def test_invalid_login_shape_is_bounded_before_authentication(
 
 
 @pytest.mark.django_db(transaction=True)
+def test_lone_surrogate_is_rejected_before_authentication(
+    user: User,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    del user
+    client = Client(enforce_csrf_checks=True)
+    token = _csrf_token(client)
+
+    def authentication_must_not_run(**_kwargs: object) -> None:
+        raise AssertionError("authentication ran for a non-encodable credential")
+
+    monkeypatch.setattr("aegis_apps.identity.api.authenticate", authentication_must_not_run)
+    response = client.post(
+        "/api/v1/auth/login",
+        {"username": "alice", "password": "\ud800"},
+        content_type="application/json",
+        headers={"X-CSRFToken": token},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"type": "invalid_request", "title": "Invalid request"}
+    assert AuditEvent.objects.count() == 0
+    assert "\\ud800" not in caplog.text
+
+
+@pytest.mark.django_db(transaction=True)
 def test_oversized_login_body_returns_safe_json_before_authentication(
     user: User, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -315,6 +342,39 @@ def test_logout_requires_rotated_csrf_token(user: User) -> None:
         "title": "Request verification failed",
     }
     assert authenticate(username=user.username, password=PASSWORD) == user
+
+
+@pytest.mark.django_db(transaction=True)
+def test_logout_flushes_session_when_audit_write_fails(
+    user: User, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = Client(enforce_csrf_checks=True, raise_request_exception=False)
+    token = _csrf_token(client)
+    login_response = client.post(
+        "/api/v1/auth/login",
+        {"username": user.username, "password": PASSWORD},
+        content_type="application/json",
+        headers={"X-CSRFToken": token},
+    )
+    assert login_response.status_code == 200
+    session_key = client.cookies["sessionid"].value
+    assert Session.objects.filter(session_key=session_key).exists()
+    attempted_events: list[tuple[str, object]] = []
+
+    def unavailable_audit(*, event_type: str, actor: object, **_kwargs: object) -> None:
+        attempted_events.append((event_type, getattr(actor, "pk", None)))
+        raise RuntimeError("audit unavailable")
+
+    monkeypatch.setattr("aegis_apps.identity.api.record_event", unavailable_audit)
+    response = client.post(
+        "/api/v1/auth/logout",
+        headers={"X-CSRFToken": client.cookies["csrftoken"].value},
+    )
+
+    assert response.status_code == 500
+    assert attempted_events == [("auth.logout", user.pk)]
+    assert not Session.objects.filter(session_key=session_key).exists()
+    assert client.get("/api/v1/auth/session").status_code == 401
 
 
 @pytest.mark.django_db(transaction=True)

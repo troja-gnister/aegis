@@ -46,7 +46,11 @@ class StrictStringField(serializers.CharField):
     def to_internal_value(self, data: object) -> str:
         if not isinstance(data, str):
             self.fail("invalid")
-        if self.max_bytes is not None and len(data.encode("utf-8")) > self.max_bytes:
+        try:
+            encoded = data.encode("utf-8")
+        except UnicodeEncodeError:
+            self.fail("invalid")
+        if self.max_bytes is not None and len(encoded) > self.max_bytes:
             self.fail("max_length", max_length=self.max_bytes)
         return super().to_internal_value(data)
 
