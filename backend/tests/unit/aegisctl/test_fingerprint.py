@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from aegisctl.mounts import (
     parse_config,
     parse_mountinfo,
     preflight_slots,
+    set_observer_output_limit,
 )
 
 
@@ -183,3 +185,23 @@ expected_identity = "{local_identity(source)}"
         observe_mount_fingerprints(validated)
 
     assert str(source) not in str(caught.value)
+
+
+def test_observer_child_has_a_hard_output_file_size_limit(tmp_path: Path) -> None:
+    output = tmp_path / "observer-output"
+    with output.open("wb") as stream:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import os\nwhile True: os.write(1, b'x' * 65536)",
+            ],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=stream,
+            stderr=subprocess.DEVNULL,
+            preexec_fn=set_observer_output_limit,
+        )
+
+    assert result.returncode != 0
+    assert output.stat().st_size <= MAX_MOUNTINFO_BYTES + 1

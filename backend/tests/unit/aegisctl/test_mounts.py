@@ -273,3 +273,37 @@ def test_checked_in_example_validates_without_host_access(
 ) -> None:
     assert main(["mounts", "validate", "--config", "deploy/mounts.example.toml"]) == 0
     assert capsys.readouterr().out == '{"status":"valid"}\n'
+
+
+def test_config_is_read_from_a_bounded_nofollow_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "mounts.toml"
+    config.write_text(
+        """
+version = 1
+[[slots]]
+slot_id = "photos"
+source = "/missing/example"
+container_path = "/srv/aegis/roots/photos"
+mode = "read_only"
+expected_identity = "remote:nas:/photos"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        Path,
+        "read_bytes",
+        lambda self: (_ for _ in ()).throw(AssertionError("unbounded path read")),
+    )
+
+    assert parse_config(config)[0].slot_id == "photos"
+
+
+def test_oversized_config_is_rejected_after_only_the_bounded_prefix(tmp_path: Path) -> None:
+    config = tmp_path / "mounts.toml"
+    config.write_bytes(b" " * (64 * 1024 + 1))
+
+    with pytest.raises(ConfigError, match="size"):
+        parse_config(config)

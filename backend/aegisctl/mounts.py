@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import resource
 import secrets
 import stat
 import subprocess
@@ -26,6 +27,7 @@ if TYPE_CHECKING:
 Mode = Literal["read_only", "read_write"]
 
 MAX_CONFIG_BYTES = 64 * 1024
+MAX_MANIFEST_BYTES = 256 * 1024
 MAX_SLOTS = 128
 MAX_PATH_LENGTH = 4096
 MAX_IDENTITY_LENGTH = 512
@@ -148,18 +150,41 @@ def _parse_slot(item: object) -> SlotSpec:
     return SlotSpec(slot_id, source, expected_path, cast(Mode, mode_value), identity)
 
 
-def parse_config(path: Path) -> tuple[SlotSpec, ...]:
+def _read_bounded_regular(path: Path, limit: int, label: str) -> bytes:
+    descriptor = -1
     try:
-        info = path.lstat()
-        if not stat.S_ISREG(info.st_mode) or path.is_symlink():
-            raise ConfigError("mount config is not a regular file")
-        raw = path.read_bytes()
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise ConfigError(f"{label} is not a regular file")
+        chunks: list[bytes] = []
+        remaining = limit + 1
+        while remaining:
+            chunk = os.read(descriptor, min(65_536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
     except ConfigError:
         raise
     except OSError as exc:
-        raise ConfigError("mount config cannot be read") from exc
-    if len(raw) > MAX_CONFIG_BYTES:
-        raise ConfigError("mount config exceeds size limit")
+        try:
+            is_symlink = path.is_symlink()
+        except OSError:
+            is_symlink = False
+        message = f"{label} is not a regular file" if is_symlink else f"{label} cannot be read"
+        raise ConfigError(message) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if len(raw) > limit:
+        raise ConfigError(f"{label} exceeds size limit")
+    return raw
+
+
+def parse_config(path: Path) -> tuple[SlotSpec, ...]:
+    raw = _read_bounded_regular(path, MAX_CONFIG_BYTES, "mount config")
     try:
         payload = tomllib.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
@@ -444,10 +469,9 @@ def render_artifacts(
         (config_path, manifest_path, output_path, gateway_attestation_path)
     )
     specs = parse_config(config_path)
-    try:
-        manifest_raw = manifest_path.read_bytes()
-    except OSError as exc:
-        raise ConfigError("mount manifest cannot be read") from exc
+    manifest_raw = _read_bounded_regular(
+        manifest_path, MAX_MANIFEST_BYTES, "mount manifest"
+    )
     manifest_digest = hashlib.sha256(manifest_raw).hexdigest()
     try:
         manifest = MountManifest.load(manifest_path, manifest_digest)
@@ -755,6 +779,7 @@ def observe_mount_fingerprints(
                 "--no-deps",
                 "--pull",
                 "never",
+                "--no-TTY",
                 "mount-observer",
             ]
             try:
@@ -762,8 +787,10 @@ def observe_mount_fingerprints(
                     result = subprocess.run(
                         command,
                         check=False,
+                        stdin=subprocess.DEVNULL,
                         stdout=observer_output,
                         stderr=subprocess.DEVNULL,
+                        preexec_fn=set_observer_output_limit,
                         timeout=30,
                     )
             except (OSError, subprocess.TimeoutExpired) as exc:
@@ -783,6 +810,7 @@ def observe_mount_fingerprints(
                             "--volumes",
                         ],
                         check=False,
+                        stdin=subprocess.DEVNULL,
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                         timeout=15,
@@ -826,3 +854,8 @@ def observe_mount_fingerprints(
     if len(records) != len(slots):
         raise ConfigError("container mount observation is ambiguous")
     return tuple(observed)
+
+
+def set_observer_output_limit() -> None:
+    limit = MAX_MOUNTINFO_BYTES + 1
+    resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))

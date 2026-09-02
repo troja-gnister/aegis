@@ -176,6 +176,31 @@ def test_render_rejects_manifest_that_no_longer_matches_source(tmp_path: Path) -
     assert str(writable) not in str(caught.value)
 
 
+def test_render_digests_manifest_without_unbounded_path_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, manifest, _, _ = _preflight_fixture(tmp_path)
+    real_read_bytes = Path.read_bytes
+
+    def reject_manifest_path_read(self: Path) -> bytes:
+        if self == manifest:
+            raise AssertionError("unbounded manifest path read")
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", reject_manifest_path_read)
+
+    result = render_artifacts(
+        config,
+        manifest,
+        tmp_path / "compose.yaml",
+        tmp_path / "gateway.txt",
+        uid=os.geteuid(),
+        gid=os.getegid(),
+    )
+
+    assert len(result.manifest_digest) == 64
+
+
 def test_mountinfo_decodes_only_defined_escapes_and_computes_effective_mode() -> None:
     mountinfo = (
         b"36 25 0:32 / /srv/aegis/roots/photo\\040archive ro,nosuid - ext4 /dev/sda rw\n"

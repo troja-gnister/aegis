@@ -39,7 +39,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
-dd if="$attestation" of="$attestation_snapshot" bs=65536 count=3 >/dev/null 2>&1 || fail
+head -c 131073 "$attestation" > "$attestation_snapshot" 2>/dev/null || fail
 size="$(wc -c < "$attestation_snapshot" 2>/dev/null)" || fail
 case "$size" in
     *[!0-9]*|"") fail ;;
@@ -61,7 +61,7 @@ fi
 last_byte="$(tail -c 1 "$attestation_snapshot" 2>/dev/null | od -An -tuC 2>/dev/null | tr -d '[:space:]')" || fail
 [ "$last_byte" = 10 ] || fail
 
-dd if=/proc/self/mountinfo of="$mountinfo_snapshot" bs=65536 count=17 >/dev/null 2>&1 || fail
+head -c 1048577 /proc/self/mountinfo > "$mountinfo_snapshot" 2>/dev/null || fail
 mountinfo_size="$(wc -c < "$mountinfo_snapshot" 2>/dev/null)" || fail
 case "$mountinfo_size" in
     *[!0-9]*|"") fail ;;
