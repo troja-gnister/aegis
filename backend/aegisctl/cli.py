@@ -10,9 +10,12 @@ from pathlib import Path
 
 from aegisctl.mounts import (
     ConfigError,
+    MountAttestationError,
+    attest_mounts,
     local_identity,
     parse_config,
     preflight_slots,
+    render_artifacts,
     runtime_identity,
     write_manifest,
 )
@@ -33,6 +36,16 @@ def _parser() -> argparse.ArgumentParser:
     preflight = mount_commands.add_parser("preflight", allow_abbrev=False)
     preflight.add_argument("--config", type=Path, required=True)
     preflight.add_argument("--manifest", type=Path, required=True)
+
+    render = mount_commands.add_parser("render", allow_abbrev=False)
+    render.add_argument("--config", type=Path, required=True)
+    render.add_argument("--manifest", type=Path, required=True)
+    render.add_argument("--output", type=Path, required=True)
+    render.add_argument("--gateway-attestation", type=Path, required=True)
+
+    attest = mount_commands.add_parser("attest", allow_abbrev=False)
+    attest.add_argument("--manifest", type=Path, required=True)
+    attest.add_argument("--role", choices=("operations", "indexer", "media"), required=True)
     return parser
 
 
@@ -80,6 +93,44 @@ def _preflight(config: Path, manifest: Path) -> int:
     return 0
 
 
+def _render(config: Path, manifest: Path, output: Path, gateway_attestation: Path) -> int:
+    uid, gid = runtime_identity()
+    result = render_artifacts(
+        config,
+        manifest,
+        output,
+        gateway_attestation,
+        uid=uid,
+        gid=gid,
+    )
+    print(
+        json.dumps(
+            {
+                "status": "rendered",
+                "manifestSha256": result.manifest_digest,
+                "gatewayAttestationSha256": result.gateway_digest,
+            },
+            separators=(",", ":"),
+        )
+    )
+    return 0
+
+
+def _attest(manifest_path: Path, role: str) -> int:
+    from aegis_apps.roots.manifest import ManifestError, MountManifest
+
+    digest = os.environ.get("AEGIS_MOUNT_MANIFEST_SHA256", "")
+    try:
+        manifest = MountManifest.load(manifest_path, digest)
+    except ManifestError as exc:
+        raise ConfigError(str(exc)) from exc
+    if role not in ("operations", "indexer", "media"):
+        raise ConfigError("invalid mount role")
+    attest_mounts(manifest, role)  # type: ignore[arg-type]
+    print('{"status":"attested"}')
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -89,7 +140,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _validate(args.config)
         if args.command == "mounts" and args.mount_command == "preflight":
             return _preflight(args.config, args.manifest)
-    except ConfigError as exc:
+        if args.command == "mounts" and args.mount_command == "render":
+            return _render(args.config, args.manifest, args.output, args.gateway_attestation)
+        if args.command == "mounts" and args.mount_command == "attest":
+            return _attest(args.manifest, args.role)
+    except (ConfigError, MountAttestationError) as exc:
         print(
             json.dumps(
                 {"status": "error", "message": str(exc)[:512]},

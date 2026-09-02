@@ -92,20 +92,44 @@ class MountManifest:
     def load(cls, path: Path, expected_digest: str) -> MountManifest:
         if not isinstance(expected_digest, str) or not DIGEST_RE.fullmatch(expected_digest):
             raise ManifestError("invalid mount manifest digest")
+        descriptor = -1
         try:
-            info = path.lstat()
+            descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+            info = os.fstat(descriptor)
         except OSError as exc:
-            raise ManifestError("mount manifest cannot be read") from exc
-        if not stat.S_ISREG(info.st_mode) or path.is_symlink():
+            try:
+                is_symlink = path.is_symlink()
+            except OSError:
+                is_symlink = False
+            message = (
+                "mount manifest is not a regular file"
+                if is_symlink
+                else "mount manifest cannot be read"
+            )
+            raise ManifestError(message) from exc
+        if not stat.S_ISREG(info.st_mode):
+            os.close(descriptor)
             raise ManifestError("mount manifest is not a regular file")
         if stat.S_IMODE(info.st_mode) != 0o600:
+            os.close(descriptor)
             raise ManifestError("mount manifest has invalid permissions")
         if (info.st_uid, info.st_gid) != (os.geteuid(), os.getegid()):
+            os.close(descriptor)
             raise ManifestError("mount manifest has invalid owner")
         try:
-            raw = path.read_bytes()
+            chunks: list[bytes] = []
+            remaining = MAX_MANIFEST_BYTES + 1
+            while remaining:
+                chunk = os.read(descriptor, min(65_536, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            raw = b"".join(chunks)
         except OSError as exc:
             raise ManifestError("mount manifest cannot be read") from exc
+        finally:
+            os.close(descriptor)
         if len(raw) > MAX_MANIFEST_BYTES:
             raise ManifestError("mount manifest exceeds size limit")
         digest = hashlib.sha256(raw).hexdigest()

@@ -92,7 +92,7 @@ def test_load_rejects_unknown_fields_and_duplicate_identity_without_disclosure(
 def test_load_rejects_wrong_owner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = tmp_path / "manifest.json"
     digest = _write_manifest(path)
-    real_lstat = Path.lstat
+    real_fstat = os.fstat
 
     class _FakeStat:
         def __init__(self, original: os.stat_result) -> None:
@@ -101,10 +101,32 @@ def test_load_rejects_wrong_owner(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
             self.st_gid = original.st_gid
 
     monkeypatch.setattr(
-        Path,
-        "lstat",
-        lambda self: _FakeStat(real_lstat(self)) if self == path else real_lstat(self),
+        os,
+        "fstat",
+        lambda descriptor: _FakeStat(real_fstat(descriptor)),
     )
 
     with pytest.raises(ManifestError, match="owner"):
         MountManifest.load(path, digest)
+
+
+def test_load_rechecks_the_descriptor_when_path_is_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "manifest.json"
+    digest = _write_manifest(path)
+    replacement = tmp_path / "replacement.json"
+    replacement.write_text('{"replaced":true}\n', encoding="ascii")
+    replacement.chmod(0o600)
+    real_read_bytes = Path.read_bytes
+
+    def replace_then_read(self: Path) -> bytes:
+        if self == path:
+            replacement.replace(path)
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", replace_then_read)
+
+    manifest = MountManifest.load(path, digest)
+
+    assert manifest.get("photos") is not None

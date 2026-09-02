@@ -8,11 +8,18 @@ import re
 import secrets
 import stat
 import tomllib
+from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal, cast
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Literal, cast
+
+import yaml
+
+if TYPE_CHECKING:
+    from aegis_apps.roots.manifest import MountManifest
 
 Mode = Literal["read_only", "read_write"]
 
@@ -21,6 +28,7 @@ MAX_SLOTS = 128
 MAX_PATH_LENGTH = 4096
 MAX_IDENTITY_LENGTH = 512
 MAX_INTEGER = (1 << 63) - 1
+MAX_MOUNTINFO_BYTES = 1024 * 1024
 SLOT_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 LOCAL_IDENTITY_RE = re.compile(r"^local:(0|[1-9][0-9]{0,18}):(0|[1-9][0-9]{0,18})$")
 REMOTE_IDENTITY_RE = re.compile(
@@ -31,6 +39,10 @@ REMOTE_IDENTITY_RE = re.compile(
 
 class ConfigError(ValueError):
     """A bounded, safe mount configuration error."""
+
+
+class MountAttestationError(ValueError):
+    """A safe runtime mount-attestation error."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +63,18 @@ class ValidatedSlot:
     filesystem_id: int
     root_inode: int
     expected_identity: str
+
+
+@dataclass(frozen=True, slots=True)
+class RenderResult:
+    manifest_digest: str
+    gateway_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class MountInfoRecord:
+    mountpoint: str
+    effective_mode: Mode
 
 
 def _safe_slot_error(slot_id: object, message: str) -> ConfigError:
@@ -366,3 +390,271 @@ def write_manifest(
     raw = (json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n").encode("ascii")
     _atomic_write(path, raw, 0o600)
     return hashlib.sha256(raw).hexdigest()
+
+
+def _paths_alias(first: Path, second: Path) -> bool:
+    if first.resolve(strict=False) == second.resolve(strict=False):
+        return True
+    try:
+        return first.samefile(second)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise ConfigError("output alias cannot be checked") from exc
+
+
+def _ensure_distinct_artifacts(paths: tuple[Path, ...]) -> None:
+    for index, first in enumerate(paths):
+        for second in paths[index + 1 :]:
+            if _paths_alias(first, second):
+                raise ConfigError("generated artifact alias is forbidden")
+
+
+def _bind(source: Path | str, target: str, *, read_only: bool) -> dict[str, object]:
+    return {
+        "type": "bind",
+        "source": str(source),
+        "target": target,
+        "read_only": read_only,
+        "bind": {"create_host_path": False},
+    }
+
+
+def render_artifacts(
+    config_path: Path,
+    manifest_path: Path,
+    output_path: Path,
+    gateway_attestation_path: Path,
+    *,
+    uid: int,
+    gid: int,
+) -> RenderResult:
+    from aegis_apps.roots.manifest import MountManifest
+
+    if (uid, gid) != (os.geteuid(), os.getegid()) or uid == 0 or gid == 0:
+        raise ConfigError("render identity must match invoking identity")
+    _ensure_distinct_artifacts(
+        (config_path, manifest_path, output_path, gateway_attestation_path)
+    )
+    specs = parse_config(config_path)
+    try:
+        manifest_raw = manifest_path.read_bytes()
+    except OSError as exc:
+        raise ConfigError("mount manifest cannot be read") from exc
+    manifest_digest = hashlib.sha256(manifest_raw).hexdigest()
+    try:
+        manifest = MountManifest.load(manifest_path, manifest_digest)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+    if set(manifest.slots) != {spec.slot_id for spec in specs}:
+        raise ConfigError("mount manifest does not match config")
+
+    validated: list[ValidatedSlot] = []
+    for spec in sorted(specs, key=lambda item: item.slot_id):
+        manifest_slot = manifest.get(spec.slot_id)
+        if manifest_slot is None:
+            raise ConfigError(f"mount slot {spec.slot_id}: manifest mismatch")
+        if (
+            manifest_slot.container_path.as_posix() != spec.container_path
+            or manifest_slot.mode != spec.mode
+            or manifest_slot.expected_identity != spec.expected_identity
+        ):
+            raise ConfigError(f"mount slot {spec.slot_id}: manifest mismatch")
+        try:
+            resolved = spec.source.resolve(strict=True)
+            info = resolved.stat()
+        except OSError as exc:
+            raise ConfigError(f"mount slot {spec.slot_id}: source is inaccessible") from exc
+        if not stat.S_ISDIR(info.st_mode):
+            raise ConfigError(f"mount slot {spec.slot_id}: source is not a directory")
+        if (info.st_dev, info.st_ino) != (
+            manifest_slot.filesystem_id,
+            manifest_slot.root_inode,
+        ):
+            raise ConfigError(f"mount slot {spec.slot_id}: source identity changed")
+        validated.append(
+            ValidatedSlot(
+                spec.slot_id,
+                resolved,
+                spec.container_path,
+                spec.mode,
+                info.st_dev,
+                info.st_ino,
+                spec.expected_identity,
+            )
+        )
+
+    attestation_raw = (
+        "".join(
+            f"{slot.slot_id}|{slot.container_path}|{slot.filesystem_id}|"
+            f"{slot.root_inode}|{slot.mode}\n"
+            for slot in validated
+        )
+    ).encode("ascii")
+    gateway_digest = hashlib.sha256(attestation_raw).hexdigest()
+
+    manifest_target = "/run/aegis/mounts.manifest.json"
+    attestation_target = "/run/aegis/mounts.gateway.attestation"
+    identity = f"{uid}:{gid}"
+    backend_environment = {
+        "AEGIS_MOUNT_MANIFEST": manifest_target,
+        "AEGIS_MOUNT_MANIFEST_SHA256": manifest_digest,
+    }
+    service_volumes = {
+        "web": [_bind(manifest_path.resolve(), manifest_target, read_only=True)],
+        "operations": [_bind(manifest_path.resolve(), manifest_target, read_only=True)],
+        "indexer": [_bind(manifest_path.resolve(), manifest_target, read_only=True)],
+        "media": [_bind(manifest_path.resolve(), manifest_target, read_only=True)],
+        "gateway": [
+            _bind(
+                gateway_attestation_path.resolve(),
+                attestation_target,
+                read_only=True,
+            )
+        ],
+    }
+    services: dict[str, dict[str, object]] = {
+        "web": {
+            "user": identity,
+            "environment": backend_environment,
+            "volumes": service_volumes["web"],
+        },
+        "operations": {
+            "user": identity,
+            "environment": backend_environment,
+            "volumes": service_volumes["operations"],
+        },
+        "indexer": {
+            "user": identity,
+            "environment": backend_environment,
+            "volumes": service_volumes["indexer"],
+        },
+        "media": {
+            "user": identity,
+            "environment": backend_environment,
+            "volumes": service_volumes["media"],
+        },
+        "gateway": {
+            "environment": {
+                "AEGIS_GATEWAY_MOUNT_ATTESTATION": attestation_target,
+                "AEGIS_GATEWAY_MOUNT_ATTESTATION_SHA256": gateway_digest,
+            },
+            "volumes": service_volumes["gateway"],
+        },
+    }
+    for slot in validated:
+        service_volumes["gateway"].append(
+            _bind(slot.source, slot.container_path, read_only=True)
+        )
+        service_volumes["indexer"].append(
+            _bind(slot.source, slot.container_path, read_only=True)
+        )
+        service_volumes["media"].append(
+            _bind(slot.source, slot.container_path, read_only=True)
+        )
+        service_volumes["operations"].append(
+            _bind(slot.source, slot.container_path, read_only=slot.mode == "read_only")
+        )
+    compose_raw = yaml.safe_dump(
+        {"services": services},
+        sort_keys=False,
+        allow_unicode=False,
+        default_flow_style=False,
+    ).encode("ascii")
+    _atomic_write(gateway_attestation_path, attestation_raw, 0o644)
+    _atomic_write(output_path, compose_raw, 0o644)
+    return RenderResult(manifest_digest, gateway_digest)
+
+
+_MOUNTINFO_ESCAPES = {"040": " ", "011": "\t", "012": "\n", "134": "\\"}
+
+
+def _decode_mountinfo_field(value: str) -> str:
+    result: list[str] = []
+    index = 0
+    while index < len(value):
+        if value[index] != "\\":
+            result.append(value[index])
+            index += 1
+            continue
+        escape = value[index + 1 : index + 4]
+        if len(escape) != 3 or escape not in _MOUNTINFO_ESCAPES:
+            raise MountAttestationError("mountinfo contains an invalid escape")
+        result.append(_MOUNTINFO_ESCAPES[escape])
+        index += 4
+    return "".join(result)
+
+
+def _option_mode(options: str) -> Mode:
+    values = options.split(",")
+    has_ro = "ro" in values
+    has_rw = "rw" in values
+    if has_ro == has_rw:
+        raise MountAttestationError("mountinfo contains ambiguous mount flags")
+    return "read_only" if has_ro else "read_write"
+
+
+def parse_mountinfo(raw: bytes) -> Mapping[str, MountInfoRecord]:
+    if len(raw) > MAX_MOUNTINFO_BYTES:
+        raise MountAttestationError("mountinfo exceeds size limit")
+    try:
+        text = raw.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise MountAttestationError("mountinfo is malformed") from exc
+    records: dict[str, MountInfoRecord] = {}
+    lines = text.splitlines()
+    if len(lines) > 8192:
+        raise MountAttestationError("mountinfo exceeds record limit")
+    for line in lines:
+        if not line or len(line) > 16_384:
+            raise MountAttestationError("mountinfo is malformed")
+        fields = line.split(" ")
+        separators = [index for index, field in enumerate(fields) if field == "-"]
+        if len(separators) != 1 or separators[0] < 6 or len(fields) <= separators[0] + 3:
+            raise MountAttestationError("mountinfo is malformed")
+        mountpoint = _decode_mountinfo_field(fields[4])
+        per_mount = _option_mode(fields[5])
+        superblock = _option_mode(fields[separators[0] + 3])
+        effective: Mode
+        if per_mount == "read_only" or superblock == "read_only":
+            effective = "read_only"
+        elif per_mount == "read_write" and superblock == "read_write":
+            effective = "read_write"
+        else:
+            raise MountAttestationError("mountinfo contains ambiguous mount flags")
+        if mountpoint in records:
+            raise MountAttestationError("mountinfo contains an ambiguous mountpoint")
+        records[mountpoint] = MountInfoRecord(mountpoint, effective)
+    return MappingProxyType(records)
+
+
+def attest_mounts(
+    manifest: MountManifest,
+    role: Literal["operations", "indexer", "media"],
+    *,
+    mountinfo_path: Path = Path("/proc/self/mountinfo"),
+) -> None:
+    try:
+        with mountinfo_path.open("rb") as handle:
+            raw = handle.read(MAX_MOUNTINFO_BYTES + 1)
+    except OSError as exc:
+        raise MountAttestationError("mountinfo cannot be read") from exc
+    records = parse_mountinfo(raw)
+    for slot in manifest.slots.values():
+        try:
+            info = os.stat(slot.container_path.as_posix(), follow_symlinks=False)
+        except OSError as exc:
+            raise MountAttestationError(
+                f"mount attestation failed for slot {slot.slot_id}"
+            ) from exc
+        if not stat.S_ISDIR(info.st_mode) or (info.st_dev, info.st_ino) != (
+            slot.filesystem_id,
+            slot.root_inode,
+        ):
+            raise MountAttestationError(f"mount attestation failed for slot {slot.slot_id}")
+        record = records.get(slot.container_path.as_posix())
+        required_mode: Mode = (
+            slot.mode if role == "operations" else "read_only"
+        )
+        if record is None or record.effective_mode != required_mode:
+            raise MountAttestationError(f"mount attestation failed for slot {slot.slot_id}")
