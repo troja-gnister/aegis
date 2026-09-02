@@ -4,6 +4,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 from django.conf import settings
+from django.contrib.auth import SESSION_KEY
 from django.contrib.auth.models import AnonymousUser
 from django.contrib.sessions.backends.base import SessionBase
 from django.http import HttpRequest, HttpResponse
@@ -109,4 +110,14 @@ class SessionPolicyMiddleware:
                     and now - last_seen_at >= settings.AEGIS_SESSION_ACTIVITY_WRITE_INTERVAL
                 ):
                     request.session[LAST_SEEN_AT] = now.astimezone(UTC).isoformat()
+        elif SESSION_KEY in request.session:
+            request.session.flush()
+            request_id = getattr(request, "request_id", "")
+            record_event(
+                event_type="auth.session.revoked",
+                outcome="denied",
+                actor=None,
+                request_id=request_id,
+                metadata={"request_id": request_id},
+            )
         return self.get_response(request)

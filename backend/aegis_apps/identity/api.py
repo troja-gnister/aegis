@@ -140,6 +140,7 @@ class LoginView(JSONAPIView):
         with transaction.atomic():
             throttle.record_success(username=username)
             login(request, user)
+            request.session.cycle_key()
             initialize_session(session=request.session, user=user, now=timezone.now())
             record_event(
                 event_type="auth.login.succeeded",

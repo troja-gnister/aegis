@@ -6,6 +6,7 @@ import pytest
 from aegis_apps.audit.models import AuditEvent
 from aegis_apps.identity.models import LoginThrottleBucket, User
 from django.contrib.auth import authenticate
+from django.contrib.sessions.models import Session
 from django.test import Client, override_settings
 
 pytestmark = pytest.mark.integration
@@ -104,6 +105,62 @@ def test_stale_authorization_epoch_is_revoked_on_non_auth_route(user: User) -> N
     assert revoked.actor is None
     assert revoked.metadata == {"request_id": health.headers["X-Request-ID"]}
     assert uuid.UUID(revoked.request_id)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_deactivated_user_session_is_flushed_and_audited_once(user: User) -> None:
+    client = Client(enforce_csrf_checks=True)
+    token = _csrf_token(client)
+    login_response = client.post(
+        "/api/v1/auth/login",
+        {"username": user.username, "password": PASSWORD},
+        content_type="application/json",
+        headers={"X-CSRFToken": token},
+    )
+    assert login_response.status_code == 200
+    session_key = client.cookies["sessionid"].value
+    assert Session.objects.filter(session_key=session_key).exists()
+    User.objects.filter(pk=user.pk).update(is_active=False)
+
+    health = client.get("/health/live")
+
+    assert health.status_code == 200
+    assert not Session.objects.filter(session_key=session_key).exists()
+    assert client.get("/api/v1/auth/session").status_code == 401
+    revoked_events = AuditEvent.objects.filter(event_type="auth.session.revoked")
+    assert revoked_events.count() == 1
+    revoked = revoked_events.get()
+    assert revoked.actor is None
+    assert revoked.metadata == {"request_id": health.headers["X-Request-ID"]}
+
+
+@pytest.mark.django_db(transaction=True)
+def test_same_user_login_rotates_session_and_cache_namespace(user: User) -> None:
+    client = Client(enforce_csrf_checks=True)
+    token = _csrf_token(client)
+    first_login = client.post(
+        "/api/v1/auth/login",
+        {"username": user.username, "password": PASSWORD},
+        content_type="application/json",
+        headers={"X-CSRFToken": token},
+    )
+    assert first_login.status_code == 200
+    first_session_key = client.cookies["sessionid"].value
+    first_namespace = client.get("/api/v1/auth/session").json()["cacheNamespace"]
+
+    second_login = client.post(
+        "/api/v1/auth/login",
+        {"username": user.username, "password": PASSWORD},
+        content_type="application/json",
+        headers={"X-CSRFToken": client.cookies["csrftoken"].value},
+    )
+
+    assert second_login.status_code == 200
+    second_session_key = client.cookies["sessionid"].value
+    second_namespace = client.get("/api/v1/auth/session").json()["cacheNamespace"]
+    assert second_session_key != first_session_key
+    assert second_namespace != first_namespace
+    assert not Session.objects.filter(session_key=first_session_key).exists()
 
 
 @pytest.mark.django_db(transaction=True)
