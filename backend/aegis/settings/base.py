@@ -37,6 +37,7 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "aegis_apps.identity.session_policy.SessionPolicyMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
@@ -75,6 +76,16 @@ AUTH_USER_MODEL = "identity.User"
 
 AEGIS_SESSION_IDLE_AGE = timedelta(minutes=30)
 AEGIS_SESSION_ABSOLUTE_AGE = timedelta(hours=12)
+AEGIS_SESSION_ACTIVITY_WRITE_INTERVAL = timedelta(minutes=1)
+
+SESSION_ENGINE = "django.contrib.sessions.backends.db"
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = "Lax"
+SESSION_COOKIE_SECURE = RUNTIME_CONFIG.secure_cookies
+CSRF_COOKIE_HTTPONLY = False
+CSRF_COOKIE_SAMESITE = "Lax"
+CSRF_COOKIE_SECURE = RUNTIME_CONFIG.secure_cookies
+CSRF_FAILURE_VIEW = "aegis_apps.identity.api.csrf_failure"
 
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},

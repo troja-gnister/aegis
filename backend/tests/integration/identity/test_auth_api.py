@@ -1,0 +1,248 @@
+from __future__ import annotations
+
+import uuid
+
+import pytest
+from aegis_apps.audit.models import AuditEvent
+from aegis_apps.identity.models import User
+from django.contrib.auth import authenticate
+from django.test import Client
+
+pytestmark = pytest.mark.integration
+PASSWORD = "a-long-test-password"
+
+
+@pytest.fixture
+def user() -> User:
+    return User.objects.create_user(username="alice", password=PASSWORD)
+
+
+def _csrf_token(client: Client) -> str:
+    response = client.get("/api/v1/auth/csrf")
+    assert response.status_code == 200
+    token = response.json()["csrfToken"]
+    assert isinstance(token, str)
+    return token
+
+
+@pytest.mark.django_db(transaction=True)
+def test_login_requires_csrf_rotates_session_and_logout_revokes(user: User) -> None:
+    client = Client(enforce_csrf_checks=True)
+    token = _csrf_token(client)
+    original_csrf_cookie = client.cookies["csrftoken"].value
+
+    rejected = client.post(
+        "/api/v1/auth/login",
+        {"username": "alice", "password": PASSWORD},
+        content_type="application/json",
+    )
+
+    assert rejected.status_code == 403
+    assert rejected.json() == {
+        "type": "csrf_failed",
+        "title": "Request verification failed",
+    }
+
+    login = client.post(
+        "/api/v1/auth/login",
+        {"username": "alice", "password": PASSWORD},
+        content_type="application/json",
+        headers={"X-CSRFToken": token},
+    )
+
+    assert login.status_code == 200
+    assert login.json() == {"user": {"id": str(user.pk), "username": "alice"}}
+    assert client.cookies["sessionid"]["httponly"] is True
+    assert client.cookies["sessionid"]["samesite"] == "Lax"
+    assert client.cookies["csrftoken"].value != original_csrf_cookie
+    session_key = client.cookies["sessionid"].value
+
+    session = client.get("/api/v1/auth/session")
+
+    assert session.status_code == 200
+    assert session.json()["user"] == {"id": str(user.pk), "username": "alice"}
+    cache_namespace = session.json()["cacheNamespace"]
+    assert isinstance(cache_namespace, str)
+    assert len(cache_namespace) >= 32
+    assert session_key not in cache_namespace
+
+    rotated_csrf = client.cookies["csrftoken"].value
+    logout = client.post(
+        "/api/v1/auth/logout",
+        headers={"X-CSRFToken": rotated_csrf},
+    )
+
+    assert logout.status_code == 204
+    assert client.get("/api/v1/auth/session").status_code == 401
+    assert [
+        (event.event_type, event.actor_id) for event in AuditEvent.objects.order_by("occurred_at")
+    ] == [
+        ("auth.login.succeeded", user.pk),
+        ("auth.logout", user.pk),
+    ]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_stale_authorization_epoch_is_revoked_on_non_auth_route(user: User) -> None:
+    client = Client(enforce_csrf_checks=True)
+    token = _csrf_token(client)
+    login = client.post(
+        "/api/v1/auth/login",
+        {"username": user.username, "password": PASSWORD},
+        content_type="application/json",
+        headers={"X-CSRFToken": token},
+    )
+    assert login.status_code == 200
+    old_session_key = client.cookies["sessionid"].value
+    User.objects.filter(pk=user.pk).update(authorization_epoch=1)
+
+    health = client.get("/health/live")
+
+    assert health.status_code == 200
+    assert client.session.session_key != old_session_key
+    revoked = AuditEvent.objects.get(event_type="auth.session.revoked")
+    assert revoked.actor is None
+    assert revoked.metadata == {"request_id": health.headers["X-Request-ID"]}
+    assert uuid.UUID(revoked.request_id)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"username": 7, "password": PASSWORD},
+        {"username": "alice", "password": [PASSWORD]},
+        {"username": "a" * 151, "password": PASSWORD},
+        {"username": "alice", "password": "£" * 513},
+        {"username": "alice", "password": PASSWORD, "extra": "rejected"},
+    ],
+)
+def test_invalid_login_shape_is_bounded_before_authentication(
+    user: User, payload: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del user
+    client = Client(enforce_csrf_checks=True)
+    token = _csrf_token(client)
+
+    def authentication_must_not_run(**_kwargs: object) -> None:
+        raise AssertionError("authentication ran for an invalid request")
+
+    monkeypatch.setattr("aegis_apps.identity.api.authenticate", authentication_must_not_run)
+
+    response = client.post(
+        "/api/v1/auth/login",
+        payload,
+        content_type="application/json",
+        headers={"X-CSRFToken": token},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"type": "invalid_request", "title": "Invalid request"}
+    assert AuditEvent.objects.count() == 0
+
+
+@pytest.mark.django_db(transaction=True)
+def test_oversized_login_body_returns_safe_json_before_authentication(
+    user: User, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del user
+    client = Client(enforce_csrf_checks=True)
+    token = _csrf_token(client)
+
+    def authentication_must_not_run(**_kwargs: object) -> None:
+        raise AssertionError("authentication ran for an oversized request")
+
+    monkeypatch.setattr("aegis_apps.identity.api.authenticate", authentication_must_not_run)
+    response = client.post(
+        "/api/v1/auth/login",
+        {"username": "alice", "password": "x" * 5000},
+        content_type="application/json",
+        headers={"X-CSRFToken": token},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"type": "invalid_request", "title": "Invalid request"}
+    assert AuditEvent.objects.count() == 0
+
+
+@pytest.mark.django_db(transaction=True)
+def test_invalid_accounts_share_problem_and_opaque_audit(
+    user: User, caplog: pytest.LogCaptureFixture
+) -> None:
+    inactive = User.objects.create_user(
+        username="inactive-account",
+        password=PASSWORD,
+        is_active=False,
+    )
+    attempts = [
+        ("missing-account", PASSWORD),
+        (user.username, "wrong-test-password"),
+        (inactive.username, PASSWORD),
+    ]
+
+    for username, password in attempts:
+        client = Client(enforce_csrf_checks=True)
+        token = _csrf_token(client)
+        response = client.post(
+            "/api/v1/auth/login",
+            {"username": username, "password": password},
+            content_type="application/json",
+            headers={"X-CSRFToken": token, "X-Request-ID": "safe-request-1234"},
+            REMOTE_ADDR="192.0.2.15",
+        )
+        assert response.status_code == 401
+        assert response.json() == {
+            "type": "invalid_credentials",
+            "title": "Unable to sign in",
+        }
+
+    events = list(AuditEvent.objects.order_by("occurred_at"))
+    assert len(events) == 3
+    assert all(event.event_type == "auth.login.failed" for event in events)
+    assert all(event.actor is None for event in events)
+    assert all(
+        event.metadata
+        == {
+            "bucket_type": "account",
+            "request_id": "safe-request-1234",
+        }
+        for event in events
+    )
+    serialized = " ".join([caplog.text, *(str(event.metadata) for event in events)])
+    assert "missing-account" not in serialized
+    assert "inactive-account" not in serialized
+    assert "wrong-test-password" not in serialized
+    assert "192.0.2.15" not in serialized
+
+
+@pytest.mark.django_db(transaction=True)
+def test_logout_requires_rotated_csrf_token(user: User) -> None:
+    client = Client(enforce_csrf_checks=True)
+    token = _csrf_token(client)
+    login_response = client.post(
+        "/api/v1/auth/login",
+        {"username": user.username, "password": PASSWORD},
+        content_type="application/json",
+        headers={"X-CSRFToken": token},
+    )
+    assert login_response.status_code == 200
+
+    response = client.post("/api/v1/auth/logout")
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "type": "csrf_failed",
+        "title": "Request verification failed",
+    }
+    assert authenticate(username=user.username, password=PASSWORD) == user
+
+
+@pytest.mark.django_db(transaction=True)
+def test_non_api_csrf_failure_is_plain_and_safe() -> None:
+    client = Client(enforce_csrf_checks=True)
+
+    response = client.post("/admin/login/", {"username": "x", "password": "secret"})
+
+    assert response.status_code == 403
+    assert response.headers["Content-Type"].startswith("text/plain")
+    assert response.content == b"Request verification failed"

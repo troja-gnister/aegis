@@ -13,6 +13,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+  "djangorestframework-stubs>=3.16,<4",
   "django-stubs>=5.2,<6",
   "hypothesis>=6.138,<7",
   "mypy>=1.17,<2",
