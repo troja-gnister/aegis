@@ -14,7 +14,8 @@ for name in \
     db-operations-password \
     db-indexer-password \
     db-media-password \
-    django-secret-key
+    django-secret-key \
+    auth-throttle-hmac-key
 do
     destination="$secret_dir/$name"
     if [ -s "$destination" ]; then

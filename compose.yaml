@@ -89,6 +89,7 @@ services:
       AEGIS_TRUST_PROXY_HEADERS: "true"
       AEGIS_DB_USER: aegis_web
       AEGIS_DB_PASSWORD_FILE: /run/secrets/db_web_password
+      AEGIS_AUTH_THROTTLE_HMAC_KEY_FILE: /run/secrets/auth_throttle_hmac_key
     volumes:
       - staging:/srv/aegis/staging
     secrets:
@@ -96,6 +97,8 @@ services:
         target: django_secret_key
       - source: db-web-password
         target: db_web_password
+      - source: auth-throttle-hmac-key
+        target: auth_throttle_hmac_key
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -279,3 +282,5 @@ secrets:
     file: ./deploy/secrets/dev/db-media-password
   django-secret-key:
     file: ./deploy/secrets/dev/django-secret-key
+  auth-throttle-hmac-key:
+    file: ./deploy/secrets/dev/auth-throttle-hmac-key

@@ -12,6 +12,7 @@ SECRET_NAMES = (
     "db-indexer-password",
     "db-media-password",
     "django-secret-key",
+    "auth-throttle-hmac-key",
 )
 
 

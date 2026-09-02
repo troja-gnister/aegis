@@ -185,6 +185,26 @@ def test_web_uses_bounded_log_config_from_process_start() -> None:
     assert command[-2:] == ["--log-config", "/app/backend/aegis/uvicorn_logging.json"]
 
 
+def test_auth_throttle_hmac_secret_is_mounted_only_into_web() -> None:
+    config = rendered_compose()
+    services = config["services"]
+
+    assert config["secrets"]["auth-throttle-hmac-key"]["file"].endswith(
+        "/deploy/secrets/dev/auth-throttle-hmac-key"
+    )
+    assert services["web"]["environment"]["AEGIS_AUTH_THROTTLE_HMAC_KEY_FILE"] == (
+        "/run/secrets/auth_throttle_hmac_key"
+    )
+    assert "auth-throttle-hmac-key" in {
+        secret["source"] for secret in services["web"]["secrets"]
+    }
+    for name in ("migrate", "operations", "indexer", "media"):
+        assert "AEGIS_AUTH_THROTTLE_HMAC_KEY_FILE" not in services[name]["environment"]
+        assert "auth-throttle-hmac-key" not in {
+            secret["source"] for secret in services[name]["secrets"]
+        }
+
+
 def test_caddy_overwrites_forwarding_headers_without_deleting_replacements() -> None:
     caddyfile = (REPOSITORY / "deploy" / "caddy" / "Caddyfile").read_text(
         encoding="utf-8"
