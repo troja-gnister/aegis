@@ -4,9 +4,9 @@ import uuid
 
 import pytest
 from aegis_apps.audit.models import AuditEvent
-from aegis_apps.identity.models import User
+from aegis_apps.identity.models import LoginThrottleBucket, User
 from django.contrib.auth import authenticate
-from django.test import Client
+from django.test import Client, override_settings
 
 pytestmark = pytest.mark.integration
 PASSWORD = "a-long-test-password"
@@ -197,7 +197,7 @@ def test_invalid_accounts_share_problem_and_opaque_audit(
         }
 
     events = list(AuditEvent.objects.order_by("occurred_at"))
-    assert len(events) == 3
+    assert len(events) == 1
     assert all(event.event_type == "auth.login.failed" for event in events)
     assert all(event.actor is None for event in events)
     assert all(
@@ -246,3 +246,111 @@ def test_non_api_csrf_failure_is_plain_and_safe() -> None:
     assert response.status_code == 403
     assert response.headers["Content-Type"].startswith("text/plain")
     assert response.content == b"Request verification failed"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_account_throttle_returns_429_after_five_failures(
+    user: User, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del user
+
+    def invalid_credentials(**_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr("aegis_apps.identity.api.authenticate", invalid_credentials)
+    client = Client(enforce_csrf_checks=True)
+    token = _csrf_token(client)
+    for _ in range(5):
+        response = client.post(
+            "/api/v1/auth/login",
+            {"username": "limited-account", "password": PASSWORD},
+            content_type="application/json",
+            headers={"X-CSRFToken": token},
+            REMOTE_ADDR="192.0.2.41",
+        )
+        assert response.status_code == 401
+
+    blocked = client.post(
+        "/api/v1/auth/login",
+        {"username": "LIMITED-ACCOUNT", "password": PASSWORD},
+        content_type="application/json",
+        headers={"X-CSRFToken": token},
+        REMOTE_ADDR="192.0.2.42",
+    )
+
+    assert blocked.status_code == 429
+    assert blocked.json() == {"type": "login_throttled", "title": "Unable to sign in"}
+    assert int(blocked.headers["Retry-After"]) > 0
+    events = list(AuditEvent.objects.order_by("occurred_at"))
+    assert [event.event_type for event in events] == [
+        "auth.login.failed",
+        "auth.login.throttled",
+    ]
+    assert all(event.actor is None for event in events)
+    assert all(set(event.metadata) == {"bucket_type", "request_id"} for event in events)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_ip_throttle_uses_remote_addr_and_ignores_forwarding_headers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def invalid_credentials(**_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr("aegis_apps.identity.api.authenticate", invalid_credentials)
+    client = Client(enforce_csrf_checks=True)
+    token = _csrf_token(client)
+    for index in range(20):
+        response = client.post(
+            "/api/v1/auth/login",
+            {"username": f"rotating-{index}", "password": PASSWORD},
+            content_type="application/json",
+            headers={
+                "X-CSRFToken": token,
+                "X-Forwarded-For": f"198.51.100.{index + 1}",
+                "X-Real-IP": f"203.0.113.{index + 1}",
+            },
+            REMOTE_ADDR="192.0.2.51",
+        )
+        assert response.status_code == 401
+
+    blocked = client.post(
+        "/api/v1/auth/login",
+        {"username": "next-account", "password": PASSWORD},
+        content_type="application/json",
+        headers={"X-CSRFToken": token, "X-Forwarded-For": "203.0.113.250"},
+        REMOTE_ADDR="192.0.2.51",
+    )
+
+    assert blocked.status_code == 429
+    assert LoginThrottleBucket.objects.filter(kind=LoginThrottleBucket.Kind.IP).count() == 1
+    throttled = AuditEvent.objects.filter(event_type="auth.login.throttled")
+    assert throttled.count() == 1
+    assert throttled.get().metadata["bucket_type"] == "ip"
+
+
+@pytest.mark.django_db(transaction=True)
+@override_settings(AEGIS_AUTH_THROTTLE_HMAC_KEY=None)
+def test_missing_throttle_secret_fails_closed_before_authentication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def authentication_must_not_run(**_kwargs: object) -> None:
+        raise AssertionError("authentication ran without throttling")
+
+    monkeypatch.setattr("aegis_apps.identity.api.authenticate", authentication_must_not_run)
+    client = Client(enforce_csrf_checks=True)
+    token = _csrf_token(client)
+
+    response = client.post(
+        "/api/v1/auth/login",
+        {"username": "alice", "password": PASSWORD},
+        content_type="application/json",
+        headers={"X-CSRFToken": token},
+        REMOTE_ADDR="192.0.2.61",
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "type": "authentication_unavailable",
+        "title": "Unable to sign in",
+    }

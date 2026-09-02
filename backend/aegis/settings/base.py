@@ -2,7 +2,7 @@ import os
 from datetime import timedelta
 from pathlib import Path
 
-from aegis.config import RuntimeConfig
+from aegis.config import RuntimeConfig, read_secret
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 
@@ -11,6 +11,12 @@ if _runtime_environ.get("AEGIS_ENV", "development").strip().lower() != "producti
     _runtime_environ.setdefault("AEGIS_DJANGO_SECRET_KEY", "development-only-secret-key")
     _runtime_environ.setdefault("AEGIS_DB_PASSWORD", "development-only-database-password")
 RUNTIME_CONFIG = RuntimeConfig.from_environ(_runtime_environ)
+AEGIS_AUTH_THROTTLE_HMAC_KEY = read_secret(
+    _runtime_environ,
+    "AEGIS_AUTH_THROTTLE_HMAC_KEY",
+    production=RUNTIME_CONFIG.environment == "production",
+    required=False,
+)
 
 AEGIS_ENVIRONMENT = RUNTIME_CONFIG.environment
 SECRET_KEY = RUNTIME_CONFIG.django_secret_key
