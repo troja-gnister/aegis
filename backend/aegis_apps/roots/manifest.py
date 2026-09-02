@@ -23,6 +23,8 @@ from aegisctl.mounts import (
 Mode = Literal["read_only", "read_write"]
 MAX_MANIFEST_BYTES = 256 * 1024
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+MANIFEST_PATH_ENV = "AEGIS_MOUNT_MANIFEST"
+MANIFEST_DIGEST_ENV = "AEGIS_MOUNT_MANIFEST_SHA256"
 
 
 class ManifestError(ValueError):
@@ -181,3 +183,20 @@ class MountManifest:
 
     def get(self, slot_id: str) -> ManifestSlot | None:
         return self.slots.get(slot_id)
+
+
+def configured_manifest() -> MountManifest | None:
+    path_configured = MANIFEST_PATH_ENV in os.environ
+    digest_configured = MANIFEST_DIGEST_ENV in os.environ
+    if not path_configured and not digest_configured:
+        return None
+    path_value = os.environ.get(MANIFEST_PATH_ENV, "")
+    digest_value = os.environ.get(MANIFEST_DIGEST_ENV, "")
+    if (
+        not path_configured
+        or not digest_configured
+        or not path_value.strip()
+        or not digest_value.strip()
+    ):
+        raise ManifestError("mount manifest configuration is invalid")
+    return MountManifest.load(Path(path_value), digest_value)

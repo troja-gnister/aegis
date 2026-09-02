@@ -7,7 +7,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 import pytest
-from aegis_apps.roots.manifest import ManifestError, MountManifest
+from aegis_apps.roots.manifest import ManifestError, MountManifest, configured_manifest
 
 
 def _write_manifest(path: Path, *, slots: list[dict[str, object]] | None = None) -> str:
@@ -132,3 +132,55 @@ def test_load_rechecks_the_descriptor_when_path_is_replaced(
     manifest = MountManifest.load(path, digest)
 
     assert manifest.get("photos") is not None
+
+
+def test_configured_manifest_returns_none_only_when_both_keys_are_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AEGIS_MOUNT_MANIFEST", raising=False)
+    monkeypatch.delenv("AEGIS_MOUNT_MANIFEST_SHA256", raising=False)
+
+    assert configured_manifest() is None
+
+
+@pytest.mark.parametrize(
+    ("path_value", "digest_value"),
+    [
+        ("/tmp/manifest.json", None),
+        (None, "a" * 64),
+        ("", "a" * 64),
+        ("   ", "a" * 64),
+        ("/tmp/manifest.json", ""),
+        ("/tmp/manifest.json", "\t"),
+    ],
+)
+def test_configured_manifest_fails_closed_on_partial_or_empty_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+    path_value: str | None,
+    digest_value: str | None,
+) -> None:
+    if path_value is None:
+        monkeypatch.delenv("AEGIS_MOUNT_MANIFEST", raising=False)
+    else:
+        monkeypatch.setenv("AEGIS_MOUNT_MANIFEST", path_value)
+    if digest_value is None:
+        monkeypatch.delenv("AEGIS_MOUNT_MANIFEST_SHA256", raising=False)
+    else:
+        monkeypatch.setenv("AEGIS_MOUNT_MANIFEST_SHA256", digest_value)
+
+    with pytest.raises(ManifestError, match="configuration"):
+        configured_manifest()
+
+
+def test_configured_manifest_loads_the_descriptor_validated_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "manifest.json"
+    digest = _write_manifest(path)
+    monkeypatch.setenv("AEGIS_MOUNT_MANIFEST", str(path))
+    monkeypatch.setenv("AEGIS_MOUNT_MANIFEST_SHA256", digest)
+
+    manifest = configured_manifest()
+
+    assert manifest is not None
+    assert tuple(manifest.slots) == ("photos",)
