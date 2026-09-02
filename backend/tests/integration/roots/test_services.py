@@ -4,7 +4,9 @@ import hashlib
 import json
 import os
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 from aegis_apps.audit.models import AuditEvent
@@ -22,6 +24,8 @@ from aegis_apps.roots.services import (
     update_root,
 )
 from django.contrib.auth.models import Group
+from django.db import close_old_connections
+from django.test import Client
 
 pytestmark = [pytest.mark.integration, pytest.mark.django_db(transaction=True)]
 REQUEST_ID = "task9_service_request"
@@ -129,6 +133,43 @@ def test_set_user_grant_is_idempotent_audited_and_invalidates_only_on_commit(
     assert effective_permissions(user_id=subject.id, root_id=root.id) == Permission.PREVIEW
 
 
+def test_competing_identical_user_grants_create_and_advance_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _configure_manifest(path=tmp_path / "manifest.json", monkeypatch=monkeypatch)
+    actor = User.objects.create_superuser(username="concurrent-grant-actor")
+    subject = User.objects.create_user(username="concurrent-grant-subject")
+    root = _root()
+    barrier = Barrier(2)
+
+    def set_grant(_index: int) -> RootGrant:
+        close_old_connections()
+        try:
+            thread_actor = User.objects.get(pk=actor.pk)
+            barrier.wait(timeout=10)
+            return set_user_grant(
+                actor=thread_actor,
+                root_id=root.id,
+                user_id=subject.id,
+                permissions=Permission.BROWSE,
+                request_id=REQUEST_ID,
+            )
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        grants = list(executor.map(set_grant, range(2)))
+
+    root.refresh_from_db()
+    subject.refresh_from_db()
+    assert grants[0].id == grants[1].id
+    assert RootGrant.objects.count() == 1
+    assert root.authorization_epoch == subject.authorization_epoch == 1
+    assert AuditEvent.objects.filter(
+        event_type="authorization.user.grant.changed"
+    ).count() == 1
+
+
 def test_create_root_exact_repeat_is_a_silent_idempotent_noop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -200,6 +241,37 @@ def test_update_root_changes_only_to_another_live_manifest_slot_and_advances_epo
             slot_id="missing-slot",
             request_id=REQUEST_ID,
         )
+
+
+def test_root_authorization_change_revokes_an_affected_session_on_next_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _configure_manifest(path=tmp_path / "manifest.json", monkeypatch=monkeypatch)
+    actor = User.objects.create_superuser(username="root-session-actor")
+    subject = User.objects.create_user(
+        username="root-session-subject",
+        password="Root-session-test-731!",
+    )
+    root = _root()
+    RootGrant.objects.create(root=root, user=subject, permissions=Permission.BROWSE)
+    client = Client()
+    client.force_login(subject)
+    session_key = client.session.session_key
+
+    update_root(
+        actor=actor,
+        root_id=root.id,
+        mode=Root.Mode.READ_WRITE,
+        request_id=REQUEST_ID,
+    )
+
+    response = client.get("/health/live")
+    subject.refresh_from_db()
+    root.refresh_from_db()
+    assert response.status_code == 200
+    assert client.session.session_key != session_key
+    assert root.authorization_epoch == subject.authorization_epoch == 1
+    assert AuditEvent.objects.filter(event_type="auth.session.revoked").count() == 1
 
 
 def test_set_group_grant_uses_opaque_identity_and_only_current_members(
