@@ -291,6 +291,37 @@ class TlsStack:
             f"processes:\n{process_output}\nlogs:\n{log_output}"
         )
 
+    def wait_until_service_healthy(
+        self, service: str, *, timeout_seconds: int = 20
+    ) -> None:
+        deadline = time.monotonic() + timeout_seconds
+        last_state = "container unavailable"
+        while time.monotonic() < deadline:
+            container = self.service_container(service)
+            if container:
+                inspected = run_command(
+                    ["docker", "inspect", container], check=False
+                )
+                if inspected.returncode == 0:
+                    info = json.loads(inspected.stdout)[0]
+                    last_state = info["State"].get("Health", {}).get(
+                        "Status", "health unavailable"
+                    )
+                    if last_state == "healthy":
+                        return
+            time.sleep(0.2)
+
+        processes = self.compose(["ps", "--all", service], check=False)
+        logs = self.compose(
+            ["logs", "--no-color", "--tail", "40", service], check=False
+        )
+        process_output = bounded_tail(processes.stdout + processes.stderr)
+        log_output = bounded_tail(logs.stdout + logs.stderr)
+        raise AssertionError(
+            f"{service} did not become healthy ({last_state})\n"
+            f"processes:\n{process_output}\nlogs:\n{log_output}"
+        )
+
 
 def test_tls_readiness_retries_transient_connection_failures(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -601,6 +632,132 @@ def test_gateway_forwards_distinct_unspoofable_client_ips_to_auth_throttle(
     )
 
     assert spoofed_status == 401
+    assert tls_stack.ip_throttle_bucket_count() == before + 2
+
+
+def test_public_gateway_cannot_spoof_proxy_attestation(tls_stack: TlsStack) -> None:
+    status, headers, body = tls_stack.request(
+        "/health/proxy-attestation",
+        tls=True,
+        headers={
+            "X-Aegis-Proxy-Attestation": "startup-v1",
+            "X-Forwarded-For": "192.0.2.254",
+        },
+    )
+
+    assert status == 404
+    assert body == b""
+    assert headers["Cache-Control"] == "private, no-store"
+
+
+def test_gateway_ip_drift_fails_closed_until_web_restarts(
+    tls_stack: TlsStack,
+) -> None:
+    backend_network = f"{tls_stack.project}_backend"
+    original_gateway = tls_stack.service_container("gateway")
+    original_gateway_info = json.loads(
+        run_command(["docker", "inspect", original_gateway]).stdout
+    )[0]
+    original_address = original_gateway_info["NetworkSettings"]["Networks"][
+        backend_network
+    ]["IPAddress"]
+    occupant = f"{tls_stack.project}-old-gateway-address"
+
+    run_command(["docker", "rm", "--force", original_gateway])
+    run_command(
+        [
+            "docker",
+            "run",
+            "--detach",
+            "--name",
+            occupant,
+            "--network",
+            backend_network,
+            "--ip",
+            original_address,
+            "--read-only",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,nodev,size=8m",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges:true",
+            PYTHON_IMAGE,
+            "sleep",
+            "120",
+        ]
+    )
+    tls_stack.client_names.append(occupant)
+
+    try:
+        recreated = tls_stack.compose(
+            ["up", "--detach", "--no-deps", "gateway"], check=False
+        )
+        assert recreated.returncode == 0, recreated.stdout + recreated.stderr
+        gateway = tls_stack.service_container("gateway")
+        gateway_info = json.loads(
+            run_command(["docker", "inspect", gateway]).stdout
+        )[0]
+        current_address = gateway_info["NetworkSettings"]["Networks"][
+            backend_network
+        ]["IPAddress"]
+
+        assert current_address != original_address
+        time.sleep(5)
+        gateway_info = json.loads(
+            run_command(["docker", "inspect", gateway]).stdout
+        )[0]
+        assert gateway_info["State"]["Health"]["Status"] != "healthy"
+        listener_result = run_command(
+            [
+                "docker",
+                "exec",
+                occupant,
+                "python",
+                "-c",
+                (
+                    "import socket;"
+                    "peer=socket.gethostbyname('gateway');"
+                    "connection=socket.socket();connection.settimeout(2);"
+                    "print(connection.connect_ex((peer,8080)))"
+                ),
+            ]
+        )
+        assert listener_result.stdout.strip() != "0"
+
+        try:
+            public_status, _, _ = tls_stack.request("/api/v1/auth/csrf", tls=True)
+        except (OSError, urllib.error.URLError):
+            public_status = None
+        assert public_status != 200
+    finally:
+        tls_stack.compose(["restart", "web"])
+        tls_stack.wait_until_ready(timeout_seconds=60)
+
+    tls_stack.wait_until_service_healthy("gateway")
+    recovered_gateway_info = json.loads(
+        run_command(
+            ["docker", "inspect", tls_stack.service_container("gateway")]
+        ).stdout
+    )[0]
+    assert recovered_gateway_info["State"]["Health"]["Status"] == "healthy"
+
+    first = tls_stack.start_client("drift-auth-first")
+    second = tls_stack.start_client("drift-auth-second")
+    second_address = json.loads(run_command(["docker", "inspect", second]).stdout)[0][
+        "NetworkSettings"
+    ]["Networks"][f"{tls_stack.project}_edge"]["IPAddress"]
+    before = tls_stack.ip_throttle_bucket_count()
+
+    first_status = tls_stack.client_login_status(first, f"first-{uuid.uuid4().hex}")
+    second_status = tls_stack.client_login_status(second, f"second-{uuid.uuid4().hex}")
+    spoofed_status = tls_stack.client_login_status(
+        first,
+        f"spoofed-{uuid.uuid4().hex}",
+        spoofed_forwarded_for=second_address,
+    )
+
+    assert first_status == second_status == spoofed_status == 401
     assert tls_stack.ip_throttle_bucket_count() == before + 2
 
 

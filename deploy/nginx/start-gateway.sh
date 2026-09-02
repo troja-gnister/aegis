@@ -35,18 +35,33 @@ case "$authority" in
         ;;
 esac
 
+max_attempts=40
+attempt_limit="${AEGIS_GATEWAY_ATTESTATION_ATTEMPTS:-$max_attempts}"
+case "$attempt_limit" in
+    ""|*[!0-9]*)
+        log_event ERROR "Gateway startup configuration invalid"
+        exit 1
+        ;;
+esac
+if [ "$attempt_limit" -lt 1 ] || [ "$attempt_limit" -gt "$max_attempts" ]; then
+    log_event ERROR "Gateway startup configuration invalid"
+    exit 1
+fi
+
 attempt=0
-while [ "$attempt" -lt 40 ]; do
+while [ "$attempt" -lt "$attempt_limit" ]; do
     attempt=$((attempt + 1))
     if wget -q -O /dev/null -T 2 \
         --header "Host: $authority" \
         --header "X-Forwarded-Proto: $forwarded_proto" \
-        http://web:8000/health/live; then
+        --header "X-Forwarded-For: 192.0.2.254" \
+        --header "X-Aegis-Proxy-Attestation: startup-v1" \
+        http://web:8000/health/proxy-attestation; then
         : > "$ready_file"
         log_event INFO "Upstream health check succeeded"
         exec nginx -g "daemon off;"
     fi
-    if [ "$attempt" -lt 40 ]; then
+    if [ "$attempt" -lt "$attempt_limit" ]; then
         sleep 1
     fi
 done

@@ -267,6 +267,7 @@ def test_hostile_forwarding_headers_are_overwritten(gateway: GatewayHarness) -> 
         headers={
             "X-Forwarded-For": "203.0.113.10, 127.0.0.1",
             "X-Forwarded-Proto": "https",
+            "X-Aegis-Proxy-Attestation": "startup-v1",
         },
     )
     forwarded_for = response.json()["forwarded_for"]
@@ -276,6 +277,7 @@ def test_hostile_forwarding_headers_are_overwritten(gateway: GatewayHarness) -> 
     ipaddress.ip_address(forwarded_for)
     assert forwarded_for != "203.0.113.10, 127.0.0.1"
     assert response.json()["forwarded_proto"] == "http"
+    assert response.json()["proxy_attestation"] is None
 
 
 def test_internal_listener_accepts_only_bounded_caddy_identity(

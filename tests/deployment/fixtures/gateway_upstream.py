@@ -11,6 +11,7 @@ class EchoHandler(BaseHTTPRequestHandler):
                 "request_id": self.headers.get("X-Request-ID"),
                 "forwarded_for": self.headers.get("X-Forwarded-For"),
                 "forwarded_proto": self.headers.get("X-Forwarded-Proto"),
+                "proxy_attestation": self.headers.get("X-Aegis-Proxy-Attestation"),
             }
         ).encode()
         self.send_response(200)
