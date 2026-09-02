@@ -6,6 +6,7 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 from aegisctl.mounts import (
     local_identity,
@@ -236,6 +237,135 @@ expected_identity = "{local_identity(source)}"
     for service in generated["services"].values():
         targets = [mount["target"] for mount in service.get("volumes", [])]
         assert len(targets) == len(set(targets))
+
+
+@pytest.mark.parametrize("interpolation_value", [None, "rewritten"])
+def test_compose_bind_sources_preserve_literal_dollars_for_preflight_and_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    interpolation_value: str | None,
+) -> None:
+    if interpolation_value is None:
+        monkeypatch.delenv("AEGIS_INTERP_CANARY", raising=False)
+    else:
+        monkeypatch.setenv("AEGIS_INTERP_CANARY", interpolation_value)
+    literal_parent = tmp_path / "$AEGIS_INTERP_CANARY"
+    source = literal_parent / "root"
+    source.mkdir(parents=True)
+    config = literal_parent / "mounts.toml"
+    manifest = literal_parent / "manifest.json"
+    output = literal_parent / "compose.generated.yaml"
+    attestation = literal_parent / "gateway.attestation"
+    config.write_text(
+        f"""
+version = 1
+[[slots]]
+slot_id = "photos"
+source = "{source}"
+container_path = "/srv/aegis/roots/photos"
+mode = "read_only"
+expected_identity = "{local_identity(source)}"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    observed = observe_mount_fingerprints(preflight_slots(parse_config(config)))
+    write_manifest(manifest, observed, uid=os.geteuid(), gid=os.getegid())
+    render_artifacts(
+        config,
+        manifest,
+        output,
+        attestation,
+        uid=os.geteuid(),
+        gid=os.getegid(),
+    )
+    configured = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "-f",
+            str(REPOSITORY / "compose.yaml"),
+            "-f",
+            str(output),
+            "config",
+            "--format",
+            "json",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=os.environ | {"AEGIS_UID": str(os.geteuid()), "AEGIS_GID": str(os.getegid())},
+    )
+    services = json.loads(configured.stdout)["services"]
+    expected_sources = {
+        "/srv/aegis/roots/photos": str(source.resolve()),
+        "/run/aegis/mounts.manifest.json": str(manifest.resolve()),
+        "/run/aegis/mounts.gateway.attestation": str(attestation.resolve()),
+    }
+    for target, literal_source in expected_sources.items():
+        configured_sources = {
+            mount["source"]
+            for service in services.values()
+            for mount in service.get("volumes", [])
+            if mount["target"] == target
+        }
+        assert configured_sources == {literal_source.replace("$", "$$")}
+
+    project = "aegis-dollar-" + hashlib.sha256(
+        str(tmp_path).encode("utf-8")
+    ).hexdigest()[:12]
+    compose_command = [
+        "docker",
+        "compose",
+        "--project-name",
+        project,
+        "-f",
+        str(REPOSITORY / "compose.yaml"),
+        "-f",
+        str(output),
+    ]
+    try:
+        runtime = subprocess.run(
+            [
+                *compose_command,
+                "run",
+                "--rm",
+                "--no-deps",
+                "--pull",
+                "never",
+                "--no-TTY",
+                "--entrypoint",
+                "aegisctl",
+                "indexer",
+                "mounts",
+                "attest",
+                "--manifest",
+                "/run/aegis/mounts.manifest.json",
+                "--role",
+                "indexer",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=os.environ
+            | {"AEGIS_UID": str(os.geteuid()), "AEGIS_GID": str(os.getegid())},
+        )
+    finally:
+        subprocess.run(
+            [*compose_command, "down", "--remove-orphans", "--volumes"],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+            env=os.environ
+            | {"AEGIS_UID": str(os.geteuid()), "AEGIS_GID": str(os.getegid())},
+        )
+
+    assert runtime.returncode == 0, runtime.stderr
+    assert json.loads(runtime.stdout)["status"] == "attested"
 
 
 def test_gateway_attestation_uses_one_private_snapshot_when_source_mutates(

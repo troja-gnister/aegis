@@ -446,7 +446,7 @@ def _ensure_distinct_artifacts(paths: tuple[Path, ...]) -> None:
 def _bind(source: Path | str, target: str, *, read_only: bool) -> dict[str, object]:
     return {
         "type": "bind",
-        "source": str(source),
+        "source": str(source).replace("$", "$$"),
         "target": target,
         "read_only": read_only,
         "bind": {"create_host_path": False},
