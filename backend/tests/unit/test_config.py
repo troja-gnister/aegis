@@ -240,6 +240,10 @@ def test_production_settings_pass_cookie_host_csrf_and_https_checks(
     tmp_path: Path,
 ) -> None:
     secret = _write_secret(tmp_path / "secret")
+    environment = os.environ.copy()
+    environment.pop("AEGIS_DJANGO_SECRET_KEY", None)
+    environment.pop("AEGIS_DB_PASSWORD", None)
+    environment.update(_production_environ(secret))
     result = subprocess.run(
         [
             sys.executable,
@@ -249,7 +253,7 @@ def test_production_settings_pass_cookie_host_csrf_and_https_checks(
             "--settings=aegis.settings.production",
         ],
         cwd=Path(__file__).parents[3],
-        env=os.environ | _production_environ(secret),
+        env=environment,
         check=False,
         capture_output=True,
         text=True,
