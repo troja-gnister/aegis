@@ -8,6 +8,13 @@ fail_host() {
 }
 
 tls_host=${AEGIS_TLS_HOST:-}
+
+case "$tls_host" in
+    "" | *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-]*)
+        fail_host
+        ;;
+esac
+
 tls_host_normalized=$(printf '%s' "$tls_host" | tr '[:upper:]' '[:lower:]')
 
 # IANA special-use designations apply to each name and all of its subdomains.
@@ -59,4 +66,6 @@ case "$top_level" in
         ;;
 esac
 
+AEGIS_TLS_HOST=$tls_host_normalized
+export AEGIS_TLS_HOST
 exec /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile

@@ -375,6 +375,12 @@ def test_base_profile_does_not_require_tls_host_but_production_startup_does() ->
         "files-.public.dev",
         f"{'a' * 64}.public.dev",
         "files.public.123",
+        "files.public.dev\n",
+        "files.public.dev\n\n",
+        "files.public\ndev.operator-domain",
+        "files.public.dev\t",
+        "files.public.dev\r",
+        "files.públic.dev",
     ],
 )
 def test_production_caddy_start_rejects_non_public_hosts(
@@ -402,12 +408,49 @@ def test_production_caddy_start_rejects_non_public_hosts(
     )
 
 
+def test_production_caddy_start_exports_only_normalized_valid_host(
+    tmp_path: Path,
+) -> None:
+    original = (REPOSITORY / "deploy" / "caddy" / "aegis-caddy-start").read_text(
+        encoding="utf-8"
+    )
+    probe = original.replace(
+        "exec /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile",
+        "printf '%s' \"$AEGIS_TLS_HOST\"",
+        1,
+    )
+    probe_path = tmp_path / "aegis-caddy-start-probe"
+    probe_path.write_text(probe, encoding="utf-8")
+
+    result = subprocess.run(
+        ["sh", str(probe_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        env=os.environ | {"AEGIS_TLS_HOST": "Files.Operator-Domain.Dev"},
+    )
+
+    assert probe != original
+    assert result.returncode == 0
+    assert result.stdout == "files.operator-domain.dev"
+    assert result.stderr == ""
+
+
 @pytest.mark.parametrize(
-    "reserved_host",
-    ["files.example.test", "files.alt", "FILES.ALT", "files.arpa"],
+    "rejected_host",
+    [
+        "files.example.test",
+        "files.alt",
+        "FILES.ALT",
+        "files.arpa",
+        pytest.param("files.public.dev\n", id="trailing-newline"),
+        pytest.param("files.public\ndev.operator-domain", id="internal-newline"),
+        pytest.param("files.public.dev\t", id="trailing-tab"),
+    ],
 )
-def test_production_tls_profile_rejects_reserved_host_before_acme(
-    reserved_host: str,
+def test_production_tls_profile_rejects_invalid_host_before_acme(
+    rejected_host: str,
 ) -> None:
     project = f"aegis-production-tls-probe-{uuid.uuid4().hex[:10]}"
     compose = [
@@ -422,7 +465,7 @@ def test_production_tls_profile_rejects_reserved_host_before_acme(
         "--profile",
         "tls",
     ]
-    environment = os.environ | {"AEGIS_TLS_HOST": reserved_host}
+    environment = os.environ | {"AEGIS_TLS_HOST": rejected_host}
 
     try:
         result = subprocess.run(
