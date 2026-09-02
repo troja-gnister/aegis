@@ -1,0 +1,8 @@
+version = 1
+
+[[slots]]
+slot_id = "family-photos"
+source = "/mnt/storage/photos"
+container_path = "/srv/aegis/roots/family-photos"
+mode = "read_only"
+expected_identity = "remote:nas01:/volume1/photos"
