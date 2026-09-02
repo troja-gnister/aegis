@@ -136,6 +136,8 @@ def test_invalid_user_add_and_noop_user_change_emit_no_events(
     assert unchanged.status_code == 302
     assert not User.objects.filter(username="invalid-user").exists()
     assert AuditEvent.objects.count() == 0
+    user.refresh_from_db()
+    assert user.authorization_epoch == 0
 
 
 def test_real_user_permission_change_records_exactly_one_event(
@@ -153,6 +155,8 @@ def test_real_user_permission_change_records_exactly_one_event(
 
     assert response.status_code == 302
     assert list(user.user_permissions.values_list("pk", flat=True)) == [permission.pk]
+    user.refresh_from_db()
+    assert user.authorization_epoch == 1
     assert _event_types() == ["identity.user.changed"]
     event = AuditEvent.objects.get()
     assert event.object_id == user.id
@@ -208,6 +212,7 @@ def test_real_activation_action_changes_through_service_and_noop_is_silent(
     user.refresh_from_db()
     assert first.status_code == second.status_code == 302
     assert user.is_active is False
+    assert user.authorization_epoch == 1
     assert _event_types() == ["identity.user.changed"]
     event = AuditEvent.objects.get()
     assert event.object_id == user.id
@@ -261,6 +266,10 @@ def test_group_create_and_combined_change_use_stable_subject_and_one_event(
     assert LogEntry.objects.count() == 0
     assert set(group.user_set.values_list("pk", flat=True)) == {member.pk, second_member.pk}
     assert list(group.permissions.values_list("pk", flat=True)) == [permission.pk]
+    member.refresh_from_db()
+    second_member.refresh_from_db()
+    assert member.authorization_epoch == 2
+    assert second_member.authorization_epoch == 1
 
 
 def test_unrelated_model_admin_logging_remains_enabled(actor: User) -> None:
@@ -293,11 +302,45 @@ def test_group_membership_only_change_is_one_event_and_noop_is_silent(client: Cl
         {"name": group.name, "permissions": [], "members": [str(member.pk)], "_save": "Save"},
         headers={"X-Request-ID": REQUEST_ID},
     )
+    removed = client.post(
+        url,
+        {"name": group.name, "permissions": [], "members": [], "_save": "Save"},
+        headers={"X-Request-ID": REQUEST_ID},
+    )
+    removed_noop = client.post(
+        url,
+        {"name": group.name, "permissions": [], "members": [], "_save": "Save"},
+        headers={"X-Request-ID": REQUEST_ID},
+    )
 
     assert changed.status_code == unchanged.status_code == 302
-    assert _event_types() == ["identity.group.membership.changed"]
+    assert removed.status_code == removed_noop.status_code == 302
+    assert _event_types() == [
+        "identity.group.membership.changed",
+        "identity.group.membership.changed",
+    ]
     identity = GroupIdentity.objects.get(group=group)
-    assert AuditEvent.objects.get().object_id == identity.id
+    assert set(AuditEvent.objects.values_list("object_id", flat=True)) == {identity.id}
+    member.refresh_from_db()
+    assert member.authorization_epoch == 2
+
+
+def test_non_authorization_user_profile_change_does_not_advance_epoch(
+    client: Client,
+) -> None:
+    user = User.objects.create_user(username="profile-user", password=PASSWORD)
+
+    response = client.post(
+        reverse("admin:identity_user_change", args=[user.pk]),
+        _user_change_data(user, first_name="Profile"),
+        headers={"X-Request-ID": REQUEST_ID},
+    )
+
+    user.refresh_from_db()
+    assert response.status_code == 302
+    assert user.first_name == "Profile"
+    assert user.authorization_epoch == 0
+    assert _event_types() == ["identity.user.changed"]
 
 
 def test_admin_audit_failure_rolls_back_model_m2m_and_event(
@@ -325,3 +368,5 @@ def test_admin_audit_failure_rolls_back_model_m2m_and_event(
     assert not Group.objects.filter(name="Must Roll Back").exists()
     assert GroupIdentity.objects.count() == 0
     assert AuditEvent.objects.count() == 0
+    member.refresh_from_db()
+    assert member.authorization_epoch == 0

@@ -58,6 +58,18 @@ def initialize_session(*, session: SessionBase, user: User, now: datetime) -> No
     session[AUTHORIZATION_EPOCH] = user.authorization_epoch
 
 
+def initialize_logged_in_session(
+    sender: type[object],
+    request: HttpRequest,
+    user: object,
+    **_kwargs: object,
+) -> None:
+    del sender
+    if not isinstance(user, User):
+        raise TypeError("login requires an Aegis user")
+    initialize_session(session=request.session, user=user, now=timezone.now())
+
+
 def cache_namespace(*, session: SessionBase, user: User) -> str:
     session_key = session.session_key
     if not isinstance(session_key, str) or not session_key:

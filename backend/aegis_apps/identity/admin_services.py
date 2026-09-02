@@ -6,11 +6,16 @@ from typing import Any, cast
 
 from django.contrib.auth.models import Group
 from django.db import transaction
+from django.db.models import F
 from django.forms import ModelForm
 
 from aegis_apps.audit.services import record_event
 
 from .models import GroupIdentity, User
+
+_USER_AUTHORIZATION_FIELDS = frozenset(
+    {"is_active", "is_staff", "is_superuser", "groups", "user_permissions"}
+)
 
 
 def _metadata(subject_id: uuid.UUID) -> dict[str, str]:
@@ -25,7 +30,11 @@ def save_user_from_admin(
         created = user._state.adding
         changes = set(form.changed_data)
         if not created:
-            stored = User.objects.select_for_update().only("date_joined").get(pk=user.pk)
+            stored = (
+                User.objects.select_for_update()
+                .only("date_joined", "authorization_epoch")
+                .get(pk=user.pk)
+            )
             if (
                 "date_joined" in changes
                 and stored.date_joined.replace(microsecond=0) == user.date_joined
@@ -34,6 +43,8 @@ def save_user_from_admin(
                 changes.remove("date_joined")
             if not changes:
                 return user
+            if changes & _USER_AUTHORIZATION_FIELDS:
+                user.authorization_epoch = stored.authorization_epoch + 1
 
         user.save()
         form.save_m2m()
@@ -62,12 +73,27 @@ def save_group_from_admin(
         if not created and not changes:
             return group
 
+        previous_member_ids = (
+            set(group.user_set.values_list("pk", flat=True)) if not created else set()
+        )
+
         group.save()
         form.save_m2m()
         members = list(User.objects.filter(pk__in=member_ids))
         if len(members) != len(set(member_ids)):
             raise ValueError("group members are invalid")
         group.user_set.set(members)
+        next_member_ids = {member.pk for member in members}
+        if created:
+            affected_member_ids = next_member_ids
+        elif "permissions" in changes:
+            affected_member_ids = previous_member_ids | next_member_ids
+        else:
+            affected_member_ids = previous_member_ids ^ next_member_ids
+        if affected_member_ids:
+            User.objects.filter(pk__in=affected_member_ids).update(
+                authorization_epoch=F("authorization_epoch") + 1
+            )
 
         identity, _ = GroupIdentity.objects.select_for_update().get_or_create(group=group)
         subject_id = identity.pk
@@ -98,7 +124,8 @@ def set_user_active(
         if user.is_active == active:
             return user
         user.is_active = active
-        user.save(update_fields=["is_active"])
+        user.authorization_epoch += 1
+        user.save(update_fields=["is_active", "authorization_epoch"])
         record_event(
             event_type="identity.user.changed",
             outcome="success",
