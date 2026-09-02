@@ -330,6 +330,9 @@ def tls_stack(tmp_path_factory: pytest.TempPathFactory) -> Iterator[TlsStack]:
     password_file = root / "admin-password"
     password_file.write_text(ADMIN_PASSWORD, encoding="utf-8")
     password_file.chmod(0o600)
+    throttle_hmac_file = root / "auth-throttle-hmac-key"
+    throttle_hmac_file.write_text("a" * 64, encoding="utf-8")
+    throttle_hmac_file.chmod(0o600)
     http_port = free_port()
     https_port = free_port()
     project = f"aegis-tls-{uuid.uuid4().hex[:10]}"
@@ -356,6 +359,8 @@ services:
 secrets:
   admin-password:
     file: {password_file}
+  auth-throttle-hmac-key:
+    file: {throttle_hmac_file}
 """.lstrip(),
         encoding="utf-8",
     )
