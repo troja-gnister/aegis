@@ -39,6 +39,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "aegis_apps.common.middleware.RequestContextMiddleware",
+    "aegis_apps.roots.middleware.RootCatalogCacheControlMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",

@@ -88,6 +88,33 @@ def test_root_list_framework_errors_are_also_never_cached() -> None:
     assert response.headers["Cache-Control"] == "private, no-store"
 
 
+def test_root_list_unhandled_errors_are_nondisclosing_and_never_cached(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _configure_manifest(path=tmp_path / "manifest.json", monkeypatch=monkeypatch)
+    user = User.objects.create_user(username="root-api-internal-failure-user")
+
+    def fail_selector(**_values: object) -> None:
+        raise RuntimeError("selector-internal-detail-must-not-escape")
+
+    monkeypatch.setattr("aegis_apps.roots.api.authorized_roots", fail_selector)
+    client = Client(raise_request_exception=False)
+    client.force_login(user)
+
+    response = client.get("/api/v1/roots")
+
+    assert response.status_code == 500
+    assert response.headers["Cache-Control"] == "private, no-store"
+    assert b"selector-internal-detail-must-not-escape" not in response.content
+
+
+def test_root_list_cache_policy_does_not_apply_to_adjacent_paths() -> None:
+    response = Client().get("/api/v1/roots/")
+
+    assert response.status_code == 404
+    assert "Cache-Control" not in response.headers
+
+
 def test_root_list_returns_empty_for_intentionally_unconfigured_mounts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
