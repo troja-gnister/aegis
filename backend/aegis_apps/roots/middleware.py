@@ -5,6 +5,8 @@ from collections.abc import Callable
 from django.http import HttpRequest, HttpResponse
 
 ROOT_LIST_PATH = "/api/v1/roots"
+OPERATIONS_STATUS_PATH = "/api/v1/admin/operations/status"
+NO_STORE_PATHS = frozenset((ROOT_LIST_PATH, OPERATIONS_STATUS_PATH))
 
 
 class RootCatalogCacheControlMiddleware:
@@ -13,6 +15,6 @@ class RootCatalogCacheControlMiddleware:
 
     def __call__(self, request: HttpRequest) -> HttpResponse:
         response = self.get_response(request)
-        if request.path_info == ROOT_LIST_PATH:
+        if request.path_info in NO_STORE_PATHS:
             response.headers["Cache-Control"] = "private, no-store"
         return response

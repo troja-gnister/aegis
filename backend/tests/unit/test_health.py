@@ -24,14 +24,35 @@ def test_readiness_fails_closed_when_database_is_unavailable() -> None:
 
 def test_readiness_succeeds_when_database_is_ready() -> None:
     request = RequestFactory().get("/health/ready")
-    with patch(
-        "aegis_apps.common.health.database_status",
-        return_value=(True, "ok"),
+    with (
+        patch(
+            "aegis_apps.common.health.database_status",
+            return_value=(True, "ok"),
+        ),
+        patch(
+            "aegis_apps.common.health.worker_readiness",
+            return_value=(
+                True,
+                {
+                    "operations": "healthy",
+                    "indexer": "healthy",
+                    "media": "healthy",
+                },
+            ),
+        ),
     ):
         response = ready(request)
 
     assert response.status_code == 200
-    assert json.loads(response.content) == {"status": "ok", "checks": {"database": "ok"}}
+    assert json.loads(response.content) == {
+        "status": "ok",
+        "checks": {
+            "database": "ok",
+            "operations": "healthy",
+            "indexer": "healthy",
+            "media": "healthy",
+        },
+    }
 
 
 def test_database_status_reports_pending_migrations() -> None:
@@ -59,9 +80,22 @@ def test_database_status_suppresses_exception_details() -> None:
 
 
 def test_ready_route_is_registered() -> None:
-    with patch(
-        "aegis_apps.common.health.database_status",
-        return_value=(True, "ok"),
+    with (
+        patch(
+            "aegis_apps.common.health.database_status",
+            return_value=(True, "ok"),
+        ),
+        patch(
+            "aegis_apps.common.health.worker_readiness",
+            return_value=(
+                True,
+                {
+                    "operations": "healthy",
+                    "indexer": "healthy",
+                    "media": "healthy",
+                },
+            ),
+        ),
     ):
         response = Client().get("/health/ready")
 

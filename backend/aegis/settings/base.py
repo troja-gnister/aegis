@@ -2,6 +2,8 @@ import os
 from datetime import timedelta
 from pathlib import Path
 
+from aegis_apps.operations.config import WorkerRuntimeConfig
+
 from aegis.config import RuntimeConfig, read_secret
 
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -11,6 +13,7 @@ if _runtime_environ.get("AEGIS_ENV", "development").strip().lower() != "producti
     _runtime_environ.setdefault("AEGIS_DJANGO_SECRET_KEY", "development-only-secret-key")
     _runtime_environ.setdefault("AEGIS_DB_PASSWORD", "development-only-database-password")
 RUNTIME_CONFIG = RuntimeConfig.from_environ(_runtime_environ)
+WORKER_RUNTIME_CONFIG = WorkerRuntimeConfig.from_environ(_runtime_environ)
 AEGIS_AUTH_THROTTLE_HMAC_KEY = read_secret(
     _runtime_environ,
     "AEGIS_AUTH_THROTTLE_HMAC_KEY",
@@ -19,6 +22,16 @@ AEGIS_AUTH_THROTTLE_HMAC_KEY = read_secret(
 )
 
 AEGIS_ENVIRONMENT = RUNTIME_CONFIG.environment
+AEGIS_RELEASE_ID = WORKER_RUNTIME_CONFIG.release_id
+AEGIS_PROCESS_ROLE = WORKER_RUNTIME_CONFIG.process_role
+AEGIS_REQUIRED_WORKER_ROLES = WORKER_RUNTIME_CONFIG.required_roles
+AEGIS_JOB_LEASE_SECONDS = WORKER_RUNTIME_CONFIG.lease_seconds
+AEGIS_JOB_RETRY_BASE_SECONDS = WORKER_RUNTIME_CONFIG.retry_base_seconds
+AEGIS_JOB_RETRY_MAX_SECONDS = WORKER_RUNTIME_CONFIG.retry_max_seconds
+AEGIS_WORKER_HEARTBEAT_SECONDS = WORKER_RUNTIME_CONFIG.heartbeat_seconds
+AEGIS_WORKER_HEARTBEAT_FRESH_SECONDS = WORKER_RUNTIME_CONFIG.heartbeat_fresh_seconds
+AEGIS_QUEUE_POLL_SECONDS = WORKER_RUNTIME_CONFIG.poll_seconds
+AEGIS_QUEUE_POLL_JITTER_SECONDS = WORKER_RUNTIME_CONFIG.poll_jitter_seconds
 SECRET_KEY = RUNTIME_CONFIG.django_secret_key
 DEBUG = False
 ALLOWED_HOSTS = list(RUNTIME_CONFIG.allowed_hosts)

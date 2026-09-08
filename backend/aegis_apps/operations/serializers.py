@@ -5,7 +5,9 @@ import math
 import re
 import uuid
 from collections.abc import Mapping
-from typing import Final
+from typing import Any, Final
+
+from rest_framework import serializers
 
 from aegis_apps.roots.permissions import validate_permission_mask
 
@@ -190,3 +192,25 @@ def canonical_worker_id(value: object) -> str:
     if value != canonical:
         raise ValueError("invalid worker ID")
     return canonical
+
+
+class OperationRoleStatusSerializer(serializers.Serializer[Any]):
+    role = serializers.ChoiceField(choices=("operations", "indexer", "media"), read_only=True)
+    state = serializers.ChoiceField(choices=("healthy", "stale", "missing"), read_only=True)
+    jobCount = serializers.IntegerField(min_value=0, max_value=2_147_483_647, read_only=True)
+    oldestQueueAgeSeconds = serializers.IntegerField(
+        min_value=0,
+        max_value=2_147_483_647,
+        allow_null=True,
+        read_only=True,
+    )
+    scanProgress = serializers.FloatField(
+        min_value=0,
+        max_value=1,
+        allow_null=True,
+        read_only=True,
+    )
+    diskPressure = serializers.ChoiceField(
+        choices=("ok", "warning", "critical", "unknown"),
+        read_only=True,
+    )

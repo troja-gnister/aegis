@@ -1,5 +1,6 @@
 from aegis_apps.common.views import live, proxy_attestation, ready
 from aegis_apps.identity.api import CsrfView, LoginView, LogoutView, SessionView
+from aegis_apps.operations.api import OperationsStatusView
 from aegis_apps.roots.api import RootListView
 from django.contrib import admin
 from django.urls import path
@@ -18,4 +19,9 @@ urlpatterns = [
     path("api/v1/auth/logout", LogoutView.as_view(), name="auth-logout"),
     path("api/v1/auth/session", SessionView.as_view(), name="auth-session"),
     path("api/v1/roots", RootListView.as_view(), name="root-list"),
+    path(
+        "api/v1/admin/operations/status",
+        OperationsStatusView.as_view(),
+        name="operations-status",
+    ),
 ]
