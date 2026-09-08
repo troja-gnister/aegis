@@ -21,7 +21,13 @@ from django.utils import timezone
 from aegis_apps.operations.config import validated_release_identity
 from aegis_apps.operations.enums import HeartbeatStatus, JobState, SafeErrorCode, WorkerRole
 from aegis_apps.operations.heartbeats import publish_heartbeat
-from aegis_apps.operations.leases import LeaseToken, claim_next_job, fail_job, finish_job
+from aegis_apps.operations.leases import (
+    LeaseToken,
+    claim_next_job,
+    fail_job,
+    finish_job,
+    relinquish_job,
+)
 from aegis_apps.operations.models import UNCONFIGURED_MANIFEST_IDENTITY, Job
 from aegis_apps.operations.selectors import current_schema_identity
 from aegis_apps.operations.serializers import canonical_worker_id
@@ -264,8 +270,13 @@ def run_worker(
                 _publish(identity, status=HeartbeatStatus.IDLE, job_id=None)
                 next_heartbeat = monotonic_now + heartbeat_seconds
 
+            if _shutdown_requested():
+                break
             lease = claim_next_job(identity.role, identity.worker_id, timezone.now())
             if lease is not None:
+                if _shutdown_requested():
+                    relinquish_job(lease, now=timezone.now())
+                    break
                 _execute_claim(identity, lease)
                 _publish(identity, status=HeartbeatStatus.IDLE, job_id=None)
                 next_heartbeat = monotonic() + heartbeat_seconds

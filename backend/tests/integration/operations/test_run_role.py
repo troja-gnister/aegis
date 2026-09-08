@@ -258,6 +258,90 @@ def test_shutdown_requested_during_handler_finishes_job_stops_claiming_and_heart
     assert installed[1][0] == signal.SIGINT
 
 
+@override_settings(AEGIS_PROCESS_ROLE="operations")
+def test_shutdown_after_loop_check_prevents_claim() -> None:
+    identity = worker_command.WorkerIdentity(
+        role="operations",
+        worker_id=WORKER_ID,
+        release_id="release-10",
+        schema_identity=SCHEMA_ID,
+        manifest_identity="unconfigured:v1",
+    )
+    monotonic_calls = 0
+
+    def signal_between_loop_check_and_claim() -> float:
+        nonlocal monotonic_calls
+        monotonic_calls += 1
+        if monotonic_calls == 2:
+            worker_command.request_shutdown()
+        return 0.0
+
+    worker_command._reset_shutdown()
+    try:
+        with (
+            patch.object(worker_command, "_startup", return_value=identity),
+            patch.object(worker_command, "_publish"),
+            patch.object(worker_command, "claim_next_job", return_value=None) as claim,
+        ):
+            worker_command.run_worker(
+                role="operations",
+                once=False,
+                worker_id=WORKER_ID,
+                monotonic=signal_between_loop_check_and_claim,
+            )
+    finally:
+        worker_command._reset_shutdown()
+
+    claim.assert_not_called()
+
+
+@override_settings(AEGIS_PROCESS_ROLE="operations")
+def test_shutdown_during_claim_relinquishes_without_dispatch() -> None:
+    _actor, _operation_record, job = _operation(role="operations")
+    identity = worker_command.WorkerIdentity(
+        role="operations",
+        worker_id=WORKER_ID,
+        release_id="release-10",
+        schema_identity=SCHEMA_ID,
+        manifest_identity="unconfigured:v1",
+    )
+    handler = Mock(return_value={"ok": True})
+
+    def claim_then_signal(role: str, worker_id: str, now: object) -> LeaseToken | None:
+        assert isinstance(now, type(job.available_at))
+        lease = claim_next_job(role, worker_id, now)
+        worker_command.request_shutdown()
+        return lease
+
+    worker_command._reset_shutdown()
+    try:
+        with (
+            patch.object(worker_command, "_startup", return_value=identity),
+            patch.object(worker_command, "_publish"),
+            patch.object(worker_command, "claim_next_job", side_effect=claim_then_signal),
+            patch.dict(
+                worker_command.ROLE_HANDLERS["operations"],
+                {"foundation.probe": handler},
+            ),
+        ):
+            worker_command.run_worker(
+                role="operations",
+                once=False,
+                worker_id=WORKER_ID,
+            )
+    finally:
+        worker_command._reset_shutdown()
+
+    handler.assert_not_called()
+    job.refresh_from_db()
+    assert job.state == JobState.RETRY_WAIT
+    assert job.lease_owner is None
+    assert job.lease_expires_at is None
+    replacement = claim_next_job("operations", str(uuid.uuid4()), job.available_at)
+    assert replacement is not None
+    assert replacement.job_id == job.pk
+
+
 def test_handler_registry_is_closed_for_all_three_roles() -> None:
     assert tuple(worker_command.ROLE_HANDLERS) == ("operations", "indexer", "media")
     for handlers in worker_command.ROLE_HANDLERS.values():

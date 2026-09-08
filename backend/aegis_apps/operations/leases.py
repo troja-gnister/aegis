@@ -27,6 +27,7 @@ _SAFE_DETAILS: Final[dict[SafeErrorCode, str]] = {
     SafeErrorCode.ATTEMPTS_EXHAUSTED: "The job exhausted its attempts.",
     SafeErrorCode.HANDLER_FAILED: "The job handler failed safely.",
     SafeErrorCode.RETRYABLE_FAILURE: "The job will be retried.",
+    SafeErrorCode.CLAIM_RELINQUISHED: "The unstarted claim was released safely.",
 }
 
 
@@ -171,12 +172,19 @@ def claim_next_job(role: str, worker_id: str, now: datetime) -> LeaseToken | Non
             )
             if job is None:
                 return None
-            if job.attempts >= job.max_attempts:
+            reuses_relinquished_attempt = (
+                job.state == JobState.RETRY_WAIT
+                and job.safe_error_code == SafeErrorCode.CLAIM_RELINQUISHED
+                and job.attempts > 0
+            )
+            if job.attempts >= job.max_attempts and not reuses_relinquished_attempt:
                 _expire_exhausted(job, now=claim_time)
                 continue
             if job.state not in (JobState.QUEUED, JobState.RETRY_WAIT, JobState.RUNNING):
                 raise ValueError("invalid claim state")
-            next_attempt = job.attempts + 1
+            next_attempt = (
+                job.attempts if reuses_relinquished_attempt else job.attempts + 1
+            )
             next_token = job.attempt_token + 1
             updated = _guarded_update(
                 Q(pk=job.pk, state=job.state, attempt_token=job.attempt_token),
@@ -282,6 +290,25 @@ def fail_job(
     failure_time = _now(now)
     code = _error_code(error_code)
     return _fail_with_code(token, code=code, now=failure_time)
+
+
+def relinquish_job(lease: LeaseToken, *, now: datetime) -> bool:
+    token = _validated_lease(lease)
+    relinquish_time = _now(now)
+    return (
+        _guarded_update(
+            _cas_filter(token, now=relinquish_time),
+            state=JobState.RETRY_WAIT,
+            available_at=relinquish_time,
+            lease_owner=None,
+            lease_expires_at=None,
+            safe_error_code=SafeErrorCode.CLAIM_RELINQUISHED,
+            safe_error_detail=_SAFE_DETAILS[SafeErrorCode.CLAIM_RELINQUISHED],
+            result=None,
+            updated_at=relinquish_time,
+        )
+        == 1
+    )
 
 
 def retry_job(

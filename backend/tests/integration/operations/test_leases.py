@@ -14,6 +14,7 @@ from aegis_apps.operations.leases import (
     claim_next_job,
     fail_job,
     finish_job,
+    relinquish_job,
     renew_lease,
     retry_job,
 )
@@ -182,6 +183,61 @@ def test_retry_uses_bounded_backoff_and_exhausts_at_max_attempts() -> None:
     assert job.safe_error_code == SafeErrorCode.ATTEMPTS_EXHAUSTED
     assert job.safe_error_detail == "The job exhausted its attempts."
     assert "secret" not in job.safe_error_detail
+
+
+def test_shutdown_relinquishment_is_fenced_and_immediately_claimable() -> None:
+    _, job = _operation()
+    now = timezone.now()
+    owner = _worker()
+    lease = claim_next_job("operations", owner, now)
+    assert lease is not None
+
+    assert relinquish_job(lease, now=now) is True
+    assert relinquish_job(lease, now=now) is False
+    job.refresh_from_db()
+    assert job.state == JobState.RETRY_WAIT
+    assert job.available_at == now
+    assert job.attempts == 1
+    assert job.attempt_token == lease.attempt_token
+    assert job.lease_owner is None
+    assert job.lease_expires_at is None
+    assert job.safe_error_code == SafeErrorCode.CLAIM_RELINQUISHED
+
+    replacement = claim_next_job("operations", _worker(), now)
+    assert replacement is not None
+    assert replacement.job_id == job.pk
+    assert replacement.attempt_token == lease.attempt_token + 1
+
+
+def test_shutdown_relinquishment_credits_an_unstarted_final_attempt() -> None:
+    actor = User.objects.create_user(username="shutdown-final-attempt")
+    operation = create_operation(
+        actor=actor,
+        request_id=REQUEST_ID,
+        kind="foundation.probe",
+        intent={"roots": []},
+    )
+    job = enqueue_job(operation=operation, target_role="media", max_attempts=1)
+    now = timezone.now()
+    lease = claim_next_job("media", _worker(), now)
+    assert lease is not None
+
+    assert relinquish_job(lease, now=now) is True
+
+    job.refresh_from_db()
+    assert job.state == JobState.RETRY_WAIT
+    assert job.safe_error_code == SafeErrorCode.CLAIM_RELINQUISHED
+    assert job.attempts == 1
+    assert job.lease_owner is None
+    assert job.lease_expires_at is None
+
+    replacement = claim_next_job("media", _worker(), now)
+    assert replacement is not None
+    assert replacement.job_id == job.pk
+    assert replacement.attempt_token == lease.attempt_token + 1
+    job.refresh_from_db()
+    assert job.state == JobState.RUNNING
+    assert job.attempts == 1
 
 
 def test_expired_final_attempt_is_terminally_fenced_and_claim_loop_advances() -> None:

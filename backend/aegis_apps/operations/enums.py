@@ -30,3 +30,4 @@ class SafeErrorCode(models.TextChoices):
     ATTEMPTS_EXHAUSTED = "attempts_exhausted", "Attempts exhausted"
     HANDLER_FAILED = "handler_failed", "Handler failed"
     RETRYABLE_FAILURE = "retryable_failure", "Retryable failure"
+    CLAIM_RELINQUISHED = "claim_relinquished", "Claim relinquished"
