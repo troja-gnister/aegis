@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 from aegis_apps.common.health import readiness
-from aegis_apps.operations.heartbeats import publish_heartbeat
+from aegis_apps.operations.heartbeats import publish_heartbeat_for_test
 from aegis_apps.operations.models import UNCONFIGURED_MANIFEST_IDENTITY
 from aegis_apps.roots.manifest import ManifestError
 from django.test import override_settings
@@ -17,8 +17,13 @@ RELEASE = "readiness-release"
 SCHEMA = "sha256:" + "e" * 64
 
 
+@pytest.fixture(autouse=True)
+def _enable_test_heartbeat_time_boundary(settings: object) -> None:
+    settings.AEGIS_ENVIRONMENT = "test"  # type: ignore[attr-defined]
+
+
 def _heartbeat(*, role: str, status: str = "idle", age: int = 0) -> None:
-    publish_heartbeat(
+    publish_heartbeat_for_test(
         role=role,
         worker_id=str(uuid.uuid4()),
         release_id=RELEASE,
@@ -26,7 +31,7 @@ def _heartbeat(*, role: str, status: str = "idle", age: int = 0) -> None:
         manifest_identity=UNCONFIGURED_MANIFEST_IDENTITY,
         status=status,
         metrics={},
-        now=timezone.now() - timedelta(seconds=age),
+        observed_at=timezone.now() - timedelta(seconds=age),
     )
 
 
@@ -85,7 +90,7 @@ def test_readiness_reports_only_safe_stale_and_missing_role_states() -> None:
 )
 def test_readiness_rejects_a_fresh_mixed_release_even_with_a_matching_worker() -> None:
     _heartbeat(role="operations")
-    publish_heartbeat(
+    publish_heartbeat_for_test(
         role="operations",
         worker_id=str(uuid.uuid4()),
         release_id="another-release",
@@ -93,7 +98,7 @@ def test_readiness_rejects_a_fresh_mixed_release_even_with_a_matching_worker() -
         manifest_identity=UNCONFIGURED_MANIFEST_IDENTITY,
         status="idle",
         metrics={},
-        now=timezone.now(),
+        observed_at=timezone.now(),
     )
 
     with (

@@ -13,6 +13,8 @@ def test_worker_runtime_configuration_has_bounded_phase_one_defaults() -> None:
     assert config.required_roles == ("operations", "indexer", "media")
     assert 0 < config.heartbeat_seconds <= 15
     assert config.heartbeat_seconds <= config.heartbeat_fresh_seconds <= 300
+    assert config.heartbeat_fresh_seconds <= config.heartbeat_retention_seconds <= 604_800
+    assert 0 < config.heartbeat_slots_per_role <= 1_024
     assert 0 < config.poll_seconds <= 30
     assert 0 <= config.poll_jitter_seconds <= config.poll_seconds
     assert 0 < config.lease_seconds <= 300
@@ -30,6 +32,8 @@ def test_worker_runtime_configuration_preserves_valid_required_role_order() -> N
             "AEGIS_JOB_RETRY_MAX_SECONDS": "120",
             "AEGIS_WORKER_HEARTBEAT_SECONDS": "12.5",
             "AEGIS_WORKER_HEARTBEAT_FRESH_SECONDS": "45",
+            "AEGIS_WORKER_HEARTBEAT_RETENTION_SECONDS": "7200",
+            "AEGIS_WORKER_HEARTBEAT_SLOTS_PER_ROLE": "32",
             "AEGIS_QUEUE_POLL_SECONDS": "1.5",
             "AEGIS_QUEUE_POLL_JITTER_SECONDS": "0.25",
         }
@@ -40,6 +44,8 @@ def test_worker_runtime_configuration_preserves_valid_required_role_order() -> N
     assert config.required_roles == ("media", "operations")
     assert config.lease_seconds == 45
     assert config.heartbeat_seconds == 12.5
+    assert config.heartbeat_retention_seconds == 7200
+    assert config.heartbeat_slots_per_role == 32
 
 
 @pytest.mark.parametrize("release_id", [None, "", "development"])
@@ -79,6 +85,11 @@ def test_production_worker_configuration_accepts_an_explicit_release_identity() 
         {"AEGIS_JOB_LEASE_SECONDS": "nan"},
         {"AEGIS_WORKER_HEARTBEAT_SECONDS": "16"},
         {"AEGIS_WORKER_HEARTBEAT_FRESH_SECONDS": "5"},
+        {"AEGIS_WORKER_HEARTBEAT_RETENTION_SECONDS": "44"},
+        {"AEGIS_WORKER_HEARTBEAT_RETENTION_SECONDS": "604801"},
+        {"AEGIS_WORKER_HEARTBEAT_SLOTS_PER_ROLE": "0"},
+        {"AEGIS_WORKER_HEARTBEAT_SLOTS_PER_ROLE": "1.5"},
+        {"AEGIS_WORKER_HEARTBEAT_SLOTS_PER_ROLE": "1025"},
         {"AEGIS_QUEUE_POLL_SECONDS": "0"},
         {"AEGIS_QUEUE_POLL_JITTER_SECONDS": "99"},
         {"AEGIS_JOB_RETRY_BASE_SECONDS": "301"},

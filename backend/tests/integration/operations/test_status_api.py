@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 from aegis_apps.identity.models import User
-from aegis_apps.operations.heartbeats import publish_heartbeat
+from aegis_apps.operations.heartbeats import publish_heartbeat_for_test
 from aegis_apps.operations.services import create_operation, enqueue_job
 from aegis_apps.roots.models import Root, RootGrant
 from django.test import Client, override_settings
@@ -18,6 +18,11 @@ STATUS_PATH = "/api/v1/admin/operations/status"
 RELEASE = "release-status"
 SCHEMA = "sha256:" + "c" * 64
 MANIFEST = "d" * 64
+
+
+@pytest.fixture(autouse=True)
+def _enable_test_heartbeat_time_boundary(settings: object) -> None:
+    settings.AEGIS_ENVIRONMENT = "test"  # type: ignore[attr-defined]
 
 
 def _staff_client(*, staff: bool, superuser: bool = False) -> tuple[Client, User]:
@@ -76,7 +81,7 @@ def test_status_api_returns_exact_ordered_safe_aggregates() -> None:
     enqueue_job(operation=operation, target_role="media")
     worker_id = str(uuid.uuid4())
     now = timezone.now()
-    publish_heartbeat(
+    publish_heartbeat_for_test(
         role="media",
         worker_id=worker_id,
         release_id=RELEASE,
@@ -84,7 +89,7 @@ def test_status_api_returns_exact_ordered_safe_aggregates() -> None:
         manifest_identity=MANIFEST,
         status="idle",
         metrics={"scanProgress": 0.4, "diskPressure": 0.85},
-        now=now,
+        observed_at=now,
     )
 
     with (

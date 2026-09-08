@@ -81,6 +81,15 @@ def current_manifest_identity() -> str:
     return UNCONFIGURED_MANIFEST_IDENTITY if manifest is None else manifest.digest
 
 
+def authoritative_database_time() -> datetime:
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT clock_timestamp()")
+        row = cursor.fetchone()
+    if row is None:
+        raise RuntimeError("database time unavailable")
+    return _aware_now(row[0])
+
+
 def worker_role_states(
     *,
     roles: Sequence[str],
@@ -96,6 +105,7 @@ def worker_role_states(
     cutoff = status_time - timedelta(seconds=fresh_for)
     active = Q(
         last_seen_at__gte=cutoff,
+        last_seen_at__lte=status_time,
         status__in=(HeartbeatStatus.IDLE, HeartbeatStatus.RUNNING),
     )
     compatible = Q(
@@ -103,32 +113,17 @@ def worker_role_states(
         schema_identity=schema_identity,
         manifest_identity=manifest_identity,
     )
-    rows = (
-        WorkerHeartbeat.objects.filter(role__in=required_roles)
-        .values("role")
-        .annotate(
-            total=Count("id"),
-            healthy=Count(
-                "id",
-                filter=active & compatible,
-            ),
-            incompatible=Count("id", filter=active & ~compatible),
-        )
-    )
-    counts = {
-        row["role"]: (row["total"], row["healthy"], row["incompatible"])
-        for row in rows
-    }
-    return {
-        role: (
-            "missing"
-            if role not in counts
-            else "healthy"
-            if counts[role][1] > 0 and counts[role][2] == 0
-            else "stale"
-        )
-        for role in required_roles
-    }
+    states: dict[str, str] = {}
+    for role in required_roles:
+        role_rows = WorkerHeartbeat.objects.filter(role=role)
+        if not role_rows.exists():
+            states[role] = "missing"
+            continue
+        fresh_rows = role_rows.filter(active)
+        has_compatible = fresh_rows.filter(compatible).exists()
+        has_incompatible = fresh_rows.exclude(compatible).exists()
+        states[role] = "healthy" if has_compatible and not has_incompatible else "stale"
+    return states
 
 
 def _disk_pressure(value: object) -> str:
@@ -144,8 +139,8 @@ def _disk_pressure(value: object) -> str:
     return "ok"
 
 
-def operations_status(*, now: datetime | None = None) -> list[OperationRoleStatus]:
-    status_time = timezone.now() if now is None else _aware_now(now)
+def operations_status() -> list[OperationRoleStatus]:
+    status_time = authoritative_database_time()
     roles = _validated_roles(settings.AEGIS_REQUIRED_WORKER_ROLES)
     release_id = settings.AEGIS_RELEASE_ID
     schema_identity = current_schema_identity()
@@ -177,6 +172,7 @@ def operations_status(*, now: datetime | None = None) -> list[OperationRoleStatu
         WorkerHeartbeat.objects.filter(
             role__in=roles,
             last_seen_at__gte=cutoff,
+            last_seen_at__lte=status_time,
             status__in=(HeartbeatStatus.IDLE, HeartbeatStatus.RUNNING),
             release_id=release_id,
             schema_identity=schema_identity,

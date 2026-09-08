@@ -42,6 +42,23 @@ def _bounded_float(
     return value
 
 
+def _bounded_integer(
+    environ: Mapping[str, str],
+    name: str,
+    default: int,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    raw = environ.get(name, str(default))
+    if not isinstance(raw, str) or not raw.isascii() or not raw.isdecimal():
+        raise ConfigurationError(f"{name} must be an integer")
+    value = int(raw)
+    if not minimum <= value <= maximum:
+        raise ConfigurationError(f"{name} is outside its safe bounds")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class WorkerRuntimeConfig:
     release_id: str
@@ -52,6 +69,8 @@ class WorkerRuntimeConfig:
     retry_max_seconds: float
     heartbeat_seconds: float
     heartbeat_fresh_seconds: float
+    heartbeat_retention_seconds: float
+    heartbeat_slots_per_role: int
     poll_seconds: float
     poll_jitter_seconds: float
 
@@ -118,6 +137,22 @@ class WorkerRuntimeConfig:
         )
         if heartbeat_fresh_seconds < heartbeat_seconds:
             raise ConfigurationError("worker heartbeat freshness is invalid")
+        heartbeat_retention_seconds = _bounded_float(
+            environ,
+            "AEGIS_WORKER_HEARTBEAT_RETENTION_SECONDS",
+            3600,
+            minimum=0,
+            maximum=604_800,
+        )
+        if heartbeat_retention_seconds < heartbeat_fresh_seconds:
+            raise ConfigurationError("worker heartbeat retention is invalid")
+        heartbeat_slots_per_role = _bounded_integer(
+            environ,
+            "AEGIS_WORKER_HEARTBEAT_SLOTS_PER_ROLE",
+            64,
+            minimum=1,
+            maximum=1_024,
+        )
 
         poll_seconds = _bounded_float(
             environ,
@@ -146,6 +181,8 @@ class WorkerRuntimeConfig:
             retry_max_seconds=retry_max_seconds,
             heartbeat_seconds=heartbeat_seconds,
             heartbeat_fresh_seconds=heartbeat_fresh_seconds,
+            heartbeat_retention_seconds=heartbeat_retention_seconds,
+            heartbeat_slots_per_role=heartbeat_slots_per_role,
             poll_seconds=poll_seconds,
             poll_jitter_seconds=poll_jitter_seconds,
         )

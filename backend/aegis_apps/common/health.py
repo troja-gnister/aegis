@@ -3,7 +3,6 @@ import logging
 from django.conf import settings
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
-from django.utils import timezone
 
 from aegis_apps.operations import selectors as operation_selectors
 from aegis_apps.roots.manifest import ManifestError
@@ -49,7 +48,7 @@ def worker_readiness() -> tuple[bool, dict[str, str]]:
         release_id=settings.AEGIS_RELEASE_ID,
         schema_identity=operation_selectors.current_schema_identity(),
         manifest_identity=manifest_identity,
-        now=timezone.now(),
+        now=operation_selectors.authoritative_database_time(),
         freshness_seconds=settings.AEGIS_WORKER_HEARTBEAT_FRESH_SECONDS,
     )
     return all(state == "healthy" for state in states.values()), states

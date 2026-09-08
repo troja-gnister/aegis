@@ -443,6 +443,12 @@ class WorkerHeartbeat(models.Model):
     metrics = models.JSONField(default=dict)
 
     class Meta:
+        indexes: ClassVar[list[models.Index]] = [
+            models.Index(
+                fields=("role", "last_seen_at"),
+                name="operations_hb_role_seen_idx",
+            ),
+        ]
         constraints: ClassVar[list[models.BaseConstraint]] = [
             models.UniqueConstraint(
                 fields=("role", "worker_id"),
