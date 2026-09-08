@@ -13,6 +13,7 @@ from django.utils import timezone
 
 from aegis_apps.common.middleware import REQUEST_ID
 from aegis_apps.identity.models import User
+from aegis_apps.roots.locking import AuthorizationLocks
 from aegis_apps.roots.models import Root, RootGrant
 
 from .enums import JobKind, JobState, WorkerRole
@@ -125,20 +126,22 @@ def _normalized_roots(intent: Mapping[str, object]) -> list[dict[str, object]]:
     return result
 
 
-def _locked_active_actor(actor: User) -> User:
+def _validate_actor(actor: User) -> uuid.UUID:
     if not isinstance(actor, User) or not isinstance(actor.pk, uuid.UUID):
         raise ValueError("invalid operation actor")
-    locked = User.objects.select_for_update().filter(pk=actor.pk, is_active=True).first()
-    if locked is None:
+    return actor.pk
+
+
+def _active_actor(
+    actor_id: uuid.UUID, *, locked_users: Mapping[uuid.UUID, User]
+) -> User:
+    locked = locked_users.get(actor_id)
+    if locked is None or not locked.is_active:
         raise ValueError("invalid or inactive operation actor")
     return locked
 
 
-def _capture_authorization_snapshot(
-    *,
-    actor: User,
-    intent: Mapping[str, object],
-) -> dict[str, object]:
+def _authorization_requirements(intent: Mapping[str, object]) -> dict[uuid.UUID, int]:
     requirements: dict[uuid.UUID, int] = {}
     for item in _normalized_roots(intent):
         root_id = uuid.UUID(str(item["id"]))
@@ -146,14 +149,18 @@ def _capture_authorization_snapshot(
         if type(permissions) is not int:
             raise ValueError("invalid operation intent permission mask")
         requirements[root_id] = permissions
+    return requirements
 
-    root_rows = list(
-        Root.objects.select_for_update()
-        .filter(pk__in=requirements, active=True)
-        .order_by("id")
-        .values_list("id", "authorization_epoch")
-    )
-    if len(root_rows) != len(requirements):
+
+def _capture_authorization_snapshot(
+    *,
+    actor: User,
+    requirements: Mapping[uuid.UUID, int],
+    locked_roots: Mapping[uuid.UUID, Root],
+) -> dict[str, object]:
+    if len(locked_roots) != len(requirements) or any(
+        not root.active for root in locked_roots.values()
+    ):
         raise ValueError("operation authorization failed")
 
     effective_masks = {
@@ -172,7 +179,10 @@ def _capture_authorization_snapshot(
 
     return {
         "userEpoch": actor.authorization_epoch,
-        "rootEpochs": {str(root_id): epoch for root_id, epoch in root_rows},
+        "rootEpochs": {
+            str(root_id): locked_roots[root_id].authorization_epoch
+            for root_id in sorted(requirements)
+        },
     }
 
 
@@ -290,14 +300,19 @@ def create_operation(
     operation_kind = _validate_kind(kind)
     normalized_intent = normalize_probe_intent(intent)
     canonical = canonical_json_bytes(normalized_intent, maximum_bytes=16_384)
-    if not isinstance(actor, User) or not isinstance(actor.pk, uuid.UUID):
-        raise ValueError("invalid operation actor")
+    actor_id = _validate_actor(actor)
+    requirements = _authorization_requirements(normalized_intent)
     request_hash = hashlib.sha256(
-        b"\x00".join((str(actor.pk).encode(), operation_kind.encode(), canonical))
+        b"\x00".join((str(actor_id).encode(), operation_kind.encode(), canonical))
     ).digest()
 
     with transaction.atomic():
-        locked_actor = _locked_active_actor(actor)
+        authorization_locks = AuthorizationLocks()
+        locked_roots = authorization_locks.roots(requirements)
+        locked_actor = _active_actor(
+            actor_id,
+            locked_users=authorization_locks.users((actor_id,)),
+        )
         existing = (
             Operation.objects.select_for_update()
             .filter(actor_id=locked_actor.id, request_id=bounded_request_id)
@@ -331,7 +346,8 @@ def create_operation(
 
         snapshot = _capture_authorization_snapshot(
             actor=locked_actor,
-            intent=normalized_intent,
+            requirements=requirements,
+            locked_roots=locked_roots,
         )
         try:
             with transaction.atomic():
@@ -404,42 +420,36 @@ def validate_authorization_snapshot(operation: Operation) -> bool:
         except ValueError:
             return False
 
-        requirements: dict[uuid.UUID, int] = {}
-        for item in _normalized_roots(normalized_intent):
-            root_id = uuid.UUID(str(item["id"]))
-            permissions = item["permissions"]
-            if type(permissions) is not int:
-                return False
-            requirements[root_id] = permissions
-
-        roots = list(
-            Root.objects.select_for_update()
-            .filter(pk__in=requirements, active=True)
-            .order_by("id")
-            .values_list("id", "authorization_epoch")
-        )
-        if len(roots) != len(requirements):
+        requirements = _authorization_requirements(normalized_intent)
+        authorization_locks = AuthorizationLocks()
+        locked_roots = authorization_locks.roots(requirements)
+        if len(locked_roots) != len(requirements) or any(
+            not root.active for root in locked_roots.values()
+        ):
             return False
-        actor = (
-            User.objects.select_for_update()
-            .filter(pk=stored["actor_id"], is_active=True)
-            .values("id", "authorization_epoch")
-            .first()
-        )
-        if actor is None or actor["authorization_epoch"] != snapshot["userEpoch"]:
+        locked_users = authorization_locks.users((stored["actor_id"],))
+        actor = locked_users.get(stored["actor_id"])
+        if (
+            actor is None
+            or not actor.is_active
+            or actor.authorization_epoch != snapshot["userEpoch"]
+        ):
             return False
 
         root_epochs = snapshot["rootEpochs"]
         if not isinstance(root_epochs, Mapping):
             return False
-        if any(root_epochs.get(str(root_id)) != epoch for root_id, epoch in roots):
+        if any(
+            root_epochs.get(str(root_id)) != root.authorization_epoch
+            for root_id, root in locked_roots.items()
+        ):
             return False
 
         effective_masks = {
             root_id: mask
             for root_id, mask in (
                 RootGrant.objects.filter(root_id__in=requirements, root__active=True)
-                .filter(Q(user_id=actor["id"]) | Q(group__user=actor["id"]))
+                .filter(Q(user_id=actor.id) | Q(group__user=actor.id))
                 .values_list("root_id")
                 .annotate(mask=BitOr("permissions"))
             )

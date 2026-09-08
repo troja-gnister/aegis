@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from collections.abc import Collection, Iterable
+from collections.abc import Collection
 from functools import partial
 
 from aegisctl.mounts import SLOT_ID_RE
@@ -15,6 +15,7 @@ from aegis_apps.audit.services import record_event
 from aegis_apps.common.middleware import REQUEST_ID
 from aegis_apps.identity.models import GroupIdentity, User
 
+from .locking import AuthorizationLocks
 from .manifest import ManifestError, configured_manifest
 from .models import Root, RootGrant, _grant_delete_capability
 from .permissions import Permission, validate_permission_mask
@@ -84,17 +85,6 @@ def _affected_user_ids(root_id: uuid.UUID) -> frozenset[uuid.UUID]:
         )
         .values_list("pk", flat=True)
         .distinct()
-    )
-
-
-def _lock_users(user_ids: Iterable[uuid.UUID]) -> frozenset[uuid.UUID]:
-    ids = frozenset(user_ids)
-    if not ids:
-        return frozenset()
-    return frozenset(
-        User.objects.select_for_update()
-        .filter(pk__in=ids)
-        .values_list("pk", flat=True)
     )
 
 
@@ -197,7 +187,10 @@ def update_root(
     _validate_common(actor=actor, request_id=request_id)
     root_uuid = _validate_uuid(root_id, field_name="root ID")
     with transaction.atomic():
-        root = Root.objects.select_for_update().get(pk=root_uuid)
+        authorization_locks = AuthorizationLocks()
+        root = authorization_locks.roots((root_uuid,)).get(root_uuid)
+        if root is None:
+            raise Root.DoesNotExist
         original_slot_id = root.slot_id
         original_display_name = root.display_name
         original_mode = root.mode
@@ -242,7 +235,9 @@ def update_root(
         authorization_changed = bool(changed_fields & {"slot_id", "mode", "active"})
         affected_users: frozenset[uuid.UUID] = frozenset()
         if authorization_changed:
-            affected_users = _lock_users(_affected_user_ids(root.id))
+            affected_users = frozenset(
+                authorization_locks.users(_affected_user_ids(root.id))
+            )
         root.save(update_fields=(*sorted(changed_fields), "updated_at"))
         if authorization_changed:
             _advance_epochs(root_ids=(root.id,), user_ids=affected_users)
@@ -307,9 +302,14 @@ def set_user_grant(
     user_uuid = _validate_uuid(user_id, field_name="user ID")
     mask = validate_permission_mask(permissions)
     with transaction.atomic():
-        root = Root.objects.select_for_update().get(pk=root_uuid)
+        authorization_locks = AuthorizationLocks()
+        root = authorization_locks.roots((root_uuid,)).get(root_uuid)
+        if root is None:
+            raise Root.DoesNotExist
         _validate_root_definition(root)
-        subject = User.objects.select_for_update().get(pk=user_uuid)
+        subject = authorization_locks.users((user_uuid,)).get(user_uuid)
+        if subject is None:
+            raise User.DoesNotExist
         grant = (
             RootGrant.objects.select_for_update()
             .filter(root=root, user=subject)
@@ -351,18 +351,26 @@ def set_group_grant(
     internal_group_id = _validate_group_id(group_id)
     mask = validate_permission_mask(permissions)
     with transaction.atomic():
-        root = Root.objects.select_for_update().get(pk=root_uuid)
+        authorization_locks = AuthorizationLocks()
+        group = authorization_locks.groups((internal_group_id,)).get(internal_group_id)
+        if group is None:
+            raise Group.DoesNotExist
+        root = authorization_locks.roots((root_uuid,)).get(root_uuid)
+        if root is None:
+            raise Root.DoesNotExist
         _validate_root_definition(root)
-        group = Group.objects.select_for_update().get(pk=internal_group_id)
+        existing = RootGrant.objects.filter(root=root, group=group).first()
+        if existing is not None and existing.permissions == int(mask):
+            return existing
+        members = frozenset(
+            authorization_locks.users(
+                User.objects.filter(groups=group).values_list("pk", flat=True)
+            )
+        )
         grant = (
             RootGrant.objects.select_for_update()
             .filter(root=root, group=group)
             .first()
-        )
-        if grant is not None and grant.permissions == int(mask):
-            return grant
-        members = _lock_users(
-            User.objects.filter(groups=group).values_list("pk", flat=True)
         )
         if grant is None:
             grant = RootGrant.objects.create(
@@ -386,46 +394,66 @@ def set_group_grant(
         return grant
 
 
-def _locked_grant(grant_id: uuid.UUID) -> tuple[Root, RootGrant] | None:
-    root_id = (
-        RootGrant.objects.filter(pk=grant_id)
-        .values_list("root_id", flat=True)
-        .first()
-    )
-    if root_id is None:
-        return None
-    root = Root.objects.select_for_update().get(pk=root_id)
-    grant = RootGrant.objects.select_for_update().filter(pk=grant_id).first()
-    if grant is None:
-        return None
-    return root, grant
-
-
 def remove_grant(
     *, actor: User, grant_id: uuid.UUID, request_id: str
 ) -> RootGrant | None:
     _validate_common(actor=actor, request_id=request_id)
     grant_uuid = _validate_uuid(grant_id, field_name="grant ID")
     with transaction.atomic():
-        locked = _locked_grant(grant_uuid)
-        if locked is None:
+        grant_identity = (
+            RootGrant.objects.filter(pk=grant_uuid)
+            .values("root_id", "user_id", "group_id")
+            .first()
+        )
+        if grant_identity is None:
             return None
-        root, grant = locked
+        root_id = grant_identity["root_id"]
+        user_id = grant_identity["user_id"]
+        group_id = grant_identity["group_id"]
+        if not isinstance(root_id, uuid.UUID):
+            raise RuntimeError("invalid persisted root grant")
+        authorization_locks = AuthorizationLocks()
+        group: Group | None = None
+        if type(group_id) is int:
+            group = authorization_locks.groups((group_id,)).get(group_id)
+            if group is None:
+                raise RuntimeError("invalid persisted root grant")
+        root = authorization_locks.roots((root_id,)).get(root_id)
+        if root is None:
+            raise RuntimeError("invalid persisted root grant")
+        if isinstance(user_id, uuid.UUID):
+            affected_users = frozenset(authorization_locks.users((user_id,)))
+        elif group is not None:
+            affected_users = frozenset(
+                authorization_locks.users(
+                    User.objects.filter(groups=group).values_list("pk", flat=True)
+                )
+            )
+        else:
+            raise RuntimeError("invalid persisted root grant")
+        grant = (
+            RootGrant.objects.select_for_update()
+            .filter(
+                pk=grant_uuid,
+                root_id=root_id,
+                user_id=user_id,
+                group_id=group_id,
+            )
+            .first()
+        )
+        if grant is None:
+            return None
         _validate_root_definition(root)
         mask = validate_permission_mask(grant.permissions)
         if grant.user_id is not None:
-            subject = User.objects.select_for_update().get(pk=grant.user_id)
-            subject_id = subject.id
-            affected_users = frozenset((subject.id,))
+            subject_id = grant.user_id
         else:
-            if grant.group_id is None:
+            if grant.group_id is None or group is None:
                 raise RuntimeError("invalid persisted root grant")
-            group = Group.objects.select_for_update().get(pk=grant.group_id)
-            affected_users = _lock_users(
-                User.objects.filter(groups=group).values_list("pk", flat=True)
+            group_identity, _ = GroupIdentity.objects.select_for_update().get_or_create(
+                group=group
             )
-            identity, _ = GroupIdentity.objects.select_for_update().get_or_create(group=group)
-            subject_id = identity.id
+            subject_id = group_identity.id
         token = _grant_delete_capability.set(grant)
         try:
             grant.delete()
@@ -465,17 +493,6 @@ def root_ids_for_groups(group_ids: Collection[int]) -> frozenset[uuid.UUID]:
     )
 
 
-def advance_roots_for_user_active_change(*, user_id: uuid.UUID) -> None:
-    root_ids = root_ids_for_user(user_id)
-    if root_ids:
-        frozenset(
-            Root.objects.select_for_update()
-            .filter(pk__in=root_ids)
-            .values_list("pk", flat=True)
-        )
-    _advance_epochs(root_ids=root_ids, user_ids=(user_id,))
-
-
 def advance_identity_admin_epochs(
     *, root_ids: Collection[uuid.UUID], user_ids: Collection[uuid.UUID]
 ) -> None:
@@ -483,11 +500,14 @@ def advance_identity_admin_epochs(
 
 
 def advance_membership_epochs(
-    *, user_ids: Collection[uuid.UUID], group_ids: Collection[int]
+    *,
+    user_ids: Collection[uuid.UUID],
+    group_ids: Collection[int],
+    root_ids: Collection[uuid.UUID],
 ) -> None:
     users = frozenset(user_ids)
     groups = frozenset(group_ids)
+    roots = frozenset(root_ids)
     if not users or not groups:
         return
-    root_ids = root_ids_for_groups(groups)
-    _advance_epochs(root_ids=root_ids, user_ids=users)
+    _advance_epochs(root_ids=roots, user_ids=users)
