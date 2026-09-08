@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 
 from django.contrib.auth.models import Group
@@ -11,12 +14,25 @@ from aegis_apps.identity.models import User
 from .services import advance_membership_epochs
 
 _PENDING_ATTRIBUTE = "_aegis_membership_epoch_pending"
+_membership_epoch_updates_suppressed: ContextVar[bool] = ContextVar(
+    "aegis_membership_epoch_updates_suppressed",
+    default=False,
+)
 
 
 @dataclass(frozen=True, slots=True)
 class _MembershipChange:
     user_ids: frozenset[uuid.UUID]
     group_ids: frozenset[int]
+
+
+@contextmanager
+def suppress_membership_epoch_updates_for_identity_admin() -> Iterator[None]:
+    token = _membership_epoch_updates_suppressed.set(True)
+    try:
+        yield
+    finally:
+        _membership_epoch_updates_suppressed.reset(token)
 
 
 def _key(*, action: str, reverse: bool) -> tuple[str, bool]:
@@ -101,6 +117,8 @@ def handle_group_membership_change(
     **_kwargs: object,
 ) -> None:
     del sender, model, using
+    if _membership_epoch_updates_suppressed.get():
+        return
     if action in {"pre_remove", "pre_clear"}:
         _store(
             instance=instance,

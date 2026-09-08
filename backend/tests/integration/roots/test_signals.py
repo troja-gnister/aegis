@@ -10,9 +10,8 @@ from aegis_apps.identity.models import User
 from aegis_apps.roots.models import Root, RootGrant
 from aegis_apps.roots.permissions import Permission
 from aegis_apps.roots.selectors import clear_authorization_cache, effective_permissions
-from aegis_apps.roots.services import (
-    advance_identity_user_epochs,
-    coalesce_authorization_epochs,
+from aegis_apps.roots.signals import (
+    suppress_membership_epoch_updates_for_identity_admin,
 )
 from django.contrib.auth.models import Group
 from django.contrib.auth.models import Permission as DjangoPermission
@@ -214,6 +213,69 @@ def test_user_admin_coalesces_group_add_with_active_change_per_user_and_root() -
     ]
 
 
+def test_user_admin_deduplicates_direct_current_removed_and_new_roots() -> None:
+    client = _admin_client()
+    user = User.objects.create_user(username="complete-root-delta-user", is_active=True)
+    retained_group = Group.objects.create(name="complete-root-delta-retained")
+    removed_group = Group.objects.create(name="complete-root-delta-removed")
+    added_group = Group.objects.create(name="complete-root-delta-added")
+    user.groups.add(retained_group, removed_group)
+    User.objects.filter(pk=user.pk).update(authorization_epoch=0)
+
+    direct_root = _root("complete-delta-direct")
+    retained_root = _root("complete-delta-retained")
+    removed_root = _root("complete-delta-removed")
+    added_root = _root("complete-delta-added")
+    shared_root = _root("complete-delta-shared")
+    RootGrant.objects.create(
+        root=direct_root, user=user, permissions=Permission.BROWSE
+    )
+    RootGrant.objects.create(
+        root=retained_root, group=retained_group, permissions=Permission.BROWSE
+    )
+    RootGrant.objects.create(
+        root=removed_root, group=removed_group, permissions=Permission.BROWSE
+    )
+    RootGrant.objects.create(
+        root=added_root, group=added_group, permissions=Permission.BROWSE
+    )
+    for group in (retained_group, removed_group, added_group):
+        RootGrant.objects.create(
+            root=shared_root,
+            group=group,
+            permissions=Permission.BROWSE,
+        )
+
+    response = client.post(
+        reverse("admin:identity_user_change", args=[user.pk]),
+        _user_change_data(
+            user,
+            is_active="",
+            groups=[str(retained_group.pk), str(added_group.pk)],
+        ),
+        headers={"X-Request-ID": REQUEST_ID},
+    )
+
+    user.refresh_from_db()
+    assert response.status_code == 302
+    assert user.is_active is False
+    assert set(user.groups.values_list("pk", flat=True)) == {
+        retained_group.pk,
+        added_group.pk,
+    }
+    assert _epochs(
+        user,
+        direct_root,
+        retained_root,
+        removed_root,
+        added_root,
+        shared_root,
+    ) == [1, 1, 1, 1, 1, 1]
+    assert list(AuditEvent.objects.values_list("event_type", flat=True)) == [
+        "identity.user.changed"
+    ]
+
+
 def test_user_admin_coalesces_group_add_with_direct_permission_change() -> None:
     client = _admin_client()
     user = User.objects.create_user(username="combined-permission-user")
@@ -270,10 +332,11 @@ def test_user_admin_group_replacement_coalesces_shared_user_and_root() -> None:
 def test_group_admin_combined_permission_and_member_replacement_coalesces_root() -> None:
     client = _admin_client()
     first = User.objects.create_user(username="group-replacement-first")
+    retained = User.objects.create_user(username="group-replacement-retained")
     second = User.objects.create_user(username="group-replacement-second")
     group = Group.objects.create(name="group-replacement")
-    group.user_set.add(first)
-    User.objects.filter(pk=first.pk).update(authorization_epoch=0)
+    group.user_set.add(first, retained)
+    User.objects.filter(pk__in=(first.pk, retained.pk)).update(authorization_epoch=0)
     permission = DjangoPermission.objects.order_by("pk").first()
     assert permission is not None
     root = _root("group-replacement-root")
@@ -284,51 +347,108 @@ def test_group_admin_combined_permission_and_member_replacement_coalesces_root()
         {
             "name": group.name,
             "permissions": [str(permission.pk)],
-            "members": [str(second.pk)],
+            "members": [str(retained.pk), str(second.pk)],
             "_save": "Save",
         },
         headers={"X-Request-ID": REQUEST_ID},
     )
 
     assert response.status_code == 302
-    assert set(group.user_set.values_list("pk", flat=True)) == {second.pk}
+    assert set(group.user_set.values_list("pk", flat=True)) == {retained.pk, second.pk}
     assert set(group.permissions.values_list("pk", flat=True)) == {permission.pk}
-    assert _epochs(first, second, root) == [1, 1, 1]
+    assert _epochs(first, retained, second, root) == [1, 1, 1, 1]
     assert list(AuditEvent.objects.values_list("event_type", flat=True)) == [
         "identity.group.changed"
     ]
 
 
-def test_epoch_coalescing_requires_a_transaction() -> None:
-    with (
-        pytest.raises(RuntimeError, match="requires a transaction"),
-        coalesce_authorization_epochs(),
-    ):
+def test_membership_epoch_suppression_is_nested_and_restores_raw_signals() -> None:
+    user = User.objects.create_user(username="nested-suppression-user")
+    group = Group.objects.create(name="nested-suppression-group")
+    root = _root("nested-suppression-root")
+    RootGrant.objects.create(root=root, group=group, permissions=Permission.BROWSE)
+
+    with suppress_membership_epoch_updates_for_identity_admin():
+        with suppress_membership_epoch_updates_for_identity_admin():
+            user.groups.add(group)
+        assert _epochs(user, root) == [0, 0]
+
+    user.groups.remove(group)
+
+    assert not user.groups.filter(pk=group.pk).exists()
+    assert _epochs(user, root) == [1, 1]
+
+
+def test_caught_membership_add_savepoint_rollback_does_not_advance_epochs() -> None:
+    user = User.objects.create_user(username="savepoint-add-user")
+    group = Group.objects.create(name="savepoint-add-group")
+    root = _root("savepoint-add-root")
+    RootGrant.objects.create(root=root, group=group, permissions=Permission.BROWSE)
+
+    class RollBackSavepoint(RuntimeError):
         pass
 
-
-def test_nested_epoch_coalescing_flushes_once_and_discards_a_failed_inner_scope() -> None:
-    retained = User.objects.create_user(username="nested-retained-user")
-    discarded = User.objects.create_user(username="nested-discarded-user")
-
-    class RollBackInner(RuntimeError):
-        pass
-
-    with transaction.atomic(), coalesce_authorization_epochs():
-        advance_identity_user_epochs(user_ids=(retained.id,))
-        with coalesce_authorization_epochs():
-            advance_identity_user_epochs(user_ids=(retained.id,))
+    with transaction.atomic():
         try:
-            with coalesce_authorization_epochs():
-                advance_identity_user_epochs(user_ids=(discarded.id,))
-                raise RollBackInner
-        except RollBackInner:
+            with transaction.atomic():
+                user.groups.add(group)
+                raise RollBackSavepoint
+        except RollBackSavepoint:
             pass
 
-    assert _epochs(retained, discarded) == [1, 0]
+    assert not user.groups.filter(pk=group.pk).exists()
+    assert _epochs(user, root) == [0, 0]
 
 
-def test_coalesced_membership_rollback_resets_context_and_preserves_raw_signals() -> None:
+def test_caught_membership_add_savepoint_rollback_does_not_join_valid_batch() -> None:
+    retained = User.objects.create_user(username="savepoint-retained-user")
+    rolled_back = User.objects.create_user(username="savepoint-rolled-back-user")
+    group = Group.objects.create(name="savepoint-mixed-group")
+    root = _root("savepoint-mixed-root")
+    RootGrant.objects.create(root=root, group=group, permissions=Permission.BROWSE)
+
+    class RollBackSavepoint(RuntimeError):
+        pass
+
+    with transaction.atomic():
+        retained.groups.add(group)
+        try:
+            with transaction.atomic():
+                rolled_back.groups.add(group)
+                raise RollBackSavepoint
+        except RollBackSavepoint:
+            pass
+
+    assert retained.groups.filter(pk=group.pk).exists()
+    assert not rolled_back.groups.filter(pk=group.pk).exists()
+    assert _epochs(retained, rolled_back, root) == [1, 0, 1]
+
+
+def test_caught_membership_remove_savepoint_rollback_does_not_advance_epochs() -> None:
+    user = User.objects.create_user(username="savepoint-remove-user")
+    group = Group.objects.create(name="savepoint-remove-group")
+    root = _root("savepoint-remove-root")
+    RootGrant.objects.create(root=root, group=group, permissions=Permission.BROWSE)
+    user.groups.add(group)
+    User.objects.filter(pk=user.pk).update(authorization_epoch=0)
+    Root.objects.filter(pk=root.pk).update(authorization_epoch=0)
+
+    class RollBackSavepoint(RuntimeError):
+        pass
+
+    with transaction.atomic():
+        try:
+            with transaction.atomic():
+                user.groups.remove(group)
+                raise RollBackSavepoint
+        except RollBackSavepoint:
+            pass
+
+    assert user.groups.filter(pk=group.pk).exists()
+    assert _epochs(user, root) == [0, 0]
+
+
+def test_membership_suppression_rollback_resets_context_and_preserves_raw_signals() -> None:
     user = User.objects.create_user(username="coalesced-rollback-user")
     group = Group.objects.create(name="coalesced-rollback-group")
     root = _root("coalesced-rollback-root")
@@ -337,7 +457,11 @@ def test_coalesced_membership_rollback_resets_context_and_preserves_raw_signals(
     class RollBackOuter(RuntimeError):
         pass
 
-    with pytest.raises(RollBackOuter), transaction.atomic(), coalesce_authorization_epochs():
+    with (
+        pytest.raises(RollBackOuter),
+        transaction.atomic(),
+        suppress_membership_epoch_updates_for_identity_admin(),
+    ):
         user.groups.add(group)
         assert _epochs(user, root) == [0, 0]
         raise RollBackOuter
@@ -351,10 +475,13 @@ def test_coalesced_membership_rollback_resets_context_and_preserves_raw_signals(
     assert _epochs(user, root) == [1, 1]
 
 
-def test_coalesced_flush_and_cache_invalidation_follow_outer_transaction(
+def test_raw_membership_epoch_and_cache_invalidation_follow_transaction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     user = User.objects.create_user(username="coalesced-commit-user")
+    group = Group.objects.create(name="coalesced-commit-group")
+    root = _root("coalesced-commit-root")
+    RootGrant.objects.create(root=root, group=group, permissions=Permission.BROWSE)
     invalidations: list[tuple[frozenset[object], frozenset[object]]] = []
 
     def record_invalidation(
@@ -371,22 +498,24 @@ def test_coalesced_flush_and_cache_invalidation_follow_outer_transaction(
         pass
 
     with pytest.raises(RollBackTransaction), transaction.atomic():
-        with coalesce_authorization_epochs():
-            advance_identity_user_epochs(user_ids=(user.id,))
-        assert _epochs(user) == [1]
+        user.groups.add(group)
+        assert _epochs(user, root) == [1, 1]
         assert invalidations == []
         raise RollBackTransaction
 
-    assert _epochs(user) == [0]
+    assert not user.groups.filter(pk=group.pk).exists()
+    assert _epochs(user, root) == [0, 0]
     assert invalidations == []
 
-    with transaction.atomic(), coalesce_authorization_epochs():
-        advance_identity_user_epochs(user_ids=(user.id,))
-        advance_identity_user_epochs(user_ids=(user.id,))
+    with transaction.atomic():
+        user.groups.add(group)
         assert invalidations == []
 
-    assert _epochs(user) == [1]
-    assert invalidations == [(frozenset((user.id,)), frozenset())]
+    assert user.groups.filter(pk=group.pk).exists()
+    assert _epochs(user, root) == [1, 1]
+    assert invalidations == [
+        (frozenset((user.id,)), frozenset((root.id,)))
+    ]
 
 
 def test_user_admin_audit_failure_rolls_back_composite_change_and_epochs(
