@@ -180,12 +180,16 @@ def _verify_operation_identity(
     operation: Operation,
     *,
     actor_id: uuid.UUID,
+    request_id: str,
     kind: JobKind,
+    request_hash: bytes,
     intent: Mapping[str, object],
 ) -> None:
     if (
         operation.actor_id != actor_id
+        or operation.request_id != request_id
         or operation.kind != kind
+        or bytes(operation.request_hash) != request_hash
         or operation.intent != intent
     ):
         raise ValueError("operation idempotency conflict")
@@ -295,13 +299,17 @@ def create_operation(
     with transaction.atomic():
         locked_actor = _locked_active_actor(actor)
         existing = (
-            Operation.objects.select_for_update().filter(request_hash=request_hash).first()
+            Operation.objects.select_for_update()
+            .filter(actor_id=locked_actor.id, request_id=bounded_request_id)
+            .first()
         )
         if existing is not None:
             _verify_operation_identity(
                 existing,
                 actor_id=locked_actor.id,
+                request_id=bounded_request_id,
                 kind=operation_kind,
+                request_hash=request_hash,
                 intent=normalized_intent,
             )
             initial = Job.objects.filter(
@@ -342,14 +350,18 @@ def create_operation(
                 return operation
         except IntegrityError:
             conflicting = (
-                Operation.objects.select_for_update().filter(request_hash=request_hash).first()
+                Operation.objects.select_for_update()
+                .filter(actor_id=locked_actor.id, request_id=bounded_request_id)
+                .first()
             )
             if conflicting is None:
                 raise
             _verify_operation_identity(
                 conflicting,
                 actor_id=locked_actor.id,
+                request_id=bounded_request_id,
                 kind=operation_kind,
+                request_hash=request_hash,
                 intent=normalized_intent,
             )
             initial = Job.objects.filter(

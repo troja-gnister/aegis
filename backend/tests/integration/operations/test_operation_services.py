@@ -105,7 +105,7 @@ def test_create_operation_is_idempotent_for_the_exact_normalized_request() -> No
     )
     repeated = create_operation(
         actor=actor,
-        request_id="task10_repeat_request",
+        request_id=REQUEST_ID,
         kind="foundation.probe",
         intent={"roots": []},
     )
@@ -113,6 +113,120 @@ def test_create_operation_is_idempotent_for_the_exact_normalized_request() -> No
     assert repeated.id == first.id
     assert Operation.objects.count() == 1
     assert Job.objects.count() == 1
+
+
+def test_new_request_key_for_identical_intent_creates_a_fresh_operation_and_job() -> None:
+    actor = _actor()
+    first = create_operation(
+        actor=actor,
+        request_id=REQUEST_ID,
+        kind="foundation.probe",
+        intent={"roots": []},
+    )
+    User.objects.filter(pk=actor.pk).update(authorization_epoch=7)
+
+    second = create_operation(
+        actor=actor,
+        request_id="task10_fresh_request",
+        kind="foundation.probe",
+        intent={"roots": []},
+    )
+
+    assert second.id != first.id
+    assert second.request_hash == first.request_hash
+    assert second.authorization_snapshot == {"userEpoch": 7, "rootEpochs": {}}
+    assert Operation.objects.count() == 2
+    assert Job.objects.count() == 2
+
+
+def test_reusing_one_actor_request_key_for_a_different_request_is_a_conflict() -> None:
+    actor = _actor()
+    root = _root()
+    RootGrant.objects.create(root=root, user=actor, permissions=int(Permission.BROWSE))
+    original = create_operation(
+        actor=actor,
+        request_id=REQUEST_ID,
+        kind="foundation.probe",
+        intent={"roots": []},
+    )
+
+    with pytest.raises(ValueError, match="idempotency conflict"):
+        create_operation(
+            actor=actor,
+            request_id=REQUEST_ID,
+            kind="foundation.probe",
+            intent={
+                "roots": [
+                    {"id": str(root.id), "permissions": int(Permission.BROWSE)}
+                ]
+            },
+        )
+
+    assert list(Operation.objects.values_list("id", flat=True)) == [original.id]
+    assert Job.objects.count() == 1
+
+
+def test_new_key_after_permission_restoration_recaptures_current_epochs() -> None:
+    actor = _actor()
+    root = _root(epoch=3)
+    grant = RootGrant.objects.create(
+        root=root,
+        user=actor,
+        permissions=int(Permission.BROWSE),
+    )
+    intent = {
+        "roots": [{"id": str(root.id), "permissions": int(Permission.BROWSE)}]
+    }
+    first = create_operation(
+        actor=actor,
+        request_id=REQUEST_ID,
+        kind="foundation.probe",
+        intent=intent,
+    )
+
+    RootGrant.objects.filter(pk=grant.pk).update(permissions=int(Permission.PREVIEW))
+    RootGrant.objects.filter(pk=grant.pk).update(permissions=int(Permission.BROWSE))
+    Root.objects.filter(pk=root.pk).update(authorization_epoch=8)
+    User.objects.filter(pk=actor.pk).update(authorization_epoch=11)
+    second = create_operation(
+        actor=actor,
+        request_id="task10_restored_request",
+        kind="foundation.probe",
+        intent=intent,
+    )
+
+    assert second.id != first.id
+    assert second.authorization_snapshot == {
+        "userEpoch": 11,
+        "rootEpochs": {str(root.id): 8},
+    }
+    assert second.jobs.count() == 1
+
+
+def test_concurrent_different_keys_for_identical_intent_create_fresh_operations() -> None:
+    actor = _actor()
+    barrier = Barrier(2)
+
+    def create(index: int) -> uuid.UUID:
+        close_old_connections()
+        try:
+            thread_actor = User.objects.get(pk=actor.pk)
+            barrier.wait(timeout=10)
+            return create_operation(
+                actor=thread_actor,
+                request_id=f"task10_parallel_{index}",
+                kind="foundation.probe",
+                intent={"roots": []},
+            ).id
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        operation_ids = list(executor.map(create, range(2)))
+
+    assert operation_ids[0] != operation_ids[1]
+    assert Operation.objects.count() == 2
+    assert Job.objects.count() == 2
 
 
 def test_concurrent_operation_creation_and_enqueue_are_idempotent() -> None:

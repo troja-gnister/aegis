@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterator
+from collections.abc import Collection, Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, ClassVar
@@ -49,6 +49,10 @@ def _operation_deletion_disabled() -> PermissionError:
     return PermissionError("operation deletion is disabled")
 
 
+def _bulk_conflict_updates_disabled(record_type: str) -> PermissionError:
+    return PermissionError(f"{record_type} bulk conflict updates are disabled")
+
+
 def _job_immutable() -> PermissionError:
     return PermissionError("job immutable fields cannot be changed")
 
@@ -78,6 +82,64 @@ class OperationQuerySet(models.QuerySet["Operation"]):
     def delete(self) -> tuple[int, dict[str, int]]:
         raise _operation_deletion_disabled()
 
+    def bulk_create(
+        self,
+        objs: Iterable[Operation],
+        batch_size: int | None = None,
+        ignore_conflicts: bool = False,
+        update_conflicts: bool = False,
+        update_fields: Collection[str] | None = None,
+        unique_fields: Collection[str] | None = None,
+    ) -> list[Operation]:
+        if update_conflicts:
+            raise _bulk_conflict_updates_disabled("operation")
+        return super().bulk_create(
+            objs,
+            batch_size=batch_size,
+            ignore_conflicts=ignore_conflicts,
+            update_conflicts=False,
+            update_fields=update_fields,
+            unique_fields=unique_fields,
+        )
+
+    async def abulk_create(
+        self,
+        objs: Iterable[Operation],
+        batch_size: int | None = None,
+        ignore_conflicts: bool = False,
+        update_conflicts: bool = False,
+        update_fields: Collection[str] | None = None,
+        unique_fields: Collection[str] | None = None,
+    ) -> list[Operation]:
+        if update_conflicts:
+            raise _bulk_conflict_updates_disabled("operation")
+        return await super().abulk_create(
+            objs,
+            batch_size=batch_size,
+            ignore_conflicts=ignore_conflicts,
+            update_conflicts=False,
+            update_fields=update_fields,
+            unique_fields=unique_fields,
+        )
+
+    def bulk_update(
+        self,
+        objs: Iterable[Operation],
+        fields: Iterable[str],
+        batch_size: int | None = None,
+    ) -> int:
+        del objs, fields, batch_size
+        raise _operation_immutable()
+
+    async def abulk_update(
+        self,
+        objs: Iterable[Operation],
+        fields: Iterable[str],
+        batch_size: int | None = None,
+    ) -> int:
+        del objs, fields, batch_size
+        raise _operation_immutable()
+
 
 class Operation(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -89,7 +151,7 @@ class Operation(models.Model):
     )
     request_id = models.CharField(max_length=64, db_index=True)
     kind = models.CharField(max_length=64, choices=JobKind.choices)
-    request_hash = models.BinaryField(max_length=32, unique=True)
+    request_hash = models.BinaryField(max_length=32)
     intent = models.JSONField()
     authorization_snapshot = models.JSONField()
     created_at = models.DateTimeField(auto_now_add=True)
@@ -100,6 +162,10 @@ class Operation(models.Model):
         base_manager_name = "objects"
         default_manager_name = "objects"
         constraints: ClassVar[list[models.BaseConstraint]] = [
+            models.UniqueConstraint(
+                fields=("actor", "request_id"),
+                name="operations_operation_actor_request_uniq",
+            ),
             models.CheckConstraint(
                 condition=models.Q(kind__in=JobKind.values),
                 name="operations_operation_kind_valid",
@@ -148,6 +214,72 @@ class JobQuerySet(models.QuerySet["Job"]):
 
     def delete(self) -> tuple[int, dict[str, int]]:
         raise _job_deletion_disabled()
+
+    def bulk_create(
+        self,
+        objs: Iterable[Job],
+        batch_size: int | None = None,
+        ignore_conflicts: bool = False,
+        update_conflicts: bool = False,
+        update_fields: Collection[str] | None = None,
+        unique_fields: Collection[str] | None = None,
+    ) -> list[Job]:
+        if update_conflicts:
+            raise _bulk_conflict_updates_disabled("job")
+        return super().bulk_create(
+            objs,
+            batch_size=batch_size,
+            ignore_conflicts=ignore_conflicts,
+            update_conflicts=False,
+            update_fields=update_fields,
+            unique_fields=unique_fields,
+        )
+
+    async def abulk_create(
+        self,
+        objs: Iterable[Job],
+        batch_size: int | None = None,
+        ignore_conflicts: bool = False,
+        update_conflicts: bool = False,
+        update_fields: Collection[str] | None = None,
+        unique_fields: Collection[str] | None = None,
+    ) -> list[Job]:
+        if update_conflicts:
+            raise _bulk_conflict_updates_disabled("job")
+        return await super().abulk_create(
+            objs,
+            batch_size=batch_size,
+            ignore_conflicts=ignore_conflicts,
+            update_conflicts=False,
+            update_fields=update_fields,
+            unique_fields=unique_fields,
+        )
+
+    def bulk_update(
+        self,
+        objs: Iterable[Job],
+        fields: Iterable[str],
+        batch_size: int | None = None,
+    ) -> int:
+        field_names = frozenset(fields)
+        if field_names & IMMUTABLE_JOB_FIELDS or field_names - MUTABLE_JOB_FIELDS:
+            raise _job_immutable()
+        if _job_execution_capability.get() is not _JOB_EXECUTION_CAPABILITY:
+            raise _job_execution_guarded()
+        return super().bulk_update(objs, field_names, batch_size=batch_size)
+
+    async def abulk_update(
+        self,
+        objs: Iterable[Job],
+        fields: Iterable[str],
+        batch_size: int | None = None,
+    ) -> int:
+        field_names = frozenset(fields)
+        if field_names & IMMUTABLE_JOB_FIELDS or field_names - MUTABLE_JOB_FIELDS:
+            raise _job_immutable()
+        if _job_execution_capability.get() is not _JOB_EXECUTION_CAPABILITY:
+            raise _job_execution_guarded()
+        return await super().abulk_update(objs, field_names, batch_size=batch_size)
 
 
 class Job(models.Model):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import timedelta
 
@@ -54,6 +55,55 @@ def test_operation_is_immutable_through_instance_queryset_bulk_and_delete_paths(
     assert operation.intent == original
 
 
+def test_operation_bulk_create_cannot_update_an_existing_intent_on_conflict() -> None:
+    operation = _operation()
+    original = operation.intent
+    replacement = Operation(
+        id=operation.id,
+        actor_id=operation.actor_id,
+        request_id=operation.request_id,
+        kind=operation.kind,
+        request_hash=operation.request_hash,
+        intent={"roots": [{"id": str(uuid.uuid4()), "permissions": 1}]},
+        authorization_snapshot=operation.authorization_snapshot,
+    )
+
+    with pytest.raises(PermissionError, match="conflict"):
+        Operation.objects.bulk_create(
+            [replacement],
+            update_conflicts=True,
+            update_fields=("intent",),
+            unique_fields=("pk",),
+        )
+
+    operation.refresh_from_db()
+    assert operation.intent == original
+
+
+def test_operation_async_bulk_create_cannot_update_an_existing_intent_on_conflict() -> None:
+    operation = _operation()
+    replacement = Operation(
+        id=operation.id,
+        actor_id=operation.actor_id,
+        request_id=operation.request_id,
+        kind=operation.kind,
+        request_hash=operation.request_hash,
+        intent={"roots": [{"id": str(uuid.uuid4()), "permissions": 1}]},
+        authorization_snapshot=operation.authorization_snapshot,
+    )
+
+    async def attempt_conflict_update() -> None:
+        await Operation.objects.abulk_create(
+            [replacement],
+            update_conflicts=True,
+            update_fields=("intent",),
+            unique_fields=("pk",),
+        )
+
+    with pytest.raises(PermissionError, match="conflict"):
+        asyncio.run(attempt_conflict_update())
+
+
 def test_job_intent_is_immutable_and_execution_fields_require_the_lease_boundary() -> None:
     operation = _operation()
     job = operation.jobs.get()
@@ -75,6 +125,69 @@ def test_job_intent_is_immutable_and_execution_fields_require_the_lease_boundary
     job.refresh_from_db()
     assert job.priority == 0
     assert job.state == JobState.QUEUED
+
+
+def test_job_bulk_create_cannot_update_intent_or_execution_fields_on_conflict() -> None:
+    operation = _operation()
+    job = operation.jobs.get()
+    replacement = Job(
+        id=job.id,
+        operation=operation,
+        target_role=job.target_role,
+        kind=job.kind,
+        payload=job.payload,
+        priority=123,
+        state=JobState.SUCCEEDED,
+        available_at=job.available_at,
+        attempts=job.attempts,
+        attempt_token=7,
+        max_attempts=job.max_attempts,
+        result={"probe": "forged"},
+    )
+
+    with pytest.raises(PermissionError, match="conflict"):
+        Job.objects.bulk_create(
+            [replacement],
+            update_conflicts=True,
+            update_fields=("priority", "state", "result", "attempt_token"),
+            unique_fields=("pk",),
+        )
+
+    job.refresh_from_db()
+    assert job.priority == 0
+    assert job.state == JobState.QUEUED
+    assert job.result is None
+    assert job.attempt_token == 0
+
+
+def test_job_async_bulk_create_cannot_update_execution_fields_on_conflict() -> None:
+    operation = _operation()
+    job = operation.jobs.get()
+    replacement = Job(
+        id=job.id,
+        operation=operation,
+        target_role=job.target_role,
+        kind=job.kind,
+        payload=job.payload,
+        priority=job.priority,
+        state=JobState.SUCCEEDED,
+        available_at=job.available_at,
+        attempts=job.attempts,
+        attempt_token=7,
+        max_attempts=job.max_attempts,
+        result={"probe": "forged"},
+    )
+
+    async def attempt_conflict_update() -> None:
+        await Job.objects.abulk_create(
+            [replacement],
+            update_conflicts=True,
+            update_fields=("state", "result", "attempt_token"),
+            unique_fields=("pk",),
+        )
+
+    with pytest.raises(PermissionError, match="conflict"):
+        asyncio.run(attempt_conflict_update())
 
 
 @pytest.mark.parametrize(
