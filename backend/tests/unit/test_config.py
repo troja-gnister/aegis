@@ -10,6 +10,7 @@ from aegis.config import ConfigurationError, RuntimeConfig, read_secret
 def _production_environ(secret: Path) -> dict[str, str]:
     return {
         "AEGIS_ENV": "production",
+        "AEGIS_RELEASE_ID": "test-production-release",
         "AEGIS_PUBLIC_URL": "https://files.example.test",
         "AEGIS_ALLOWED_HOSTS": "files.example.test",
         "AEGIS_DJANGO_SECRET_KEY_FILE": str(secret),
