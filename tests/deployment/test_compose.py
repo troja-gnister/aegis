@@ -28,6 +28,11 @@ def rendered_compose(
     *profiles: str, environment: dict[str, str] | None = None
 ) -> dict[str, Any]:
     profile_arguments = [argument for profile in profiles for argument in ("--profile", profile)]
+    compose_environment = (
+        os.environ
+        | {"AEGIS_RELEASE_ID": "test-release-identity"}
+        | (environment or {})
+    )
     result = subprocess.run(
         [
             "docker",
@@ -42,7 +47,7 @@ def rendered_compose(
         check=True,
         capture_output=True,
         text=True,
-        env=os.environ | (environment or {}),
+        env=compose_environment,
     )
     return cast(dict[str, Any], json.loads(result.stdout))
 
@@ -619,3 +624,23 @@ def test_worker_commands_and_volumes_are_role_scoped() -> None:
             "django-secret-key",
             f"db-{role}-password",
         ]
+
+
+def test_backend_release_identity_is_required_and_propagated_to_web_and_workers() -> None:
+    release_id = "release-2026.09.08+compose.1"
+    services = rendered_compose(environment={"AEGIS_RELEASE_ID": release_id})["services"]
+
+    for service_name in ("web", "operations", "indexer", "media"):
+        assert services[service_name]["environment"]["AEGIS_RELEASE_ID"] == release_id
+
+    environment = os.environ.copy()
+    environment.pop("AEGIS_RELEASE_ID", None)
+    result = subprocess.run(
+        ["docker", "compose", "-f", "compose.yaml", "config", "--quiet"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert result.returncode != 0
+    assert "AEGIS_RELEASE_ID" in result.stderr

@@ -533,6 +533,7 @@ def render_artifacts(
     attestation_target = "/run/aegis/mounts.gateway.attestation"
     identity = f"{uid}:{gid}"
     backend_environment = {
+        "AEGIS_RELEASE_ID": "${AEGIS_RELEASE_ID:?AEGIS_RELEASE_ID is required}",
         "AEGIS_MOUNT_MANIFEST": manifest_target,
         "AEGIS_MOUNT_MANIFEST_SHA256": manifest_digest,
     }

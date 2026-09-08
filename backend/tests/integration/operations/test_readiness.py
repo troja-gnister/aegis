@@ -80,6 +80,34 @@ def test_readiness_reports_only_safe_stale_and_missing_role_states() -> None:
 
 @override_settings(
     AEGIS_RELEASE_ID=RELEASE,
+    AEGIS_REQUIRED_WORKER_ROLES=("operations",),
+    AEGIS_WORKER_HEARTBEAT_FRESH_SECONDS=45,
+)
+def test_readiness_rejects_a_fresh_mixed_release_even_with_a_matching_worker() -> None:
+    _heartbeat(role="operations")
+    publish_heartbeat(
+        role="operations",
+        worker_id=str(uuid.uuid4()),
+        release_id="another-release",
+        schema_identity=SCHEMA,
+        manifest_identity=UNCONFIGURED_MANIFEST_IDENTITY,
+        status="idle",
+        metrics={},
+        now=timezone.now(),
+    )
+
+    with (
+        patch("aegis_apps.common.health.database_status", return_value=(True, "ok")),
+        patch("aegis_apps.operations.selectors.current_schema_identity", return_value=SCHEMA),
+    ):
+        ready, checks = readiness()
+
+    assert ready is False
+    assert checks == {"database": "ok", "operations": "stale"}
+
+
+@override_settings(
+    AEGIS_RELEASE_ID=RELEASE,
     AEGIS_REQUIRED_WORKER_ROLES=("operations", "indexer", "media"),
 )
 def test_readiness_fails_closed_on_invalid_manifest_without_disclosing_it() -> None:

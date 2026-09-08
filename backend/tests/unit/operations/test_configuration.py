@@ -42,6 +42,29 @@ def test_worker_runtime_configuration_preserves_valid_required_role_order() -> N
     assert config.heartbeat_seconds == 12.5
 
 
+@pytest.mark.parametrize("release_id", [None, "", "development"])
+def test_production_worker_configuration_requires_a_real_release_identity(
+    release_id: str | None,
+) -> None:
+    environment = {"AEGIS_ENV": "production"}
+    if release_id is not None:
+        environment["AEGIS_RELEASE_ID"] = release_id
+
+    with pytest.raises(ConfigurationError, match="AEGIS_RELEASE_ID"):
+        WorkerRuntimeConfig.from_environ(environment)
+
+
+def test_production_worker_configuration_accepts_an_explicit_release_identity() -> None:
+    config = WorkerRuntimeConfig.from_environ(
+        {
+            "AEGIS_ENV": "production",
+            "AEGIS_RELEASE_ID": "release-2026.09.08+build.2",
+        }
+    )
+
+    assert config.release_id == "release-2026.09.08+build.2"
+
+
 @pytest.mark.parametrize(
     "environment",
     [

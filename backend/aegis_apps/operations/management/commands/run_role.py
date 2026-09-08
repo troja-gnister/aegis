@@ -18,6 +18,7 @@ from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError, CommandParser
 from django.utils import timezone
 
+from aegis_apps.operations.config import validated_release_identity
 from aegis_apps.operations.enums import HeartbeatStatus, JobState, SafeErrorCode, WorkerRole
 from aegis_apps.operations.heartbeats import publish_heartbeat
 from aegis_apps.operations.leases import LeaseToken, claim_next_job, fail_job, finish_job
@@ -146,6 +147,10 @@ def _startup(*, role: object, worker_id: str) -> WorkerIdentity:
     configured_role = settings.AEGIS_PROCESS_ROLE
     if configured_role is not None and configured_role != worker_role:
         raise ValueError("configured process role does not match command role")
+    release_id = validated_release_identity(
+        settings.AEGIS_RELEASE_ID,
+        production=settings.AEGIS_ENVIRONMENT == "production",
+    )
 
     manifest = configured_manifest()
     if manifest is None:
@@ -158,7 +163,7 @@ def _startup(*, role: object, worker_id: str) -> WorkerIdentity:
     identity = WorkerIdentity(
         role=worker_role,
         worker_id=worker_id,
-        release_id=settings.AEGIS_RELEASE_ID,
+        release_id=release_id,
         schema_identity=schema_identity,
         manifest_identity=manifest_identity,
     )

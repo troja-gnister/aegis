@@ -94,6 +94,15 @@ def worker_role_states(
     status_time = _aware_now(now)
     fresh_for = _freshness(freshness_seconds)
     cutoff = status_time - timedelta(seconds=fresh_for)
+    active = Q(
+        last_seen_at__gte=cutoff,
+        status__in=(HeartbeatStatus.IDLE, HeartbeatStatus.RUNNING),
+    )
+    compatible = Q(
+        release_id=release_id,
+        schema_identity=schema_identity,
+        manifest_identity=manifest_identity,
+    )
     rows = (
         WorkerHeartbeat.objects.filter(role__in=required_roles)
         .values("role")
@@ -101,23 +110,21 @@ def worker_role_states(
             total=Count("id"),
             healthy=Count(
                 "id",
-                filter=Q(
-                    last_seen_at__gte=cutoff,
-                    status__in=(HeartbeatStatus.IDLE, HeartbeatStatus.RUNNING),
-                    release_id=release_id,
-                    schema_identity=schema_identity,
-                    manifest_identity=manifest_identity,
-                ),
+                filter=active & compatible,
             ),
+            incompatible=Count("id", filter=active & ~compatible),
         )
     )
-    counts = {row["role"]: (row["total"], row["healthy"]) for row in rows}
+    counts = {
+        row["role"]: (row["total"], row["healthy"], row["incompatible"])
+        for row in rows
+    }
     return {
         role: (
             "missing"
             if role not in counts
             else "healthy"
-            if counts[role][1] > 0
+            if counts[role][1] > 0 and counts[role][2] == 0
             else "stale"
         )
         for role in required_roles

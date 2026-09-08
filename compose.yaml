@@ -16,14 +16,15 @@ x-backend-runtime: &backend-runtime
   restart: unless-stopped
 
 x-backend-environment: &backend-environment
-  AEGIS_ENV: development
+  AEGIS_ENV: "${AEGIS_ENV:-development}"
+  AEGIS_RELEASE_ID: "${AEGIS_RELEASE_ID:?AEGIS_RELEASE_ID is required}"
   AEGIS_PUBLIC_URL: "${AEGIS_PUBLIC_URL:-http://localhost:8080}"
   AEGIS_ALLOWED_HOSTS: "${AEGIS_ALLOWED_HOSTS:-localhost,127.0.0.1,web}"
   AEGIS_DB_HOST: "${AEGIS_DB_HOST:-postgres}"
   AEGIS_DB_PORT: "${AEGIS_DB_PORT:-5432}"
   AEGIS_DB_NAME: "${AEGIS_DB_NAME:-aegis}"
   AEGIS_DJANGO_SECRET_KEY_FILE: /run/secrets/django_secret_key
-  DJANGO_SETTINGS_MODULE: aegis.settings.development
+  DJANGO_SETTINGS_MODULE: "${DJANGO_SETTINGS_MODULE:-aegis.settings.development}"
 
 services:
   postgres:

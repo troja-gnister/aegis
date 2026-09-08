@@ -110,6 +110,27 @@ def test_process_role_mismatch_fails_before_manifest_or_database_work() -> None:
     claim_job.assert_not_called()
 
 
+@pytest.mark.parametrize("release_id", ["", "development"])
+@override_settings(AEGIS_ENVIRONMENT="production", AEGIS_PROCESS_ROLE="operations")
+def test_production_startup_rejects_placeholder_release_before_attestation(
+    release_id: str,
+) -> None:
+    with (
+        override_settings(AEGIS_RELEASE_ID=release_id),
+        patch.object(worker_command, "configured_manifest") as manifest,
+        patch.object(worker_command, "current_schema_identity") as schema,
+        patch.object(worker_command, "publish_heartbeat") as heartbeat,
+        patch.object(worker_command, "claim_next_job") as claim_job,
+        pytest.raises(CommandError, match=r"^worker startup failed$"),
+    ):
+        _call_worker("operations")
+
+    manifest.assert_not_called()
+    schema.assert_not_called()
+    heartbeat.assert_not_called()
+    claim_job.assert_not_called()
+
+
 @override_settings(AEGIS_PROCESS_ROLE="operations")
 def test_attestation_failure_is_generic_and_precedes_schema_heartbeat_and_claim() -> None:
     manifest = SimpleNamespace(digest=MANIFEST_ID)

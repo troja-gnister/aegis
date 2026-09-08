@@ -8,7 +8,16 @@ from dataclasses import dataclass
 from aegis.config import ConfigurationError
 
 WORKER_ROLES = ("operations", "indexer", "media")
+DEVELOPMENT_RELEASE_ID = "development"
 _SAFE_IDENTITY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+-]{0,95}$")
+
+
+def validated_release_identity(value: object, *, production: bool) -> str:
+    if not isinstance(value, str) or _SAFE_IDENTITY_RE.fullmatch(value) is None:
+        raise ConfigurationError("AEGIS_RELEASE_ID is invalid")
+    if production and value.casefold() == DEVELOPMENT_RELEASE_ID:
+        raise ConfigurationError("AEGIS_RELEASE_ID is required in production")
+    return value
 
 
 def _bounded_float(
@@ -48,9 +57,11 @@ class WorkerRuntimeConfig:
 
     @classmethod
     def from_environ(cls, environ: Mapping[str, str]) -> WorkerRuntimeConfig:
-        release_id = environ.get("AEGIS_RELEASE_ID", "development")
-        if not isinstance(release_id, str) or _SAFE_IDENTITY_RE.fullmatch(release_id) is None:
-            raise ConfigurationError("AEGIS_RELEASE_ID is invalid")
+        environment = environ.get("AEGIS_ENV", "development").strip().lower()
+        release_id = validated_release_identity(
+            environ.get("AEGIS_RELEASE_ID", DEVELOPMENT_RELEASE_ID),
+            production=environment == "production",
+        )
 
         process_role = environ.get("AEGIS_PROCESS_ROLE")
         if process_role is not None and process_role not in WORKER_ROLES:
