@@ -23,3 +23,10 @@ class HeartbeatStatus(models.TextChoices):
     IDLE = "idle", "Idle"
     RUNNING = "running", "Running"
     STOPPING = "stopping", "Stopping"
+
+
+class SafeErrorCode(models.TextChoices):
+    AUTHORIZATION_STALE = "authorization_stale", "Authorization stale"
+    ATTEMPTS_EXHAUSTED = "attempts_exhausted", "Attempts exhausted"
+    HANDLER_FAILED = "handler_failed", "Handler failed"
+    RETRYABLE_FAILURE = "retryable_failure", "Retryable failure"

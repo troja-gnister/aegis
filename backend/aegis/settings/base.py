@@ -35,6 +35,7 @@ INSTALLED_APPS = [
     "aegis_apps.identity",
     "aegis_apps.audit",
     "aegis_apps.roots",
+    "aegis_apps.operations",
 ]
 
 MIDDLEWARE = [
