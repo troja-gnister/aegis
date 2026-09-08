@@ -17,7 +17,11 @@ from aegis_apps.roots.models import Root, RootGrant
 
 from .enums import JobKind, JobState, WorkerRole
 from .models import MAX_JOB_ATTEMPTS, MAX_JOB_PRIORITY, MIN_JOB_PRIORITY, Job, Operation
-from .serializers import canonical_json_bytes, normalize_probe_intent
+from .serializers import (
+    canonical_json_bytes,
+    normalize_probe_intent,
+)
+from .serializers import validate_authorization_snapshot as validate_snapshot_schema
 
 DEFAULT_MAX_ATTEMPTS: Final = 5
 MAX_JOB_SCHEDULE_DELTA: Final = timedelta(days=366)
@@ -364,3 +368,71 @@ def create_operation(
                 explicit_available_at=None,
             )
             return conflicting
+
+
+def validate_authorization_snapshot(operation: Operation) -> bool:
+    if not isinstance(operation, Operation) or not isinstance(operation.pk, uuid.UUID):
+        return False
+    with transaction.atomic():
+        stored = (
+            Operation.objects.filter(pk=operation.pk)
+            .values("actor_id", "intent", "authorization_snapshot")
+            .first()
+        )
+        if stored is None or not isinstance(stored["actor_id"], uuid.UUID):
+            return False
+        try:
+            normalized_intent = normalize_probe_intent(stored["intent"])
+            if normalized_intent != stored["intent"]:
+                return False
+            snapshot = validate_snapshot_schema(
+                stored["authorization_snapshot"],
+                intent=normalized_intent,
+            )
+        except ValueError:
+            return False
+
+        requirements: dict[uuid.UUID, int] = {}
+        for item in _normalized_roots(normalized_intent):
+            root_id = uuid.UUID(str(item["id"]))
+            permissions = item["permissions"]
+            if type(permissions) is not int:
+                return False
+            requirements[root_id] = permissions
+
+        roots = list(
+            Root.objects.select_for_update()
+            .filter(pk__in=requirements, active=True)
+            .order_by("id")
+            .values_list("id", "authorization_epoch")
+        )
+        if len(roots) != len(requirements):
+            return False
+        actor = (
+            User.objects.select_for_update()
+            .filter(pk=stored["actor_id"], is_active=True)
+            .values("id", "authorization_epoch")
+            .first()
+        )
+        if actor is None or actor["authorization_epoch"] != snapshot["userEpoch"]:
+            return False
+
+        root_epochs = snapshot["rootEpochs"]
+        if not isinstance(root_epochs, Mapping):
+            return False
+        if any(root_epochs.get(str(root_id)) != epoch for root_id, epoch in roots):
+            return False
+
+        effective_masks = {
+            root_id: mask
+            for root_id, mask in (
+                RootGrant.objects.filter(root_id__in=requirements, root__active=True)
+                .filter(Q(user_id=actor["id"]) | Q(group__user=actor["id"]))
+                .values_list("root_id")
+                .annotate(mask=BitOr("permissions"))
+            )
+        }
+        return all(
+            effective_masks.get(root_id, 0) & required_mask == required_mask
+            for root_id, required_mask in requirements.items()
+        )
