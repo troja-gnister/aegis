@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from functools import partial
 
 from aegisctl.mounts import SLOT_ID_RE
@@ -27,6 +29,18 @@ class _Unset:
 
 _UNSET = _Unset()
 _ROOT_SLOT_LOCK_DOMAIN = b"aegis.authorization.root-slot.v1\x00"
+
+
+class _EpochBatch:
+    def __init__(self) -> None:
+        self.user_ids: set[uuid.UUID] = set()
+        self.root_ids: set[uuid.UUID] = set()
+
+
+_epoch_batch: ContextVar[_EpochBatch | None] = ContextVar(
+    "aegis_authorization_epoch_batch",
+    default=None,
+)
 
 
 def _validate_common(*, actor: User, request_id: str) -> None:
@@ -98,13 +112,15 @@ def _lock_users(user_ids: Iterable[uuid.UUID]) -> frozenset[uuid.UUID]:
     )
 
 
-def _advance_epochs(
+def _apply_epoch_advances(
     *,
     root_ids: Collection[uuid.UUID],
     user_ids: Collection[uuid.UUID],
 ) -> None:
     roots = frozenset(root_ids)
     users = frozenset(user_ids)
+    if not roots and not users:
+        return
     if roots:
         Root.objects.filter(pk__in=roots).update(
             authorization_epoch=F("authorization_epoch") + 1
@@ -120,6 +136,54 @@ def _advance_epochs(
             root_ids=roots,
         )
     )
+
+
+def _advance_epochs(
+    *,
+    root_ids: Collection[uuid.UUID],
+    user_ids: Collection[uuid.UUID],
+) -> None:
+    roots = frozenset(root_ids)
+    users = frozenset(user_ids)
+    batch = _epoch_batch.get()
+    if batch is not None:
+        batch.root_ids.update(roots)
+        batch.user_ids.update(users)
+        return
+    _apply_epoch_advances(root_ids=roots, user_ids=users)
+
+
+@contextmanager
+def coalesce_authorization_epochs() -> Iterator[None]:
+    if not connection.in_atomic_block:
+        raise RuntimeError("authorization epoch coalescing requires a transaction")
+    existing = _epoch_batch.get()
+    if existing is not None:
+        prior_user_ids = existing.user_ids.copy()
+        prior_root_ids = existing.root_ids.copy()
+        try:
+            yield
+        except BaseException:
+            existing.user_ids.clear()
+            existing.user_ids.update(prior_user_ids)
+            existing.root_ids.clear()
+            existing.root_ids.update(prior_root_ids)
+            raise
+        return
+
+    batch = _EpochBatch()
+    token = _epoch_batch.set(batch)
+    try:
+        yield
+    except BaseException:
+        raise
+    else:
+        _apply_epoch_advances(
+            root_ids=batch.root_ids,
+            user_ids=batch.user_ids,
+        )
+    finally:
+        _epoch_batch.reset(token)
 
 
 def _root_audit(
@@ -460,16 +524,11 @@ def advance_roots_for_user_active_change(*, user_id: uuid.UUID) -> None:
             .filter(pk__in=root_ids)
             .values_list("pk", flat=True)
         )
-        Root.objects.filter(pk__in=root_ids).update(
-            authorization_epoch=F("authorization_epoch") + 1
-        )
-    transaction.on_commit(
-        partial(
-            invalidate_authorization_cache,
-            user_ids=(user_id,),
-            root_ids=root_ids,
-        )
-    )
+    _advance_epochs(root_ids=root_ids, user_ids=(user_id,))
+
+
+def advance_identity_user_epochs(*, user_ids: Collection[uuid.UUID]) -> None:
+    _advance_epochs(root_ids=(), user_ids=user_ids)
 
 
 def advance_membership_epochs(
