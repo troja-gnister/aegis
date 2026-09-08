@@ -127,6 +127,8 @@ def test_render_is_deterministic_and_enforces_role_scoped_long_bind_mounts(
     assert services["indexer"]["user"] == f"{os.geteuid()}:{os.getegid()}"
     assert services["media"]["user"] == f"{os.geteuid()}:{os.getegid()}"
     assert "user" not in services["gateway"]
+    for role in ("operations", "indexer", "media"):
+        assert services[role]["environment"]["AEGIS_PROCESS_ROLE"] == role
 
     root_targets = {"/srv/aegis/roots/photos", "/srv/aegis/roots/uploads"}
     web_targets = {mount["target"] for mount in services["web"]["volumes"]}

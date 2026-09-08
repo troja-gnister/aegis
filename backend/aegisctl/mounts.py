@@ -557,7 +557,10 @@ def render_artifacts(
         },
         "operations": {
             "user": identity,
-            "environment": backend_environment,
+            "environment": {
+                **backend_environment,
+                "AEGIS_PROCESS_ROLE": "operations",
+            },
             "command": [
                 "/bin/sh",
                 "-ec",
@@ -568,7 +571,10 @@ def render_artifacts(
         },
         "indexer": {
             "user": identity,
-            "environment": backend_environment,
+            "environment": {
+                **backend_environment,
+                "AEGIS_PROCESS_ROLE": "indexer",
+            },
             "command": [
                 "/bin/sh",
                 "-ec",
@@ -579,7 +585,10 @@ def render_artifacts(
         },
         "media": {
             "user": identity,
-            "environment": backend_environment,
+            "environment": {
+                **backend_environment,
+                "AEGIS_PROCESS_ROLE": "media",
+            },
             "command": [
                 "/bin/sh",
                 "-ec",

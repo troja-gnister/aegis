@@ -1,0 +1,413 @@
+from __future__ import annotations
+
+import signal
+import uuid
+from types import SimpleNamespace
+from unittest.mock import Mock, call, patch
+
+import pytest
+from aegis_apps.identity.models import User
+from aegis_apps.operations.enums import HeartbeatStatus, JobState, SafeErrorCode
+from aegis_apps.operations.leases import LeaseToken, claim_next_job
+from aegis_apps.operations.management.commands import run_role as worker_command
+from aegis_apps.operations.models import Job, Operation, WorkerHeartbeat
+from aegis_apps.operations.selectors import SchemaCompatibilityError
+from aegis_apps.operations.services import create_operation, enqueue_job
+from aegis_apps.roots.models import Root, RootGrant
+from aegis_apps.roots.permissions import Permission
+from aegisctl.mounts import MountAttestationError
+from django.core.management import CommandError, call_command
+from django.test import override_settings
+
+pytestmark = [pytest.mark.integration, pytest.mark.django_db(transaction=True)]
+
+WORKER_ID = "10000000-0000-4000-8000-000000000001"
+SCHEMA_ID = "sha256:" + "a" * 64
+MANIFEST_ID = "b" * 64
+
+
+def _operation(*, role: str = "operations") -> tuple[User, Operation, Job]:
+    actor = User.objects.create_user(username=f"worker-{uuid.uuid4()}")
+    operation = create_operation(
+        actor=actor,
+        request_id="task10_worker_request",
+        kind="foundation.probe",
+        intent={"roots": []},
+    )
+    if role == "operations":
+        return actor, operation, operation.jobs.get()
+    return actor, operation, enqueue_job(operation=operation, target_role=role)
+
+
+def _call_worker(role: str, *, once: bool = True) -> None:
+    with patch.object(worker_command, "_new_worker_id", return_value=WORKER_ID):
+        call_command("run_role", role=role, once=once)
+
+
+@override_settings(
+    AEGIS_PROCESS_ROLE="indexer",
+    AEGIS_RELEASE_ID="release-10",
+)
+def test_startup_orders_role_validation_attestation_schema_heartbeat_then_claim() -> None:
+    events: list[str] = []
+    manifest = SimpleNamespace(digest=MANIFEST_ID)
+
+    def load_manifest() -> SimpleNamespace:
+        events.append("manifest")
+        return manifest
+
+    def attest(candidate: object, role: str) -> None:
+        assert candidate is manifest
+        events.append(f"attest:{role}")
+
+    def schema() -> str:
+        events.append("schema")
+        return SCHEMA_ID
+
+    def heartbeat(**kwargs: object) -> None:
+        events.append(f"heartbeat:{kwargs['status']}")
+
+    def claim_job(role: str, worker_id: str, now: object) -> None:
+        del now
+        assert worker_id == WORKER_ID
+        events.append(f"claim:{role}")
+        return None
+
+    with (
+        patch.object(worker_command, "configured_manifest", side_effect=load_manifest),
+        patch.object(worker_command, "attest_mounts", side_effect=attest),
+        patch.object(worker_command, "current_schema_identity", side_effect=schema),
+        patch.object(worker_command, "publish_heartbeat", side_effect=heartbeat),
+        patch.object(worker_command, "claim_next_job", side_effect=claim_job),
+    ):
+        _call_worker("indexer")
+
+    assert events == [
+        "manifest",
+        "attest:indexer",
+        "schema",
+        f"heartbeat:{HeartbeatStatus.IDLE}",
+        "claim:indexer",
+        f"heartbeat:{HeartbeatStatus.STOPPING}",
+    ]
+
+
+@override_settings(AEGIS_PROCESS_ROLE="media")
+def test_process_role_mismatch_fails_before_manifest_or_database_work() -> None:
+    with (
+        patch.object(worker_command, "configured_manifest") as manifest,
+        patch.object(worker_command, "current_schema_identity") as schema,
+        patch.object(worker_command, "publish_heartbeat") as heartbeat,
+        patch.object(worker_command, "claim_next_job") as claim_job,
+        pytest.raises(CommandError, match=r"^worker startup failed$") as caught,
+    ):
+        _call_worker("operations")
+
+    assert "media" not in str(caught.value)
+    manifest.assert_not_called()
+    schema.assert_not_called()
+    heartbeat.assert_not_called()
+    claim_job.assert_not_called()
+
+
+@override_settings(AEGIS_PROCESS_ROLE="operations")
+def test_attestation_failure_is_generic_and_precedes_schema_heartbeat_and_claim() -> None:
+    manifest = SimpleNamespace(digest=MANIFEST_ID)
+    with (
+        patch.object(worker_command, "configured_manifest", return_value=manifest),
+        patch.object(
+            worker_command,
+            "attest_mounts",
+            side_effect=MountAttestationError("/private/root must never escape"),
+        ),
+        patch.object(worker_command, "current_schema_identity") as schema,
+        patch.object(worker_command, "publish_heartbeat") as heartbeat,
+        patch.object(worker_command, "claim_next_job") as claim_job,
+        pytest.raises(CommandError, match=r"^worker startup failed$") as caught,
+    ):
+        _call_worker("operations")
+
+    assert "/private/root" not in str(caught.value)
+    schema.assert_not_called()
+    heartbeat.assert_not_called()
+    claim_job.assert_not_called()
+
+
+@override_settings(AEGIS_PROCESS_ROLE="operations")
+def test_schema_failure_precedes_heartbeat_and_claim() -> None:
+    with (
+        patch.object(worker_command, "configured_manifest", return_value=None),
+        patch.object(
+            worker_command,
+            "current_schema_identity",
+            side_effect=SchemaCompatibilityError("pending private migration"),
+        ),
+        patch.object(worker_command, "publish_heartbeat") as heartbeat,
+        patch.object(worker_command, "claim_next_job") as claim_job,
+        pytest.raises(CommandError, match=r"^worker startup failed$") as caught,
+    ):
+        _call_worker("operations")
+
+    assert "migration" not in str(caught.value)
+    heartbeat.assert_not_called()
+    claim_job.assert_not_called()
+
+
+@override_settings(AEGIS_PROCESS_ROLE="indexer")
+def test_once_claims_only_its_role_and_finishes_foundation_probe() -> None:
+    _actor, operation, indexer_job = _operation(role="indexer")
+    operations_job = operation.jobs.get(target_role="operations")
+
+    _call_worker("indexer")
+
+    indexer_job.refresh_from_db()
+    operations_job.refresh_from_db()
+    assert indexer_job.state == JobState.SUCCEEDED
+    assert indexer_job.result == {"ok": True}
+    assert operations_job.state == JobState.QUEUED
+    heartbeat = WorkerHeartbeat.objects.get(role="indexer", worker_id=WORKER_ID)
+    assert heartbeat.status == HeartbeatStatus.STOPPING
+    assert heartbeat.current_job_id is None
+
+
+@override_settings(AEGIS_PROCESS_ROLE="operations")
+def test_dispatch_revalidates_authorization_before_handler_work() -> None:
+    actor = User.objects.create_user(username="worker-authorization-stale")
+    root = Root.objects.create(
+        slot_id="worker-authorization-root",
+        display_name="Opaque root",
+        mode=Root.Mode.READ_ONLY,
+        active=True,
+    )
+    RootGrant.objects.create(root=root, user=actor, permissions=int(Permission.BROWSE))
+    operation = create_operation(
+        actor=actor,
+        request_id="task10_worker_stale",
+        kind="foundation.probe",
+        intent={"roots": [{"id": str(root.id), "permissions": int(Permission.BROWSE)}]},
+    )
+    actor.authorization_epoch += 1
+    actor.save(update_fields=("authorization_epoch",))
+    handler = Mock(return_value={"ok": True})
+
+    with patch.dict(
+        worker_command.ROLE_HANDLERS["operations"],
+        {"foundation.probe": handler},
+    ):
+        _call_worker("operations")
+
+    handler.assert_not_called()
+    job = operation.jobs.get()
+    assert job.state == JobState.FAILED
+    assert job.safe_error_code == SafeErrorCode.AUTHORIZATION_STALE
+    assert job.result is None
+
+
+@override_settings(AEGIS_PROCESS_ROLE="media")
+def test_shutdown_requested_during_handler_finishes_job_stops_claiming_and_heartbeats() -> None:
+    _actor, _operation_record, media_job = _operation(role="media")
+    handled: list[uuid.UUID] = []
+
+    def handler(lease: LeaseToken) -> dict[str, bool]:
+        handled.append(lease.job_id)
+        worker_command.request_shutdown()
+        return {"ok": True}
+
+    with (
+        patch.dict(
+            worker_command.ROLE_HANDLERS["media"],
+            {"foundation.probe": handler},
+        ),
+        patch.object(signal, "signal", wraps=signal.signal) as install_signal,
+        patch(
+            "aegis_apps.operations.management.commands.run_role.claim_next_job",
+            wraps=claim_next_job,
+        ) as claim,
+    ):
+        _call_worker("media", once=False)
+
+    assert handled == [media_job.id]
+    assert claim.call_count == 1
+    media_job.refresh_from_db()
+    assert media_job.state == JobState.SUCCEEDED
+    heartbeat = WorkerHeartbeat.objects.get(role="media", worker_id=WORKER_ID)
+    assert heartbeat.status == HeartbeatStatus.STOPPING
+    installed = [item.args[:2] for item in install_signal.call_args_list[:2]]
+    assert installed[0][0] == signal.SIGTERM
+    assert installed[1][0] == signal.SIGINT
+
+
+def test_handler_registry_is_closed_for_all_three_roles() -> None:
+    assert tuple(worker_command.ROLE_HANDLERS) == ("operations", "indexer", "media")
+    for handlers in worker_command.ROLE_HANDLERS.values():
+        assert handlers == {"foundation.probe": worker_command.run_foundation_probe}
+
+
+@override_settings(AEGIS_PROCESS_ROLE="operations")
+def test_command_generates_one_opaque_uuid_and_reuses_it_for_heartbeat_and_claim() -> None:
+    observed_worker_ids: list[str] = []
+
+    def heartbeat(**kwargs: object) -> None:
+        observed_worker_ids.append(str(kwargs["worker_id"]))
+
+    def claim_job(role: str, worker_id: str, now: object) -> None:
+        del role, now
+        observed_worker_ids.append(worker_id)
+        return None
+
+    with (
+        patch.object(worker_command, "configured_manifest", return_value=None),
+        patch.object(worker_command, "current_schema_identity", return_value=SCHEMA_ID),
+        patch.object(worker_command, "publish_heartbeat", side_effect=heartbeat),
+        patch.object(worker_command, "claim_next_job", side_effect=claim_job),
+    ):
+        call_command("run_role", role="operations", once=True)
+
+    assert len(observed_worker_ids) == 3
+    assert len(set(observed_worker_ids)) == 1
+    assert str(uuid.UUID(observed_worker_ids[0])) == observed_worker_ids[0]
+
+
+@override_settings(AEGIS_PROCESS_ROLE="operations")
+def test_once_claims_at_most_once_and_never_sleeps() -> None:
+    identity = worker_command.WorkerIdentity(
+        role="operations",
+        worker_id=WORKER_ID,
+        release_id="release-10",
+        schema_identity=SCHEMA_ID,
+        manifest_identity="unconfigured:v1",
+    )
+    sleeper = Mock()
+    worker_command._reset_shutdown()
+    with (
+        patch.object(worker_command, "_startup", return_value=identity),
+        patch.object(worker_command, "_publish"),
+        patch.object(worker_command, "claim_next_job", return_value=None) as claim_job,
+    ):
+        worker_command.run_worker(
+            role="operations",
+            once=True,
+            worker_id=WORKER_ID,
+            sleep=sleeper,
+        )
+
+    claim_job.assert_called_once()
+    sleeper.assert_not_called()
+
+
+@override_settings(
+    AEGIS_PROCESS_ROLE="operations",
+    AEGIS_WORKER_HEARTBEAT_SECONDS=10.0,
+    AEGIS_QUEUE_POLL_SECONDS=1.0,
+    AEGIS_QUEUE_POLL_JITTER_SECONDS=0.25,
+)
+def test_normal_polling_has_bounded_jitter_no_busy_wait_and_periodic_heartbeat() -> None:
+    identity = worker_command.WorkerIdentity(
+        role="operations",
+        worker_id=WORKER_ID,
+        release_id="release-10",
+        schema_identity=SCHEMA_ID,
+        manifest_identity="unconfigured:v1",
+    )
+    monotonic_now = 0.0
+    sleeps: list[float] = []
+    statuses: list[HeartbeatStatus] = []
+    claims = 0
+
+    def monotonic() -> float:
+        return monotonic_now
+
+    def sleep(delay: float) -> None:
+        nonlocal monotonic_now
+        sleeps.append(delay)
+        monotonic_now += delay
+
+    def claim_job(role: str, worker_id: str, now: object) -> None:
+        nonlocal claims
+        del role, worker_id, now
+        claims += 1
+        if claims == 9:
+            worker_command.request_shutdown()
+        return None
+
+    def publish(
+        candidate: worker_command.WorkerIdentity,
+        *,
+        status: HeartbeatStatus,
+        job_id: uuid.UUID | None,
+    ) -> None:
+        del candidate, job_id
+        statuses.append(status)
+
+    worker_command._reset_shutdown()
+    with (
+        patch.object(worker_command, "_startup", return_value=identity),
+        patch.object(worker_command, "_publish", side_effect=publish),
+        patch.object(worker_command, "claim_next_job", side_effect=claim_job),
+    ):
+        worker_command.run_worker(
+            role="operations",
+            once=False,
+            worker_id=WORKER_ID,
+            sleep=sleep,
+            monotonic=monotonic,
+            jitter=lambda low, high: high,
+        )
+
+    assert sleeps
+    assert all(0 < delay <= 1.25 for delay in sleeps)
+    assert monotonic_now == 10.0
+    assert statuses == [HeartbeatStatus.IDLE, HeartbeatStatus.STOPPING]
+
+
+@override_settings(AEGIS_PROCESS_ROLE="operations")
+def test_handler_exception_persists_only_the_fixed_safe_failure() -> None:
+    _actor, operation, _job = _operation()
+    handler = Mock(side_effect=RuntimeError("/private/root secret-token private-name.mov"))
+
+    with patch.dict(
+        worker_command.ROLE_HANDLERS["operations"],
+        {"foundation.probe": handler},
+    ):
+        _call_worker("operations")
+
+    job = operation.jobs.get()
+    assert job.state == JobState.FAILED
+    assert job.safe_error_code == SafeErrorCode.HANDLER_FAILED
+    assert job.safe_error_detail == "The job handler failed safely."
+    assert "private" not in job.safe_error_detail.lower()
+
+
+@override_settings(AEGIS_PROCESS_ROLE="operations")
+def test_management_command_does_not_accept_an_operator_worker_id() -> None:
+    with (
+        patch.object(worker_command, "configured_manifest") as manifest,
+        pytest.raises(TypeError, match="Unknown option"),
+    ):
+        call_command("run_role", role="operations", once=True, worker_id=WORKER_ID)
+
+    manifest.assert_not_called()
+
+
+@override_settings(AEGIS_PROCESS_ROLE="operations")
+def test_signal_handlers_are_restored_after_once_run() -> None:
+    previous_term = Mock()
+    previous_int = Mock()
+    with (
+        patch.object(worker_command, "configured_manifest", return_value=None),
+        patch.object(worker_command, "current_schema_identity", return_value=SCHEMA_ID),
+        patch.object(worker_command, "publish_heartbeat"),
+        patch.object(worker_command, "claim_next_job", return_value=None),
+        patch.object(
+            signal,
+            "getsignal",
+            side_effect=(previous_term, previous_int),
+        ),
+        patch.object(signal, "signal") as set_signal,
+    ):
+        _call_worker("operations")
+
+    assert set_signal.call_args_list[-2:] == [
+        call(signal.SIGINT, previous_int),
+        call(signal.SIGTERM, previous_term),
+    ]

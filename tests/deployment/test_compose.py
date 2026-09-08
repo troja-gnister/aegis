@@ -613,6 +613,7 @@ def test_worker_commands_and_volumes_are_role_scoped() -> None:
 
     for role, volume_sources in expected.items():
         assert services[role]["command"] == ["python", "manage.py", "run_role", "--role", role]
+        assert services[role]["environment"]["AEGIS_PROCESS_ROLE"] == role
         assert {mount["source"] for mount in services[role].get("volumes", [])} == volume_sources
         assert [secret["source"] for secret in services[role]["secrets"]] == [
             "django-secret-key",

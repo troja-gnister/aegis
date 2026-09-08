@@ -113,6 +113,7 @@ services:
     command: [python, manage.py, run_role, --role, operations]
     environment:
       <<: *backend-environment
+      AEGIS_PROCESS_ROLE: operations
       AEGIS_DB_USER: aegis_operations
       AEGIS_DB_PASSWORD_FILE: /run/secrets/db_operations_password
     volumes:
@@ -131,6 +132,7 @@ services:
     command: [python, manage.py, run_role, --role, indexer]
     environment:
       <<: *backend-environment
+      AEGIS_PROCESS_ROLE: indexer
       AEGIS_DB_USER: aegis_indexer
       AEGIS_DB_PASSWORD_FILE: /run/secrets/db_indexer_password
     secrets:
@@ -147,6 +149,7 @@ services:
     command: [python, manage.py, run_role, --role, media]
     environment:
       <<: *backend-environment
+      AEGIS_PROCESS_ROLE: media
       AEGIS_DB_USER: aegis_media
       AEGIS_DB_PASSWORD_FILE: /run/secrets/db_media_password
     volumes:
