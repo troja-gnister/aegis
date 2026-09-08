@@ -105,9 +105,13 @@ def save_group_from_admin(
         if not created and not changes:
             return group
 
-        previous_member_ids = (
-            set(group.user_set.values_list("pk", flat=True)) if not created else set()
-        )
+        if created:
+            previous_member_ids: set[uuid.UUID] = set()
+        else:
+            locked_group = Group.objects.select_for_update().get(pk=group.pk)
+            previous_member_ids = set(
+                locked_group.user_set.values_list("pk", flat=True)
+            )
 
         group.save()
         with suppress_membership_epoch_updates_for_identity_admin():

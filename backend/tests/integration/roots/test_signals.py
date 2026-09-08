@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, Event
+from typing import Any
 
 import pytest
 from aegis_apps.audit.models import AuditEvent
-from aegis_apps.identity.admin_services import set_user_active
+from aegis_apps.identity.admin import AegisGroupAdminForm
+from aegis_apps.identity.admin_services import save_group_from_admin, set_user_active
 from aegis_apps.identity.models import User
+from aegis_apps.identity.session_policy import AUTHORIZATION_EPOCH
 from aegis_apps.roots.models import Root, RootGrant
 from aegis_apps.roots.permissions import Permission
 from aegis_apps.roots.selectors import clear_authorization_cache, effective_permissions
@@ -15,12 +20,14 @@ from aegis_apps.roots.signals import (
 )
 from django.contrib.auth.models import Group
 from django.contrib.auth.models import Permission as DjangoPermission
-from django.db import transaction
+from django.contrib.sessions.models import Session
+from django.db import close_old_connections, connection, transaction
 from django.test import Client
 from django.urls import reverse
 
 pytestmark = [pytest.mark.integration, pytest.mark.django_db(transaction=True)]
 REQUEST_ID = "membership_request_1234"
+type _ExecuteQuery = Callable[[str, Any, bool, dict[str, Any]], Any]
 
 
 @pytest.fixture(autouse=True)
@@ -360,6 +367,126 @@ def test_group_admin_combined_permission_and_member_replacement_coalesces_root()
     assert list(AuditEvent.objects.values_list("event_type", flat=True)) == [
         "identity.group.changed"
     ]
+
+
+def test_overlapping_group_admin_saves_snapshot_members_after_serialization() -> None:
+    actor = User.objects.create_superuser(username="overlapping-group-admin-actor")
+    first = User.objects.create_user(username="overlapping-group-first")
+    displaced = User.objects.create_user(username="overlapping-group-displaced")
+    final = User.objects.create_user(username="overlapping-group-final")
+    group = Group.objects.create(name="Overlapping group")
+    group.user_set.add(first)
+    root = _root("overlapping-group-root")
+    RootGrant.objects.create(root=root, group=group, permissions=Permission.BROWSE)
+    User.objects.filter(pk__in=(first.pk, displaced.pk, final.pk)).update(
+        authorization_epoch=0
+    )
+
+    forms_loaded_from_first = Barrier(2)
+    first_change_applied = Event()
+    second_serialization_attempted = Event()
+
+    def group_form(*, thread_group: Group, member: User) -> AegisGroupAdminForm:
+        form = AegisGroupAdminForm(
+            data={
+                "name": thread_group.name,
+                "permissions": [],
+                "members": [str(member.pk)],
+            },
+            instance=thread_group,
+        )
+        assert form.is_valid(), form.errors
+        assert set(form.initial["members"]) == {first.pk}
+        assert "members" in form.changed_data
+        assert form.save(commit=False) is thread_group
+        return form
+
+    def first_transaction() -> str:
+        close_old_connections()
+        try:
+            with transaction.atomic():
+                thread_actor = User.objects.get(pk=actor.pk)
+                thread_group = Group.objects.get(pk=group.pk)
+                thread_displaced = User.objects.get(pk=displaced.pk)
+                form = group_form(
+                    thread_group=thread_group,
+                    member=thread_displaced,
+                )
+                forms_loaded_from_first.wait(timeout=10)
+                save_group_from_admin(
+                    actor=thread_actor,
+                    form=form,
+                    member_ids=(thread_displaced.pk,),
+                    request_id="overlapping_group_tx1",
+                )
+                thread_displaced.refresh_from_db()
+                assert thread_displaced.authorization_epoch == 1
+                session_client = Client()
+                session_client.force_login(thread_displaced)
+                session_key = session_client.session.session_key
+                assert isinstance(session_key, str)
+                first_change_applied.set()
+                assert second_serialization_attempted.wait(timeout=10)
+            return session_key
+        finally:
+            close_old_connections()
+
+    def second_transaction() -> None:
+        close_old_connections()
+        try:
+            with transaction.atomic():
+                thread_actor = User.objects.get(pk=actor.pk)
+                thread_group = Group.objects.get(pk=group.pk)
+                thread_final = User.objects.get(pk=final.pk)
+                form = group_form(thread_group=thread_group, member=thread_final)
+                forms_loaded_from_first.wait(timeout=10)
+                assert first_change_applied.wait(timeout=10)
+
+                def observe_serialization(
+                    execute: _ExecuteQuery,
+                    sql: str,
+                    params: Any,
+                    many: bool,
+                    context: dict[str, Any],
+                ) -> Any:
+                    normalized = " ".join(sql.upper().split())
+                    group_update = normalized.startswith('UPDATE "AUTH_GROUP"')
+                    group_lock = (
+                        normalized.startswith("SELECT")
+                        and 'FROM "AUTH_GROUP"' in normalized
+                        and "FOR UPDATE" in normalized
+                    )
+                    if group_update or group_lock:
+                        second_serialization_attempted.set()
+                    return execute(sql, params, many, context)
+
+                with connection.execute_wrapper(observe_serialization):
+                    save_group_from_admin(
+                        actor=thread_actor,
+                        form=form,
+                        member_ids=(thread_final.pk,),
+                        request_id="overlapping_group_tx2",
+                    )
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first_future = executor.submit(first_transaction)
+        second_future = executor.submit(second_transaction)
+        displaced_session_key = first_future.result(timeout=20)
+        second_future.result(timeout=20)
+
+    assert set(group.user_set.values_list("pk", flat=True)) == {final.pk}
+    assert _epochs(first, displaced, final, root) == [1, 2, 1, 2]
+    persisted_session = Session.objects.get(session_key=displaced_session_key)
+    assert persisted_session.get_decoded()[AUTHORIZATION_EPOCH] == 1
+    session_client = Client()
+    session_client.cookies["sessionid"] = displaced_session_key
+
+    response = session_client.get("/health/live")
+
+    assert response.status_code == 200
+    assert session_client.session.session_key != displaced_session_key
 
 
 def test_membership_epoch_suppression_is_nested_and_restores_raw_signals() -> None:
