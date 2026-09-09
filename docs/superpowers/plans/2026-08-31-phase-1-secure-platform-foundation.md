@@ -2193,7 +2193,7 @@ git push
 - Modify: `deploy/postgres/init/001-roles.sh`
 - Create: `backend/aegis_apps/common/management/{__init__.py,commands/__init__.py,commands/deploy_database.py,commands/sync_db_privileges.py}`
 - Create: `backend/aegis_apps/audit/migrations/0002_database_append_only.py`
-- Create: `backend/aegis_apps/operations/migrations/0002_database_immutability.py`
+- Create: `backend/aegis_apps/operations/migrations/0008_database_immutability.py` (depends on `operations.0007_operation_idempotency_namespace_boundary`)
 - Create: `tests/deployment/test_database_roles.py`
 - Modify: `tests/deployment/test_compose.py`
 - Create: `tests/deployment/test_container_boundaries.py`
@@ -2229,7 +2229,7 @@ def test_operations_role_cannot_change_grants_or_operation_intent(db_role_dsn, o
                 )
 ```
 
-Add equivalent assertions that media/indexer cannot read sessions or identities beyond the opaque columns needed for epoch checks, web cannot update leased execution columns, all runtime roles cannot alter schema, and no role can update/delete audit rows.
+Add equivalent assertions that media/indexer cannot read sessions or identities beyond the opaque columns needed for epoch checks, web cannot update leased execution columns (including `execution_started_at`), all runtime roles cannot alter schema, and no role can update/delete audit rows. Assert that current operation inserts cannot set the migration-only `idempotency_namespace` to `NULL`. For each of operations, indexer, and media, prove that only the role's fenced live-lease transition can set `execution_started_at`; web and unrelated worker roles cannot set or rewrite it.
 
 Run `uv run pytest tests/deployment/test_database_roles.py -q`.
 
@@ -2303,31 +2303,33 @@ ROLE_PRIVILEGES: dict[str, dict[str, tuple[str, ...]]] = {
         "roots_rootgrant": ("SELECT",),
         "operations_operation": ("SELECT",),
         "operations_job": ("SELECT",),
-        "operations_workerheartbeat": ("SELECT", "INSERT", "UPDATE"),
+        "operations_workerheartbeat": ("SELECT",),
         "audit_auditevent": ("INSERT",),
     },
     "aegis_indexer": {
         "roots_root": ("SELECT",),
         "operations_operation": ("SELECT",),
         "operations_job": ("SELECT",),
-        "operations_workerheartbeat": ("SELECT", "INSERT", "UPDATE"),
+        "operations_workerheartbeat": ("SELECT",),
         "audit_auditevent": ("INSERT",),
     },
     "aegis_media": {
         "roots_root": ("SELECT",),
         "operations_operation": ("SELECT",),
         "operations_job": ("SELECT",),
-        "operations_workerheartbeat": ("SELECT", "INSERT", "UPDATE"),
+        "operations_workerheartbeat": ("SELECT",),
         "audit_auditevent": ("INSERT",),
     },
 }
 ```
 
-Apply column-level `SELECT(id, is_active, authorization_epoch)` on `identity_user` to each worker and column-level `UPDATE(state, attempt_token, lease_owner, lease_expires_at, attempts, safe_error_code, safe_error_detail, result, updated_at)` on `operations_job`. Restrict worker `operations_workerheartbeat` writes to its mutable heartbeat columns. Give workers `EXECUTE` on one migrator-owned `aegis_effective_permissions(user_uuid, root_uuid)` SQL function with a fixed empty `search_path`; the function returns only the additive integer mask and prevents broad user/group-membership reads. Revoke all first, grant the allowlist, and compare every managed table/column/function to this structure before commit. Django model deletion of users/roots remains disabled in Phase 1 so web does not receive those table DELETE privileges.
+Apply column-level `SELECT(id, is_active, authorization_epoch)` on `identity_user` to each worker and column-level `UPDATE(state, attempt_token, execution_started_at, lease_owner, lease_expires_at, attempts, safe_error_code, safe_error_detail, result, updated_at)` on `operations_job`. Web receives no `UPDATE` privilege on `execution_started_at` or any other leased execution column. A role-bound database guard plus the service's attempt-token compare-and-swap must limit `execution_started_at` to the one `NULL`-to-database-time durable-start transition for a live lease whose `target_role` matches the worker login; unrelated worker roles cannot perform it.
 
-- [ ] **Step 4: Add PostgreSQL immutability triggers**
+Do not grant workers direct `INSERT`, `UPDATE`, or `DELETE` on `operations_workerheartbeat`. Give each fixed worker role `EXECUTE` only on migrator-owned, fixed-empty-`search_path` heartbeat publish/allocation functions that bind the row role from `current_user`, perform database-time monotonic publication, and recycle only that role's bounded stale slots. A caller cannot select another role for publication or recycling, and fresh-slot exhaustion fails closed. Give workers `EXECUTE` on the migrator-owned `aegis_effective_permissions(user_uuid, root_uuid)` SQL function with the same fixed empty `search_path`; the function returns only the additive integer mask and prevents broad user/group-membership reads. Revoke all first, grant the allowlist, and compare every managed table/column/function to this structure before commit. Django model deletion of users/roots remains disabled in Phase 1 so web does not receive those table DELETE privileges.
 
-Use reversible `RunSQL` migrations to reject `UPDATE`, `DELETE`, and `TRUNCATE` on `audit_auditevent`; reject `UPDATE`, `DELETE`, and `TRUNCATE` on operation intents; and reject changes to immutable job columns after insert. Allow job deletion only under a future explicit retention function, which is not implemented in Phase 1. Trigger errors contain table/field categories, not prior values.
+- [ ] **Step 4: Add PostgreSQL immutability and insertion-boundary triggers**
+
+Create `operations.0008_database_immutability`, depending explicitly on `operations.0007_operation_idempotency_namespace_boundary`. Use reversible `RunSQL` migrations to reject `UPDATE`, `DELETE`, and `TRUNCATE` on `audit_auditevent`; reject `UPDATE`, `DELETE`, and `TRUNCATE` on operation intents; and reject changes to immutable job columns after insert. An operation `BEFORE INSERT` trigger must reject `idempotency_namespace IS NULL`, which is reserved for rows preserved by the Task 10 migration bridge. Allow job deletion only under a future explicit retention function, which is not implemented in Phase 1. Trigger errors contain table/field categories, not prior values.
 
 ```sql
 CREATE FUNCTION aegis_reject_change() RETURNS trigger
@@ -2346,7 +2348,9 @@ BEFORE UPDATE OR DELETE OR TRUNCATE ON operations_operation
 FOR EACH STATEMENT EXECUTE FUNCTION aegis_reject_change();
 ```
 
-Use a row-level `BEFORE UPDATE` trigger for jobs that compares every immutable column with `IS DISTINCT FROM` and raises SQLSTATE 55000; use statement triggers for job DELETE/TRUNCATE. Reverse SQL drops only these named triggers/functions.
+Use a row-level `BEFORE UPDATE` trigger for jobs that compares every immutable column with `IS DISTINCT FROM` and raises SQLSTATE 55000; `execution_started_at` is deliberately excluded from that immutable comparison. A separate role-bound guard enforces its fenced `NULL`-to-database-time start transition and prevents web, the wrong worker role, an expired/stale claimant, or a second write from changing it. Use statement triggers for job DELETE/TRUNCATE. Reverse SQL drops only these named triggers/functions.
+
+Add a frozen-history `MigrationExecutor` upgrade test that starts before the Task 10 namespace bridge, migrates through `operations.0007_operation_idempotency_namespace_boundary` and this `operations.0008_database_immutability` leaf, and proves preserved legacy operations/jobs remain intact while new `NULL`-namespace inserts fail. Database-role tests must exercise the fenced start transition successfully as operations, indexer, and media and reject the same transition from web and unrelated worker roles.
 
 - [ ] **Step 5: Write failing Compose isolation assertions**
 
