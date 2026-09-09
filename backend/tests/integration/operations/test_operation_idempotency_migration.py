@@ -22,6 +22,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.django_db(transaction=True)]
 
 BEFORE = [("operations", "0001_initial")]
 COMPATIBILITY_PREDECESSOR = [("operations", "0004_job_claim_relinquished_error")]
+NULL_ACTOR_PREDECESSOR = [("operations", "0006_job_execution_started_at")]
 
 
 def _request_hash(*, actor_id: uuid.UUID, intent: dict[str, object]) -> bytes:
@@ -238,5 +239,100 @@ def test_upgrade_drops_the_already_applied_actor_request_constraint() -> None:
                 "AND conname = 'operations_operation_actor_request_uniq'"
             )
             assert cursor.fetchone() == (0,)
+    finally:
+        MigrationExecutor(connection).migrate(current_leaf_nodes)
+
+
+def test_upgrade_preserves_and_demotes_ambiguous_v1_null_actor_history() -> None:
+    executor = MigrationExecutor(connection)
+    current_leaf_nodes = executor.loader.graph.leaf_nodes()
+    operations_leaf = executor.loader.graph.leaf_nodes("operations")
+    assert len(operations_leaf) == 1
+    after = [operations_leaf[0]]
+
+    try:
+        assert after != NULL_ACTOR_PREDECESSOR
+        executor.migrate(NULL_ACTOR_PREDECESSOR)
+        old_apps = executor.loader.project_state(NULL_ACTOR_PREDECESSOR).apps
+        operation_model = old_apps.get_model("operations", "Operation")
+        job_model = old_apps.get_model("operations", "Job")
+        now = timezone.now()
+        operation_ids: set[uuid.UUID] = set()
+        job_ids: set[uuid.UUID] = set()
+        for index in range(2):
+            intent: dict[str, object] = {
+                "roots": [],
+                "legacyVariant": index,
+            }
+            operation = operation_model.objects.create(
+                actor_id=None,
+                request_id="legacy_null_actor_key",
+                idempotency_namespace="v1",
+                kind="foundation.probe",
+                request_hash=hashlib.sha256(
+                    f"legacy-null-{index}".encode("ascii")
+                ).digest(),
+                intent=intent,
+                authorization_snapshot={"userEpoch": 0, "rootEpochs": {}},
+            )
+            job = job_model.objects.create(
+                operation_id=operation.pk,
+                target_role="operations",
+                kind="foundation.probe",
+                payload=intent,
+                priority=0,
+                state="queued",
+                available_at=now,
+                attempts=0,
+                attempt_token=0,
+                max_attempts=5,
+                execution_started_at=None,
+            )
+            operation_ids.add(operation.pk)
+            job_ids.add(job.pk)
+        single_operation = operation_model.objects.create(
+            actor_id=None,
+            request_id="legacy_single_null_actor_key",
+            idempotency_namespace="v1",
+            kind="foundation.probe",
+            request_hash=hashlib.sha256(b"legacy-single-null").digest(),
+            intent={"roots": []},
+            authorization_snapshot={"userEpoch": 0, "rootEpochs": {}},
+        )
+        single_job = job_model.objects.create(
+            operation_id=single_operation.pk,
+            target_role="operations",
+            kind="foundation.probe",
+            payload={"roots": []},
+            priority=0,
+            state="queued",
+            available_at=now,
+            attempts=0,
+            attempt_token=0,
+            max_attempts=5,
+            execution_started_at=None,
+        )
+        operation_ids.add(single_operation.pk)
+        job_ids.add(single_job.pk)
+
+        MigrationExecutor(connection).migrate(after)
+
+        assert set(
+            Operation.objects.filter(pk__in=operation_ids).values_list("pk", flat=True)
+        ) == operation_ids
+        assert set(
+            Job.objects.filter(operation_id__in=operation_ids).values_list(
+                "pk", flat=True
+            )
+        ) == job_ids
+        assert set(
+            Operation.objects.filter(request_id="legacy_null_actor_key").values_list(
+                "idempotency_namespace", flat=True
+            )
+        ) == {None}
+        assert (
+            Operation.objects.get(pk=single_operation.pk).idempotency_namespace
+            == "v1"
+        )
     finally:
         MigrationExecutor(connection).migrate(current_leaf_nodes)

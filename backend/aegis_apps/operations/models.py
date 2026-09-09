@@ -51,6 +51,24 @@ def _operation_deletion_disabled() -> PermissionError:
     return PermissionError("operation deletion is disabled")
 
 
+def _current_operation_namespace_required() -> ValueError:
+    return ValueError(
+        "the v1 idempotency namespace is required for current operation insertions"
+    )
+
+
+def _validate_current_operation_inserts(
+    objs: Iterable[Operation],
+) -> list[Operation]:
+    records = list(objs)
+    if any(
+        record.idempotency_namespace != OPERATION_IDEMPOTENCY_NAMESPACE_V1
+        for record in records
+    ):
+        raise _current_operation_namespace_required()
+    return records
+
+
 def _bulk_conflict_updates_disabled(record_type: str) -> PermissionError:
     return PermissionError(f"{record_type} bulk conflict updates are disabled")
 
@@ -95,8 +113,9 @@ class OperationQuerySet(models.QuerySet["Operation"]):
     ) -> list[Operation]:
         if update_conflicts:
             raise _bulk_conflict_updates_disabled("operation")
+        records = _validate_current_operation_inserts(objs)
         return super().bulk_create(
-            objs,
+            records,
             batch_size=batch_size,
             ignore_conflicts=ignore_conflicts,
             update_conflicts=False,
@@ -115,8 +134,9 @@ class OperationQuerySet(models.QuerySet["Operation"]):
     ) -> list[Operation]:
         if update_conflicts:
             raise _bulk_conflict_updates_disabled("operation")
+        records = _validate_current_operation_inserts(objs)
         return await super().abulk_create(
-            objs,
+            records,
             batch_size=batch_size,
             ignore_conflicts=ignore_conflicts,
             update_conflicts=False,
@@ -176,6 +196,7 @@ class Operation(models.Model):
                     idempotency_namespace=OPERATION_IDEMPOTENCY_NAMESPACE_V1
                 ),
                 name="operations_operation_actor_request_v1_uniq",
+                nulls_distinct=False,
             ),
             models.CheckConstraint(
                 condition=(
@@ -216,6 +237,8 @@ class Operation(models.Model):
     def save(self, *args: Any, **kwargs: Any) -> None:
         if not self._state.adding:
             raise _operation_immutable()
+        if self.idempotency_namespace != OPERATION_IDEMPOTENCY_NAMESPACE_V1:
+            raise _current_operation_namespace_required()
         super().save(*args, **kwargs)
 
     def delete(self, *args: Any, **kwargs: Any) -> tuple[int, dict[str, int]]:

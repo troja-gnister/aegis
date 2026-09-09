@@ -1,15 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from threading import Barrier
 
 import pytest
 from aegis_apps.identity.models import User
 from aegis_apps.operations.enums import JobState
-from aegis_apps.operations.models import Job, Operation, WorkerHeartbeat
+from aegis_apps.operations.models import (
+    OPERATION_IDEMPOTENCY_NAMESPACE_V1,
+    Job,
+    Operation,
+    WorkerHeartbeat,
+)
 from aegis_apps.operations.services import create_operation
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, close_old_connections, transaction
 from django.utils import timezone
 
 pytestmark = [pytest.mark.integration, pytest.mark.django_db(transaction=True)]
@@ -22,6 +30,24 @@ def _operation() -> Operation:
         request_id="task10_model_request",
         kind="foundation.probe",
         intent={"roots": []},
+    )
+
+
+def _operation_candidate(
+    *,
+    request_id: str,
+    actor: User | None = None,
+    idempotency_namespace: str | None = OPERATION_IDEMPOTENCY_NAMESPACE_V1,
+    discriminator: str = "default",
+) -> Operation:
+    return Operation(
+        actor=actor,
+        request_id=request_id,
+        idempotency_namespace=idempotency_namespace,
+        kind="foundation.probe",
+        request_hash=hashlib.sha256(discriminator.encode("ascii")).digest(),
+        intent={"roots": []},
+        authorization_snapshot={"userEpoch": 0, "rootEpochs": {}},
     )
 
 
@@ -57,6 +83,141 @@ def test_operation_is_immutable_through_instance_queryset_bulk_and_delete_paths(
 
     operation.refresh_from_db()
     assert operation.intent == original
+
+
+@pytest.mark.parametrize("insertion_path", ["save", "manager_create"])
+def test_current_operation_insert_rejects_legacy_null_namespace(
+    insertion_path: str,
+) -> None:
+    request_id = f"null_namespace_{insertion_path}"
+    candidate = _operation_candidate(
+        request_id=request_id,
+        idempotency_namespace=None,
+        discriminator=insertion_path,
+    )
+
+    with pytest.raises(ValueError, match="idempotency namespace"):
+        if insertion_path == "save":
+            candidate.save()
+        else:
+            Operation.objects.create(
+                actor=candidate.actor,
+                request_id=candidate.request_id,
+                idempotency_namespace=candidate.idempotency_namespace,
+                kind=candidate.kind,
+                request_hash=candidate.request_hash,
+                intent=candidate.intent,
+                authorization_snapshot=candidate.authorization_snapshot,
+            )
+
+    assert not Operation.objects.filter(request_id=request_id).exists()
+
+
+@pytest.mark.parametrize("ignore_conflicts", [False, True])
+def test_operation_bulk_create_rejects_legacy_null_namespace_before_insert(
+    ignore_conflicts: bool,
+) -> None:
+    request_id = f"null_namespace_bulk_{ignore_conflicts!s:.5}"
+    candidate = _operation_candidate(
+        request_id=request_id,
+        idempotency_namespace=None,
+        discriminator=request_id,
+    )
+
+    with pytest.raises(ValueError, match="idempotency namespace"):
+        Operation.objects.bulk_create(
+            [candidate],
+            ignore_conflicts=ignore_conflicts,
+        )
+
+    assert not Operation.objects.filter(request_id=request_id).exists()
+
+
+def test_operation_async_bulk_create_rejects_legacy_null_namespace() -> None:
+    request_id = "null_namespace_async_bulk"
+    candidate = _operation_candidate(
+        request_id=request_id,
+        idempotency_namespace=None,
+        discriminator=request_id,
+    )
+
+    async def insert() -> None:
+        await Operation.objects.abulk_create([candidate])
+
+    with pytest.raises(ValueError, match="idempotency namespace"):
+        asyncio.run(insert())
+
+    assert not Operation.objects.filter(request_id=request_id).exists()
+
+
+def test_operation_bulk_create_prevalidates_the_entire_mixed_batch() -> None:
+    valid_request_id = "mixed_namespace_valid"
+    invalid_request_id = "mixed_namespace_invalid"
+    records = [
+        _operation_candidate(
+            request_id=valid_request_id,
+            discriminator=valid_request_id,
+        ),
+        _operation_candidate(
+            request_id=invalid_request_id,
+            idempotency_namespace=None,
+            discriminator=invalid_request_id,
+        ),
+    ]
+
+    with pytest.raises(ValueError, match="idempotency namespace"):
+        Operation.objects.bulk_create(records, batch_size=1)
+
+    assert not Operation.objects.filter(
+        request_id__in=(valid_request_id, invalid_request_id)
+    ).exists()
+
+
+def test_operation_bulk_create_retains_ignore_conflicts_for_valid_v1_rows() -> None:
+    request_id = "valid_namespace_ignore_conflict"
+    original = _operation_candidate(
+        request_id=request_id,
+        discriminator="original",
+    )
+    original.save()
+    duplicate = _operation_candidate(
+        request_id=request_id,
+        discriminator="duplicate",
+    )
+
+    created = Operation.objects.bulk_create([duplicate], ignore_conflicts=True)
+
+    assert created == [duplicate]
+    assert Operation.objects.filter(request_id=request_id, actor=None).count() == 1
+    stored = Operation.objects.get(request_id=request_id, actor=None)
+    assert bytes(stored.request_hash) == bytes(original.request_hash)
+
+
+def test_concurrent_v1_null_actor_request_ids_collide() -> None:
+    request_id = "null_actor_collision"
+    barrier = Barrier(2)
+
+    def insert(index: int) -> uuid.UUID | None:
+        close_old_connections()
+        try:
+            candidate = _operation_candidate(
+                request_id=request_id,
+                discriminator=f"null-actor-{index}",
+            )
+            barrier.wait(timeout=10)
+            try:
+                candidate.save()
+            except IntegrityError:
+                return None
+            return candidate.pk
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        inserted_ids = list(executor.map(insert, range(2)))
+
+    assert len([operation_id for operation_id in inserted_ids if operation_id]) == 1
+    assert Operation.objects.filter(request_id=request_id, actor=None).count() == 1
 
 
 def test_operation_bulk_create_cannot_update_an_existing_intent_on_conflict() -> None:
