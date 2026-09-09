@@ -2192,7 +2192,7 @@ git push
 - Modify: `compose.test.yaml`
 - Modify: `deploy/postgres/init/001-roles.sh`
 - Create: `backend/aegis_apps/common/management/{__init__.py,commands/__init__.py,commands/deploy_database.py,commands/sync_db_privileges.py}`
-- Create: `backend/aegis_apps/audit/migrations/0002_database_append_only.py`
+- Create: `backend/aegis_apps/audit/migrations/0003_database_append_only.py` (depends on `audit.0002_auditevent_manager_names`)
 - Create: `backend/aegis_apps/operations/migrations/0008_database_immutability.py` (depends on `operations.0007_operation_idempotency_namespace_boundary`)
 - Modify: `backend/aegis_apps/operations/heartbeats.py`
 - Modify: `backend/tests/integration/operations/{test_heartbeats,test_run_role}.py`
@@ -2347,7 +2347,7 @@ Integration and deployment tests connect with each actual worker credential and 
 
 - [ ] **Step 4: Add PostgreSQL immutability and insertion-boundary triggers**
 
-Create `operations.0008_database_immutability`, depending explicitly on `operations.0007_operation_idempotency_namespace_boundary`. Use reversible `RunSQL` migrations to reject `UPDATE`, `DELETE`, and `TRUNCATE` on `audit_auditevent`; reject `UPDATE`, `DELETE`, and `TRUNCATE` on operation intents; and reject changes to immutable job columns after insert. An operation `BEFORE INSERT` trigger must reject `idempotency_namespace IS NULL`, which is reserved for rows preserved by the Task 10 migration bridge. Allow job deletion only under a future explicit retention function, which is not implemented in Phase 1. Trigger errors contain table/field categories, not prior values.
+Create `audit.0003_database_append_only`, depending explicitly on `audit.0002_auditevent_manager_names`, and `operations.0008_database_immutability`, depending explicitly on `operations.0007_operation_idempotency_namespace_boundary`. Use reversible `RunSQL` migrations to reject `UPDATE`, `DELETE`, and `TRUNCATE` on `audit_auditevent`; reject `UPDATE`, `DELETE`, and `TRUNCATE` on operation intents; and reject changes to immutable job columns after insert. An operation `BEFORE INSERT` trigger must reject `idempotency_namespace IS NULL`, which is reserved for rows preserved by the Task 10 migration bridge. Allow job deletion only under a future explicit retention function, which is not implemented in Phase 1. Trigger errors contain table/field categories, not prior values.
 
 ```sql
 CREATE FUNCTION aegis_reject_change() RETURNS trigger
