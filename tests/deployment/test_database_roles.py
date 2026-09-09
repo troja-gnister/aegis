@@ -24,14 +24,23 @@ from aegis_apps.common.database_privileges import (
     synchronize_database_privileges,
 )
 from aegis_apps.identity.models import User
-from aegis_apps.operations.services import create_operation
+from aegis_apps.operations.models import Operation
+from aegis_apps.operations.services import create_operation, enqueue_job
+from aegis_apps.roots.models import Root, RootGrant
 from django.db import connection, transaction
 from psycopg import sql
+from psycopg.types.json import Jsonb
 
 pytestmark = [pytest.mark.integration, pytest.mark.django_db(transaction=True)]
 
 MIGRATOR_ROLE = "aegis_migrator"
 ALL_TEST_ROLES = (MIGRATOR_ROLE, *RUNTIME_DATABASE_ROLES)
+HEARTBEAT_FUNCTIONS = {
+    "operations": "aegis_publish_operations_heartbeat",
+    "indexer": "aegis_publish_indexer_heartbeat",
+    "media": "aegis_publish_media_heartbeat",
+}
+HEARTBEAT_ARGUMENTS = "%s, %s, %s, %s, %s, %s, %s, %s, %s"
 
 
 @dataclass(frozen=True, slots=True)
@@ -363,6 +372,88 @@ def _assert_sqlstate(
     assert caught.value.sqlstate == sqlstate
 
 
+def _heartbeat_parameters(
+    *,
+    worker_id: str | None = None,
+    status: str = "idle",
+    metrics: object = None,
+    current_job_id: uuid.UUID | None = None,
+    retention_seconds: int = 60,
+    slot_limit: int = 16,
+) -> tuple[object, ...]:
+    return (
+        str(uuid.uuid4()) if worker_id is None else worker_id,
+        "task11-test",
+        "schema-test",
+        "a" * 64,
+        status,
+        Jsonb({} if metrics is None else metrics),
+        current_job_id,
+        retention_seconds,
+        slot_limit,
+    )
+
+
+def _heartbeat_statement(role: str) -> str:
+    try:
+        function_name = HEARTBEAT_FUNCTIONS[role]
+    except KeyError:
+        raise ValueError("unknown worker role") from None
+    return f"SELECT public.{function_name}({HEARTBEAT_ARGUMENTS})"
+
+
+def _publish_heartbeat(
+    role_connection: psycopg.Connection[Any],
+    *,
+    function_role: str,
+    parameters: tuple[object, ...],
+) -> uuid.UUID:
+    with role_connection.cursor() as cursor:
+        cursor.execute(_heartbeat_statement(function_role), parameters)
+        row = cursor.fetchone()
+    assert row is not None and isinstance(row[0], uuid.UUID)
+    return row[0]
+
+
+def _authorization_is_valid(
+    role_connection: psycopg.Connection[Any],
+    operation_id: uuid.UUID,
+) -> bool:
+    with role_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT public.aegis_validate_operation_authorization(%s)",
+            [operation_id],
+        )
+        row = cursor.fetchone()
+    assert row is not None and isinstance(row[0], bool)
+    return row[0]
+
+
+def _create_authorized_operation() -> tuple[User, Root, Operation]:
+    unique = uuid.uuid4().hex
+    actor = User.objects.create_user(username=f"authorization-{unique}")
+    root = Root.objects.create(
+        slot_id=f"r{unique}",
+        display_name="Task 11 authorization root",
+        mode=Root.Mode.READ_ONLY,
+        active=True,
+        capabilities={},
+    )
+    RootGrant.objects.create(root=root, user=actor, permissions=3)
+    operation = create_operation(
+        actor=actor,
+        request_id=f"auth_{unique}",
+        kind="foundation.probe",
+        intent={"roots": [{"id": str(root.id), "permissions": 3}]},
+    )
+    return actor, root, operation
+
+
+def _clear_worker_heartbeats() -> None:
+    with connection.cursor() as cursor:
+        cursor.execute("DELETE FROM public.operations_workerheartbeat")
+
+
 def test_sync_is_idempotent_only_for_an_authenticated_migrator(
     role_database: RoleDatabase,
 ) -> None:
@@ -389,11 +480,11 @@ def test_role_attributes_memberships_and_ownership_are_exact(
              WHERE rolname = ANY(%s)
              ORDER BY rolname
             """,
-            [list(RUNTIME_DATABASE_ROLES)],
+            [list(ALL_TEST_ROLES)],
         )
         assert cursor.fetchall() == [
             (role, True, False, False, False, False, False, False)
-            for role in sorted(RUNTIME_DATABASE_ROLES)
+            for role in sorted(ALL_TEST_ROLES)
         ]
         cursor.execute(
             """
@@ -434,6 +525,23 @@ def test_role_attributes_memberships_and_ownership_are_exact(
             name: MIGRATOR_ROLE
             for name in (*MANAGED_TABLE_COLUMNS, *MANAGED_SEQUENCES)
         }
+
+
+def test_sync_rejects_unsafe_migrator_attributes(
+    role_database: RoleDatabase,
+) -> None:
+    with connection.cursor() as cursor:
+        cursor.execute("ALTER ROLE aegis_migrator CREATEDB")
+    try:
+        with pytest.raises(
+            PrivilegeSynchronizationError,
+            match="migrator database role attributes are unsafe",
+        ):
+            role_database.synchronize()
+    finally:
+        with connection.cursor() as cursor:
+            cursor.execute("ALTER ROLE aegis_migrator NOCREATEDB")
+        role_database.synchronize()
 
 
 def test_table_column_sequence_and_function_grants_match_the_allowlist(
@@ -695,3 +803,335 @@ def test_actual_roles_enforce_representative_write_and_read_denials(
             (audit.id,),
         )
         _assert_sqlstate(worker, "CREATE TABLE public.forbidden_worker_table (id integer)")
+
+
+@pytest.mark.parametrize(
+    ("role", "other_role"),
+    (
+        ("operations", "indexer"),
+        ("indexer", "media"),
+        ("media", "operations"),
+    ),
+)
+def test_each_worker_can_publish_only_its_own_heartbeat(
+    role_database: RoleDatabase,
+    role: str,
+    other_role: str,
+) -> None:
+    worker_id = str(uuid.uuid4())
+    parameters = _heartbeat_parameters(
+        worker_id=worker_id,
+        metrics={"queueAgeSeconds": 1},
+    )
+    with role_database.connect(f"aegis_{role}") as worker:
+        heartbeat_id = _publish_heartbeat(
+            worker,
+            function_role=role,
+            parameters=parameters,
+        )
+        with worker.cursor() as cursor:
+            cursor.execute(
+                "SELECT role, worker_id, status, metrics "
+                "FROM public.operations_workerheartbeat WHERE id = %s",
+                [heartbeat_id],
+            )
+            assert cursor.fetchone() == (
+                role,
+                worker_id,
+                "idle",
+                {"queueAgeSeconds": 1},
+            )
+        _assert_sqlstate(
+            worker,
+            _heartbeat_statement(other_role),
+            _heartbeat_parameters(),
+        )
+
+    with role_database.connect("aegis_web") as web:
+        _assert_sqlstate(
+            web,
+            _heartbeat_statement(role),
+            _heartbeat_parameters(),
+        )
+
+
+def test_heartbeat_function_rejects_null_malformed_and_mismatched_inputs(
+    role_database: RoleDatabase,
+) -> None:
+    statement = _heartbeat_statement("operations")
+    with role_database.connect("aegis_operations") as worker:
+        valid = list(_heartbeat_parameters())
+        for required_index in (0, 1, 2, 3, 4, 5, 7, 8):
+            parameters = valid.copy()
+            parameters[required_index] = None
+            _assert_sqlstate(
+                worker,
+                statement,
+                tuple(parameters),
+                sqlstate="22023",
+            )
+
+        malformed_values: tuple[tuple[int, object], ...] = (
+            (0, "not-a-worker-uuid"),
+            (1, ""),
+            (3, "not-a-manifest"),
+            (4, "unknown"),
+            (5, Jsonb({"diskPressure": 2})),
+            (7, 0),
+            (8, 0),
+        )
+        for parameter_index, malformed_value in malformed_values:
+            parameters = valid.copy()
+            parameters[parameter_index] = malformed_value
+            _assert_sqlstate(
+                worker,
+                statement,
+                tuple(parameters),
+                sqlstate="22023",
+            )
+
+        actor = User.objects.create_user(username=f"heartbeat-job-{uuid.uuid4()}")
+        operation = create_operation(
+            actor=actor,
+            request_id=f"heartbeat_{uuid.uuid4().hex}",
+            kind="foundation.probe",
+            intent={"roots": []},
+        )
+        queued_job = operation.jobs.get()
+        mismatched_job = list(
+            _heartbeat_parameters(
+                worker_id=str(uuid.uuid4()),
+                status="running",
+                current_job_id=queued_job.id,
+            )
+        )
+        _assert_sqlstate(
+            worker,
+            statement,
+            tuple(mismatched_job),
+            sqlstate="22023",
+        )
+
+
+def test_stopping_heartbeat_status_is_monotonic(
+    role_database: RoleDatabase,
+) -> None:
+    worker_id = str(uuid.uuid4())
+    with role_database.connect("aegis_operations") as worker:
+        heartbeat_id = _publish_heartbeat(
+            worker,
+            function_role="operations",
+            parameters=_heartbeat_parameters(
+                worker_id=worker_id,
+                metrics={"queueAgeSeconds": 1},
+            ),
+        )
+        assert _publish_heartbeat(
+            worker,
+            function_role="operations",
+            parameters=_heartbeat_parameters(
+                worker_id=worker_id,
+                status="stopping",
+                metrics={"queueAgeSeconds": 2},
+            ),
+        ) == heartbeat_id
+        assert _publish_heartbeat(
+            worker,
+            function_role="operations",
+            parameters=_heartbeat_parameters(
+                worker_id=worker_id,
+                status="idle",
+                metrics={"queueAgeSeconds": 3},
+            ),
+        ) == heartbeat_id
+        with worker.cursor() as cursor:
+            cursor.execute(
+                "SELECT status, metrics "
+                "FROM public.operations_workerheartbeat WHERE id = %s",
+                [heartbeat_id],
+            )
+            assert cursor.fetchone() == (
+                "stopping",
+                {"queueAgeSeconds": 2},
+            )
+
+
+def test_heartbeat_capacity_and_recycling_are_role_scoped(
+    role_database: RoleDatabase,
+) -> None:
+    _clear_worker_heartbeats()
+    operations_worker = str(uuid.uuid4())
+    indexer_worker = str(uuid.uuid4())
+    with (
+        role_database.connect("aegis_operations") as operations,
+        role_database.connect("aegis_indexer") as indexer,
+    ):
+        operations_id = _publish_heartbeat(
+            operations,
+            function_role="operations",
+            parameters=_heartbeat_parameters(
+                worker_id=operations_worker,
+                slot_limit=1,
+            ),
+        )
+        indexer_id = _publish_heartbeat(
+            indexer,
+            function_role="indexer",
+            parameters=_heartbeat_parameters(
+                worker_id=indexer_worker,
+                slot_limit=1,
+            ),
+        )
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE public.operations_workerheartbeat "
+                "SET last_seen_at = pg_catalog.clock_timestamp() - interval '2 minutes' "
+                "WHERE id = %s",
+                [indexer_id],
+            )
+        _assert_sqlstate(
+            operations,
+            _heartbeat_statement("operations"),
+            _heartbeat_parameters(slot_limit=1),
+            sqlstate="P0001",
+        )
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE public.operations_workerheartbeat "
+                "SET last_seen_at = pg_catalog.clock_timestamp() - interval '2 minutes' "
+                "WHERE id = %s",
+                [operations_id],
+            )
+        replacement_worker = str(uuid.uuid4())
+        assert _publish_heartbeat(
+            operations,
+            function_role="operations",
+            parameters=_heartbeat_parameters(
+                worker_id=replacement_worker,
+                slot_limit=1,
+            ),
+        ) == operations_id
+
+        with operations.cursor() as cursor:
+            cursor.execute(
+                "SELECT id, role, worker_id "
+                "FROM public.operations_workerheartbeat ORDER BY role"
+            )
+            assert cursor.fetchall() == [
+                (indexer_id, "indexer", indexer_worker),
+                (operations_id, "operations", replacement_worker),
+            ]
+
+
+def test_opaque_authorization_is_scoped_to_assigned_worker_roles(
+    role_database: RoleDatabase,
+) -> None:
+    _actor, _root, operation = _create_authorized_operation()
+    with role_database.connect("aegis_operations") as operations:
+        assert _authorization_is_valid(operations, operation.id) is True
+    with role_database.connect("aegis_indexer") as indexer:
+        assert _authorization_is_valid(indexer, operation.id) is False
+    with role_database.connect("aegis_media") as media:
+        assert _authorization_is_valid(media, operation.id) is False
+
+    enqueue_job(operation=operation, target_role="indexer")
+    with role_database.connect("aegis_indexer") as indexer:
+        assert _authorization_is_valid(indexer, operation.id) is True
+    with role_database.connect("aegis_media") as media:
+        assert _authorization_is_valid(media, operation.id) is False
+
+    for role in ("aegis_operations", "aegis_indexer", "aegis_media"):
+        with role_database.connect(role) as worker:
+            _assert_sqlstate(
+                worker,
+                "SELECT * FROM public.roots_rootgrant LIMIT 1",
+            )
+            _assert_sqlstate(
+                worker,
+                "SELECT * FROM public.identity_user_groups LIMIT 1",
+            )
+    with role_database.connect("aegis_web") as web:
+        _assert_sqlstate(
+            web,
+            "SELECT public.aegis_validate_operation_authorization(%s)",
+            (operation.id,),
+        )
+
+
+def test_opaque_authorization_fails_closed_for_stale_and_insufficient_access(
+    role_database: RoleDatabase,
+) -> None:
+    actor, root, operation = _create_authorized_operation()
+    with role_database.connect("aegis_operations") as worker:
+        assert _authorization_is_valid(worker, operation.id) is True
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE public.roots_rootgrant SET permissions = 1 "
+                "WHERE root_id = %s AND user_id = %s",
+                [root.id, actor.id],
+            )
+        assert _authorization_is_valid(worker, operation.id) is False
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE public.roots_rootgrant SET permissions = 3 "
+                "WHERE root_id = %s AND user_id = %s",
+                [root.id, actor.id],
+            )
+        assert _authorization_is_valid(worker, operation.id) is True
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE public.roots_root "
+                "SET authorization_epoch = authorization_epoch + 1 "
+                "WHERE id = %s",
+                [root.id],
+            )
+        assert _authorization_is_valid(worker, operation.id) is False
+
+
+def test_opaque_authorization_fails_closed_for_malformed_records(
+    role_database: RoleDatabase,
+) -> None:
+    _actor, _root, operation = _create_authorized_operation()
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE public.operations_operation "
+            "SET intent = %s::jsonb WHERE id = %s",
+            [
+                '{"roots":[{"id":"not-a-uuid","permissions":3}]}',
+                operation.id,
+            ],
+        )
+    with role_database.connect("aegis_operations") as worker:
+        assert _authorization_is_valid(worker, operation.id) is False
+
+
+def test_authorization_execute_revocation_is_enforced_and_safely_restored(
+    role_database: RoleDatabase,
+) -> None:
+    _actor, _root, operation = _create_authorized_operation()
+    signature = MANAGED_FUNCTION_SIGNATURES[
+        "aegis_validate_operation_authorization"
+    ]
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"REVOKE EXECUTE ON FUNCTION {signature} FROM aegis_operations"
+        )
+    try:
+        with role_database.connect("aegis_operations") as worker:
+            _assert_sqlstate(
+                worker,
+                "SELECT public.aegis_validate_operation_authorization(%s)",
+                (operation.id,),
+            )
+    finally:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"GRANT EXECUTE ON FUNCTION {signature} TO aegis_operations"
+            )
+
+    with role_database.connect("aegis_operations") as worker:
+        assert _authorization_is_valid(worker, operation.id) is True

@@ -808,6 +808,17 @@ def _verify_role_boundaries(cursor: Any) -> None:
 
     cursor.execute(
         """
+        SELECT rolcanlogin, rolsuper, rolinherit, rolcreaterole,
+               rolcreatedb, rolreplication, rolbypassrls
+          FROM pg_catalog.pg_roles
+         WHERE rolname = 'aegis_migrator'
+        """
+    )
+    if cursor.fetchone() != (True, False, False, False, False, False, False):
+        raise PrivilegeDriftError("migrator database role attributes are unsafe")
+
+    cursor.execute(
+        """
         SELECT rolname, rolcanlogin, rolsuper, rolinherit, rolcreaterole,
                rolcreatedb, rolreplication, rolbypassrls
           FROM pg_catalog.pg_roles

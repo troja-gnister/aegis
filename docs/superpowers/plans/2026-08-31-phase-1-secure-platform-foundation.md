@@ -2273,6 +2273,12 @@ $role_setup$;
 
 Repeat this fixed block for the five role names. The shell validates every secret file as regular, nonempty, at most 4 KiB, and not group/world readable before invoking psql; neither shell tracing nor PostgreSQL statement-value logging is enabled during initialization.
 
+Binding role-attribute requirement: every named login, including `aegis_migrator`, is
+`LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`.
+Initialization and privilege synchronization fail closed if an existing role has broader
+attributes; owning the application database/schema must not grant the migrator cluster-wide
+administrative power.
+
 - [ ] **Step 3: Implement idempotent privilege synchronization**
 
 `sync_db_privileges` runs only as the migrator and applies an explicit allowlist:
