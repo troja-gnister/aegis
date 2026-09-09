@@ -45,7 +45,11 @@ def test_operation_is_immutable_through_instance_queryset_bulk_and_delete_paths(
     with pytest.raises(PermissionError, match="immutable"):
         Operation.objects.filter(pk=operation.pk).update(intent={"roots": []})
     with pytest.raises(PermissionError, match="immutable"):
+        Operation.objects.filter(pk=operation.pk).update(idempotency_namespace=None)
+    with pytest.raises(PermissionError, match="immutable"):
         Operation.objects.bulk_update([operation], ["intent"])
+    with pytest.raises(PermissionError, match="immutable"):
+        Operation.objects.bulk_update([operation], ["idempotency_namespace"])
     with pytest.raises(PermissionError, match="deletion"):
         operation.delete()
     with pytest.raises(PermissionError, match="deletion"):

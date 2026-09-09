@@ -16,6 +16,7 @@ MIN_JOB_PRIORITY = -32_768
 MAX_JOB_PRIORITY = 32_767
 MAX_JOB_ATTEMPTS = 100
 UNCONFIGURED_MANIFEST_IDENTITY = "unconfigured:v1"
+OPERATION_IDEMPOTENCY_NAMESPACE_V1 = "v1"
 
 IMMUTABLE_JOB_FIELDS = frozenset(
     {"operation", "operation_id", "target_role", "kind", "payload", "priority", "max_attempts"}
@@ -150,6 +151,12 @@ class Operation(models.Model):
         related_name="operations",
     )
     request_id = models.CharField(max_length=64, db_index=True)
+    idempotency_namespace = models.CharField(
+        max_length=16,
+        null=True,
+        default=OPERATION_IDEMPOTENCY_NAMESPACE_V1,
+        editable=False,
+    )
     kind = models.CharField(max_length=64, choices=JobKind.choices)
     request_hash = models.BinaryField(max_length=32)
     intent = models.JSONField()
@@ -164,7 +171,19 @@ class Operation(models.Model):
         constraints: ClassVar[list[models.BaseConstraint]] = [
             models.UniqueConstraint(
                 fields=("actor", "request_id"),
-                name="operations_operation_actor_request_uniq",
+                condition=models.Q(
+                    idempotency_namespace=OPERATION_IDEMPOTENCY_NAMESPACE_V1
+                ),
+                name="operations_operation_actor_request_v1_uniq",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(idempotency_namespace__isnull=True)
+                    | models.Q(
+                        idempotency_namespace=OPERATION_IDEMPOTENCY_NAMESPACE_V1
+                    )
+                ),
+                name="operations_operation_idempotency_namespace_valid",
             ),
             models.CheckConstraint(
                 condition=models.Q(kind__in=JobKind.values),

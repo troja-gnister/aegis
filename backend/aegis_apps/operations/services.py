@@ -17,7 +17,14 @@ from aegis_apps.roots.locking import AuthorizationLocks
 from aegis_apps.roots.models import Root, RootGrant
 
 from .enums import JobKind, JobState, WorkerRole
-from .models import MAX_JOB_ATTEMPTS, MAX_JOB_PRIORITY, MIN_JOB_PRIORITY, Job, Operation
+from .models import (
+    MAX_JOB_ATTEMPTS,
+    MAX_JOB_PRIORITY,
+    MIN_JOB_PRIORITY,
+    OPERATION_IDEMPOTENCY_NAMESPACE_V1,
+    Job,
+    Operation,
+)
 from .serializers import (
     canonical_json_bytes,
     normalize_probe_intent,
@@ -227,6 +234,57 @@ def _verify_existing_job(
         raise ValueError("job availability conflict")
 
 
+def _existing_idempotent_operation(
+    *,
+    actor_id: uuid.UUID,
+    request_id: str,
+    kind: JobKind,
+    request_hash: bytes,
+    intent: Mapping[str, object],
+) -> Operation | None:
+    matching = Operation.objects.select_for_update().filter(
+        actor_id=actor_id,
+        request_id=request_id,
+    )
+    versioned = list(
+        matching.filter(
+            idempotency_namespace=OPERATION_IDEMPOTENCY_NAMESPACE_V1
+        ).order_by("id")[:2]
+    )
+    legacy = list(
+        matching.filter(idempotency_namespace__isnull=True).order_by("id")[:2]
+    )
+    if len(versioned) > 1 or len(legacy) > 1 or (versioned and legacy):
+        raise ValueError("operation idempotency conflict")
+    operation = versioned[0] if versioned else legacy[0] if legacy else None
+    if operation is None:
+        return None
+    _verify_operation_identity(
+        operation,
+        actor_id=actor_id,
+        request_id=request_id,
+        kind=kind,
+        request_hash=request_hash,
+        intent=intent,
+    )
+    initial = Job.objects.filter(
+        operation=operation,
+        target_role=WorkerRole.OPERATIONS,
+    ).first()
+    if initial is None:
+        raise ValueError("operation initial job is missing")
+    _verify_existing_job(
+        initial,
+        role=WorkerRole.OPERATIONS,
+        kind=kind,
+        payload=intent,
+        priority=0,
+        max_attempts=DEFAULT_MAX_ATTEMPTS,
+        explicit_available_at=None,
+    )
+    return operation
+
+
 def enqueue_job(
     *,
     operation: Operation,
@@ -313,35 +371,14 @@ def create_operation(
             actor_id,
             locked_users=authorization_locks.users((actor_id,)),
         )
-        existing = (
-            Operation.objects.select_for_update()
-            .filter(actor_id=locked_actor.id, request_id=bounded_request_id)
-            .first()
+        existing = _existing_idempotent_operation(
+            actor_id=locked_actor.id,
+            request_id=bounded_request_id,
+            kind=operation_kind,
+            request_hash=request_hash,
+            intent=normalized_intent,
         )
         if existing is not None:
-            _verify_operation_identity(
-                existing,
-                actor_id=locked_actor.id,
-                request_id=bounded_request_id,
-                kind=operation_kind,
-                request_hash=request_hash,
-                intent=normalized_intent,
-            )
-            initial = Job.objects.filter(
-                operation=existing,
-                target_role=WorkerRole.OPERATIONS,
-            ).first()
-            if initial is None:
-                raise ValueError("operation initial job is missing")
-            _verify_existing_job(
-                initial,
-                role=WorkerRole.OPERATIONS,
-                kind=operation_kind,
-                payload=normalized_intent,
-                priority=0,
-                max_attempts=DEFAULT_MAX_ATTEMPTS,
-                explicit_available_at=None,
-            )
             return existing
 
         snapshot = _capture_authorization_snapshot(
@@ -354,6 +391,7 @@ def create_operation(
                 operation = Operation.objects.create(
                     actor=locked_actor,
                     request_id=bounded_request_id,
+                    idempotency_namespace=OPERATION_IDEMPOTENCY_NAMESPACE_V1,
                     kind=operation_kind,
                     request_hash=request_hash,
                     intent=normalized_intent,
@@ -365,36 +403,15 @@ def create_operation(
                 )
                 return operation
         except IntegrityError:
-            conflicting = (
-                Operation.objects.select_for_update()
-                .filter(actor_id=locked_actor.id, request_id=bounded_request_id)
-                .first()
-            )
-            if conflicting is None:
-                raise
-            _verify_operation_identity(
-                conflicting,
+            conflicting = _existing_idempotent_operation(
                 actor_id=locked_actor.id,
                 request_id=bounded_request_id,
                 kind=operation_kind,
                 request_hash=request_hash,
                 intent=normalized_intent,
             )
-            initial = Job.objects.filter(
-                operation=conflicting,
-                target_role=WorkerRole.OPERATIONS,
-            ).first()
-            if initial is None:
-                raise ValueError("operation initial job is missing") from None
-            _verify_existing_job(
-                initial,
-                role=WorkerRole.OPERATIONS,
-                kind=operation_kind,
-                payload=normalized_intent,
-                priority=0,
-                max_attempts=DEFAULT_MAX_ATTEMPTS,
-                explicit_available_at=None,
-            )
+            if conflicting is None:
+                raise
             return conflicting
 
 

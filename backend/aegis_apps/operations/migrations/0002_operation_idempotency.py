@@ -14,11 +14,4 @@ class Migration(migrations.Migration):
             name="request_hash",
             field=models.BinaryField(max_length=32),
         ),
-        migrations.AddConstraint(
-            model_name="operation",
-            constraint=models.UniqueConstraint(
-                fields=("actor", "request_id"),
-                name="operations_operation_actor_request_uniq",
-            ),
-        ),
     ]
