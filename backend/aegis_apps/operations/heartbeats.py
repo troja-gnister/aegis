@@ -3,11 +3,17 @@ from __future__ import annotations
 import re
 import uuid
 from datetime import datetime, timedelta
-from typing import Final
+from typing import Any, Final
 
 from django.conf import settings
-from django.db import connection, transaction
+from django.db import DatabaseError, connection, transaction
 from django.utils import timezone
+from psycopg.types.json import Jsonb
+
+from aegis_apps.common.database_privileges import (
+    WORKER_DATABASE_ROLE_MAP,
+    current_database_login,
+)
 
 from .enums import HeartbeatStatus, JobState, WorkerRole
 from .models import UNCONFIGURED_MANIFEST_IDENTITY, Job, WorkerHeartbeat
@@ -28,6 +34,11 @@ _ALLOCATION_LOCK_KEYS: Final = {
     WorkerRole.OPERATIONS: 1,
     WorkerRole.INDEXER: 2,
     WorkerRole.MEDIA: 3,
+}
+_HEARTBEAT_DATABASE_FUNCTIONS: Final = {
+    WorkerRole.OPERATIONS: "aegis_publish_operations_heartbeat",
+    WorkerRole.INDEXER: "aegis_publish_indexer_heartbeat",
+    WorkerRole.MEDIA: "aegis_publish_media_heartbeat",
 }
 
 
@@ -116,6 +127,84 @@ def _current_job_id(value: object, *, role: WorkerRole, worker_id: str) -> uuid.
     ).exists():
         raise ValueError("invalid current job ID")
     return job_id
+
+
+def _canonical_current_job_id(value: object) -> uuid.UUID | None:
+    if value is None:
+        return None
+    if isinstance(value, uuid.UUID):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = uuid.UUID(value)
+        except ValueError:
+            raise ValueError("invalid current job ID") from None
+        if value != str(parsed):
+            raise ValueError("invalid current job ID")
+        return parsed
+    raise ValueError("invalid current job ID")
+
+
+def _publish_heartbeat_via_database(
+    *,
+    role: str,
+    worker_id: str,
+    status: str,
+    metrics: object,
+    current_job_id: uuid.UUID | str | None,
+    release_id: str | None,
+    schema_identity: str | None,
+    manifest_identity: str | None,
+) -> WorkerHeartbeat:
+    worker_role = _role(role)
+    canonical_id = canonical_worker_id(worker_id)
+    heartbeat_status = _status(status)
+    normalized_metrics = validate_heartbeat_metrics({} if metrics is None else metrics)
+    bounded_release = validate_safe_identity(
+        settings.AEGIS_RELEASE_ID if release_id is None else release_id,
+        field_name="release ID",
+    )
+    bounded_schema = validate_safe_identity(
+        current_schema_identity() if schema_identity is None else schema_identity,
+        field_name="schema identity",
+    )
+    bounded_manifest = _manifest_identity(
+        current_manifest_identity() if manifest_identity is None else manifest_identity
+    )
+    job_id = _canonical_current_job_id(current_job_id)
+    function_name = _HEARTBEAT_DATABASE_FUNCTIONS[worker_role]
+    parameters: list[Any] = [
+        canonical_id,
+        bounded_release,
+        bounded_schema,
+        bounded_manifest,
+        heartbeat_status,
+        Jsonb(normalized_metrics),
+        job_id,
+        int(_retention_seconds()),
+        _slot_limit(),
+    ]
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"SELECT public.{function_name}(%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                parameters,
+            )
+            row = cursor.fetchone()
+    except DatabaseError as error:
+        cause = error.__cause__
+        sqlstate = getattr(cause, "sqlstate", None)
+        if sqlstate == "P0001":
+            raise HeartbeatCapacityError("worker heartbeat capacity exhausted") from None
+        if sqlstate == "22023":
+            raise ValueError("invalid worker heartbeat") from None
+        raise
+    if row is None or not isinstance(row[0], uuid.UUID):
+        raise RuntimeError("worker heartbeat publication failed")
+    try:
+        return WorkerHeartbeat.objects.get(pk=row[0], role=worker_role)
+    except WorkerHeartbeat.DoesNotExist:
+        raise RuntimeError("worker heartbeat publication failed") from None
 
 
 def _publish_heartbeat(
@@ -217,6 +306,24 @@ def publish_heartbeat(
     schema_identity: str | None = None,
     manifest_identity: str | None = None,
 ) -> WorkerHeartbeat:
+    configured_role = settings.AEGIS_PROCESS_ROLE
+    if configured_role in WorkerRole.values:
+        database_login = current_database_login()
+        database_role = WORKER_DATABASE_ROLE_MAP.get(database_login)
+        if database_role is not None:
+            requested_role = _role(role)
+            if requested_role != database_role or requested_role != configured_role:
+                raise ValueError("worker heartbeat role boundary mismatch")
+            return _publish_heartbeat_via_database(
+                role=requested_role,
+                worker_id=worker_id,
+                status=status,
+                metrics=metrics,
+                current_job_id=current_job_id,
+                release_id=release_id,
+                schema_identity=schema_identity,
+                manifest_identity=manifest_identity,
+            )
     return _publish_heartbeat(
         role=role,
         worker_id=worker_id,

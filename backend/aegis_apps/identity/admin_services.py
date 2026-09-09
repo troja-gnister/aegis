@@ -206,7 +206,7 @@ def _save_group_from_admin_once(
                 user_ids=affected_member_ids,
             )
 
-        identity, _ = GroupIdentity.objects.select_for_update().get_or_create(group=group)
+        identity, _ = GroupIdentity.objects.get_or_create(group=group)
         subject_id = identity.pk
         if created:
             event_type = "identity.group.created"

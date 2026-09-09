@@ -6,11 +6,16 @@ from collections.abc import Mapping
 from datetime import datetime, timedelta
 from typing import Final
 
+from django.conf import settings
 from django.contrib.postgres.aggregates import BitOr
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, connection, transaction
 from django.db.models import Q
 from django.utils import timezone
 
+from aegis_apps.common.database_privileges import (
+    WORKER_DATABASE_ROLE_MAP,
+    current_database_login,
+)
 from aegis_apps.common.middleware import REQUEST_ID
 from aegis_apps.identity.models import User
 from aegis_apps.roots.locking import AuthorizationLocks
@@ -415,9 +420,28 @@ def create_operation(
             return conflicting
 
 
+def _validate_authorization_snapshot_via_database(operation_id: uuid.UUID) -> bool:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT public.aegis_validate_operation_authorization(%s)",
+            [operation_id],
+        )
+        row = cursor.fetchone()
+    if row is None:
+        return False
+    return row[0] is True
+
+
 def validate_authorization_snapshot(operation: Operation) -> bool:
     if not isinstance(operation, Operation) or not isinstance(operation.pk, uuid.UUID):
         return False
+    configured_role = getattr(settings, "AEGIS_PROCESS_ROLE", None)
+    if configured_role in WorkerRole.values:
+        database_role = WORKER_DATABASE_ROLE_MAP.get(current_database_login())
+        if database_role is not None:
+            if database_role != configured_role:
+                return False
+            return _validate_authorization_snapshot_via_database(operation.pk)
     with transaction.atomic():
         stored = (
             Operation.objects.filter(pk=operation.pk)

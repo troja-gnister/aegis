@@ -381,7 +381,7 @@ def set_group_grant(
         else:
             grant.permissions = int(mask)
             grant.save(update_fields=("permissions", "updated_at"))
-        identity, _ = GroupIdentity.objects.select_for_update().get_or_create(group=group)
+        identity, _ = GroupIdentity.objects.get_or_create(group=group)
         _advance_epochs(root_ids=(root.id,), user_ids=members)
         _grant_audit(
             event_type="authorization.group.grant.changed",
@@ -450,7 +450,7 @@ def remove_grant(
         else:
             if grant.group_id is None or group is None:
                 raise RuntimeError("invalid persisted root grant")
-            group_identity, _ = GroupIdentity.objects.select_for_update().get_or_create(
+            group_identity, _ = GroupIdentity.objects.get_or_create(
                 group=group
             )
             subject_id = group_identity.id
