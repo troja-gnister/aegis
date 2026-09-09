@@ -2294,6 +2294,7 @@ ROLE_PRIVILEGES: dict[str, dict[str, tuple[str, ...]]] = {
         "identity_user_groups": ("SELECT", "INSERT", "DELETE"),
         "identity_user_user_permissions": ("SELECT", "INSERT", "DELETE"),
         "identity_loginthrottlebucket": ("SELECT", "INSERT", "UPDATE", "DELETE"),
+        "django_migrations": ("SELECT",),
         "django_session": ("SELECT", "INSERT", "UPDATE", "DELETE"),
         "django_admin_log": ("SELECT", "INSERT"),
         "roots_root": ("SELECT", "INSERT", "UPDATE"),
@@ -2304,18 +2305,21 @@ ROLE_PRIVILEGES: dict[str, dict[str, tuple[str, ...]]] = {
         "operations_workerheartbeat": ("SELECT",),
     },
     "aegis_operations": {
+        "django_migrations": ("SELECT",),
         "operations_operation": ("SELECT",),
         "operations_job": ("SELECT",),
         "operations_workerheartbeat": ("SELECT",),
         "audit_auditevent": ("INSERT",),
     },
     "aegis_indexer": {
+        "django_migrations": ("SELECT",),
         "operations_operation": ("SELECT",),
         "operations_job": ("SELECT",),
         "operations_workerheartbeat": ("SELECT",),
         "audit_auditevent": ("INSERT",),
     },
     "aegis_media": {
+        "django_migrations": ("SELECT",),
         "operations_operation": ("SELECT",),
         "operations_job": ("SELECT",),
         "operations_workerheartbeat": ("SELECT",),
@@ -2346,7 +2350,9 @@ Worker-side authorization revalidation must also cross a narrow database boundar
 
 - [ ] **Step 4: Add PostgreSQL immutability and insertion-boundary triggers**
 
-Create `audit.0003_database_append_only`, depending explicitly on `audit.0002_auditevent_manager_names`, and `operations.0008_database_immutability`, depending explicitly on `operations.0007_operation_idempotency_namespace_boundary`. Use reversible `RunSQL` migrations to reject `UPDATE`, `DELETE`, and `TRUNCATE` on `audit_auditevent`; reject `UPDATE`, `DELETE`, and `TRUNCATE` on operation intents; and reject changes to immutable job columns after insert. An operation `BEFORE INSERT` trigger must reject `idempotency_namespace IS NULL`, which is reserved for rows preserved by the Task 10 migration bridge. Allow job deletion only under a future explicit retention function, which is not implemented in Phase 1. Trigger errors contain table/field categories, not prior values.
+Create `audit.0003_database_append_only`, depending explicitly on `audit.0002_auditevent_manager_names`, and `operations.0008_database_immutability`, depending explicitly on `operations.0007_operation_idempotency_namespace_boundary`, `roots.0001_initial`, and the current `identity.0004_login_throttle` leaf. The cross-app dependencies are mandatory because this Task 11 operations boundary will reference authorization tables and must migrate correctly from a fresh empty database without incidental graph ordering. Use reversible `RunSQL` migrations to reject `UPDATE`, `DELETE`, and `TRUNCATE` on `audit_auditevent`; reject `UPDATE`, `DELETE`, and `TRUNCATE` on operation intents; and reject changes to immutable job columns after insert. An operation `BEFORE INSERT` trigger must reject `idempotency_namespace IS NULL`, which is reserved for rows preserved by the Task 10 migration bridge. Allow job deletion only under a future explicit retention function, which is not implemented in Phase 1. Trigger errors contain table/field categories, not prior values.
+
+The immutable triggers may permit only the table/schema owner (the migrator in deployed environments) to perform Django migration reversal and test-database flush maintenance. Determine that trust from PostgreSQL ownership/membership metadata, not from a caller-settable GUC or payload value. Privilege synchronization rejects every runtime-role membership edge to the migrator/owner, so runtime roles can never take this path. Focused tests prove schema-owner flush and reverse migration work, while actual runtime logins are still denied `UPDATE`, `DELETE`, and `TRUNCATE` by grants/triggers.
 
 ```sql
 CREATE FUNCTION aegis_reject_change() RETURNS trigger
