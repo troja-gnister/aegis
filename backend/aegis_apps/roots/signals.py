@@ -11,7 +11,7 @@ from django.db.models.signals import ModelSignal
 
 from aegis_apps.identity.models import User
 
-from .locking import AuthorizationLocks
+from .locking import AuthorizationLocks, MembershipDiscoveryChanged
 from .services import advance_membership_epochs, root_ids_for_groups
 
 _PENDING_ATTRIBUTE = "_aegis_membership_epoch_pending"
@@ -81,6 +81,26 @@ def _group_ids_for_lock(
     return frozenset(value for value in (pk_set or ()) if type(value) is int and value > 0)
 
 
+def _user_ids_for_discovery(
+    *,
+    instance: User | Group,
+    reverse: bool,
+    pk_set: set[object] | None,
+    clear: bool,
+) -> frozenset[uuid.UUID]:
+    if reverse:
+        if not isinstance(instance, Group) or instance.pk is None:
+            return frozenset()
+        if clear:
+            return frozenset(instance.user_set.values_list("pk", flat=True))
+        return frozenset(
+            value for value in (pk_set or ()) if isinstance(value, uuid.UUID)
+        )
+    if not isinstance(instance, User) or not isinstance(instance.pk, uuid.UUID):
+        return frozenset()
+    return frozenset((instance.pk,))
+
+
 def _lock_membership_change(
     *,
     instance: User | Group,
@@ -89,13 +109,20 @@ def _lock_membership_change(
     pk_set: set[object] | None,
 ) -> _MembershipChange:
     clear = action == "pre_clear"
+    authorization_locks = AuthorizationLocks()
+    discovery_user_ids = _user_ids_for_discovery(
+        instance=instance,
+        reverse=reverse,
+        pk_set=pk_set,
+        clear=clear,
+    )
+    authorization_locks.membership_users(discovery_user_ids)
     group_ids = _group_ids_for_lock(
         instance=instance,
         reverse=reverse,
         pk_set=pk_set,
         clear=clear,
     )
-    authorization_locks = AuthorizationLocks()
     locked_groups = authorization_locks.groups(group_ids)
     if len(locked_groups) != len(group_ids):
         raise ValueError("group membership principals are invalid")
@@ -107,6 +134,10 @@ def _lock_membership_change(
             reverse=reverse,
             pk_set=pk_set,
             clear=clear,
+        )
+    if reverse and clear and change.user_ids != discovery_user_ids:
+        raise MembershipDiscoveryChanged(
+            "group membership changed during discovery; retry the outer transaction"
         )
     root_ids = root_ids_for_groups(group_ids)
     locked_roots = authorization_locks.roots(root_ids)

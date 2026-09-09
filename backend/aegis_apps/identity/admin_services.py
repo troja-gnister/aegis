@@ -5,7 +5,7 @@ from collections.abc import Collection, Iterable
 from typing import Any, cast
 
 from django.contrib.auth.models import Group
-from django.db import transaction
+from django.db import connection, transaction
 from django.forms import ModelForm
 
 from aegis_apps.audit.services import record_event
@@ -52,6 +52,10 @@ def save_user_from_admin(
         changes = set(form.changed_data)
         if not created and not changes:
             return user
+        if not isinstance(user.pk, uuid.UUID):
+            raise ValueError("user is invalid")
+        authorization_locks = AuthorizationLocks()
+        authorization_locks.membership_users((user.pk,))
         previous_group_ids = (
             set() if created else set(user.groups.values_list("pk", flat=True))
         )
@@ -60,7 +64,6 @@ def save_user_from_admin(
             if "groups" in form.cleaned_data
             else set(previous_group_ids)
         )
-        authorization_locks = AuthorizationLocks()
         group_scope = previous_group_ids | next_group_ids
         locked_groups = authorization_locks.groups(group_scope)
         if len(locked_groups) != len(group_scope):
@@ -114,7 +117,7 @@ def save_user_from_admin(
         return user
 
 
-def save_group_from_admin(
+def _save_group_from_admin_once(
     *,
     actor: User,
     form: ModelForm[Any],
@@ -122,7 +125,10 @@ def save_group_from_admin(
     request_id: str,
 ) -> Group:
     with transaction.atomic():
-        from aegis_apps.roots.locking import AuthorizationLocks
+        from aegis_apps.roots.locking import (
+            AuthorizationLocks,
+            MembershipDiscoveryChanged,
+        )
         from aegis_apps.roots.services import (
             advance_identity_admin_epochs,
             root_ids_for_groups,
@@ -142,7 +148,17 @@ def save_group_from_admin(
             not isinstance(member_id, uuid.UUID) for member_id in next_member_ids
         ):
             raise ValueError("group members are invalid")
+        if not created and type(group.pk) is not int:
+            raise ValueError("group is invalid")
+        discovered_member_ids = (
+            set()
+            if created
+            else set(group.user_set.values_list("pk", flat=True))
+        )
         authorization_locks = AuthorizationLocks()
+        authorization_locks.membership_users(
+            discovered_member_ids | next_member_ids
+        )
         if created:
             group.save()
             if type(group.pk) is not int:
@@ -152,14 +168,16 @@ def save_group_from_admin(
                 raise ValueError("group is invalid")
             previous_member_ids: set[uuid.UUID] = set()
         else:
-            if type(group.pk) is not int:
-                raise ValueError("group is invalid")
             locked_group = authorization_locks.groups((group.pk,)).get(group.pk)
             if locked_group is None:
                 raise Group.DoesNotExist
             previous_member_ids = set(
                 locked_group.user_set.values_list("pk", flat=True)
             )
+            if previous_member_ids != discovered_member_ids:
+                raise MembershipDiscoveryChanged(
+                    "group membership changed during discovery"
+                )
 
         changed_member_ids = previous_member_ids ^ next_member_ids
         affected_member_ids = set(changed_member_ids)
@@ -207,6 +225,36 @@ def save_group_from_admin(
         return group
 
 
+def save_group_from_admin(
+    *,
+    actor: User,
+    form: ModelForm[Any],
+    member_ids: Collection[uuid.UUID],
+    request_id: str,
+) -> Group:
+    from aegis_apps.roots.locking import MembershipDiscoveryChanged
+
+    if connection.in_atomic_block:
+        return _save_group_from_admin_once(
+            actor=actor,
+            form=form,
+            member_ids=member_ids,
+            request_id=request_id,
+        )
+    for attempt in range(3):
+        try:
+            return _save_group_from_admin_once(
+                actor=actor,
+                form=form,
+                member_ids=member_ids,
+                request_id=request_id,
+            )
+        except MembershipDiscoveryChanged:
+            if attempt == 2:
+                raise
+    raise AssertionError("unreachable membership discovery retry")
+
+
 def set_user_active(
     *, actor: User, user_id: uuid.UUID, active: bool, request_id: str
 ) -> User:
@@ -219,8 +267,9 @@ def set_user_active(
             root_ids_for_user,
         )
 
-        affected_root_ids = root_ids_for_user(user_id)
         authorization_locks = AuthorizationLocks()
+        authorization_locks.membership_users((user_id,))
+        affected_root_ids = root_ids_for_user(user_id)
         locked_roots = authorization_locks.roots(affected_root_ids)
         if len(locked_roots) != len(affected_root_ids):
             raise ValueError("user authorization roots are invalid")

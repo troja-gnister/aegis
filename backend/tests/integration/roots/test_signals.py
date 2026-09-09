@@ -8,8 +8,12 @@ from typing import Any
 
 import pytest
 from aegis_apps.audit.models import AuditEvent
-from aegis_apps.identity.admin import AegisGroupAdminForm
-from aegis_apps.identity.admin_services import save_group_from_admin, set_user_active
+from aegis_apps.identity.admin import AegisGroupAdminForm, AegisUserChangeForm
+from aegis_apps.identity.admin_services import (
+    save_group_from_admin,
+    save_user_from_admin,
+    set_user_active,
+)
 from aegis_apps.identity.models import User
 from aegis_apps.identity.session_policy import AUTHORIZATION_EPOCH
 from aegis_apps.roots.models import Root, RootGrant
@@ -127,6 +131,214 @@ def test_group_side_membership_add_remove_clear_tracks_only_changed_members() ->
 
     group.user_set.clear()
     assert _epochs(first, second, root) == [2, 2, 3]
+
+
+def test_raw_user_clear_serializes_discovery_with_concurrent_add() -> None:
+    user = User.objects.create_user(username="raw-clear-racing-user")
+    retained_group = Group.objects.create(name="raw-clear-existing-group")
+    racing_group = Group.objects.create(name="raw-clear-racing-group")
+    retained_root = _root("raw-clear-existing-root")
+    racing_root = _root("raw-clear-racing-root")
+    RootGrant.objects.create(
+        root=retained_root,
+        group=retained_group,
+        permissions=Permission.BROWSE,
+    )
+    RootGrant.objects.create(
+        root=racing_root,
+        group=racing_group,
+        permissions=Permission.BROWSE,
+    )
+    user.groups.add(retained_group)
+    User.objects.filter(pk=user.pk).update(authorization_epoch=0)
+    Root.objects.filter(pk__in=(retained_root.pk, racing_root.pk)).update(
+        authorization_epoch=0
+    )
+    clear_authorization_cache()
+    assert effective_permissions(user_id=user.pk, root_id=racing_root.pk) == Permission(0)
+
+    add_applied = Event()
+    clear_serialization_attempted = Event()
+    invalidations: list[tuple[frozenset[object], frozenset[object]]] = []
+
+    def record_invalidation(
+        *, user_ids: frozenset[object], root_ids: frozenset[object]
+    ) -> None:
+        invalidations.append((user_ids, root_ids))
+
+    def add_transaction() -> None:
+        close_old_connections()
+        try:
+            with transaction.atomic():
+                thread_user = User.objects.get(pk=user.pk)
+                thread_group = Group.objects.get(pk=racing_group.pk)
+                thread_group.user_set.add(thread_user)
+                add_applied.set()
+                assert clear_serialization_attempted.wait(timeout=10)
+        finally:
+            close_old_connections()
+
+    def clear_transaction() -> None:
+        close_old_connections()
+        try:
+            assert add_applied.wait(timeout=10)
+
+            def observe_serialization(
+                execute: _ExecuteQuery,
+                sql: str,
+                params: Any,
+                many: bool,
+                context: dict[str, Any],
+            ) -> Any:
+                normalized = " ".join(sql.upper().split())
+                user_lock = (
+                    normalized.startswith("SELECT")
+                    and 'FROM "IDENTITY_USER"' in normalized
+                    and "FOR UPDATE" in normalized
+                )
+                discovery_lock = "PG_ADVISORY_XACT_LOCK" in normalized
+                if user_lock or discovery_lock:
+                    clear_serialization_attempted.set()
+                return execute(sql, params, many, context)
+
+            with connection.execute_wrapper(observe_serialization), transaction.atomic():
+                User.objects.get(pk=user.pk).groups.clear()
+        finally:
+            close_old_connections()
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(
+            "aegis_apps.roots.services.invalidate_authorization_cache",
+            record_invalidation,
+        )
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            add_future = executor.submit(add_transaction)
+            clear_future = executor.submit(clear_transaction)
+            add_future.result(timeout=20)
+            clear_future.result(timeout=20)
+
+    assert not user.groups.exists()
+    assert _epochs(user, retained_root, racing_root) == [2, 1, 2]
+    assert invalidations == [
+        (frozenset((user.pk,)), frozenset((racing_root.pk,))),
+        (
+            frozenset((user.pk,)),
+            frozenset((retained_root.pk, racing_root.pk)),
+        ),
+    ]
+    assert effective_permissions(user_id=user.pk, root_id=racing_root.pk) == Permission(0)
+
+
+def test_user_admin_serializes_membership_snapshot_with_concurrent_add() -> None:
+    actor = User.objects.create_superuser(username="admin-racing-membership-actor")
+    user = User.objects.create_user(username="admin-racing-membership-user")
+    retained_group = Group.objects.create(name="admin-racing-existing-group")
+    racing_group = Group.objects.create(name="admin-racing-new-group")
+    retained_root = _root("admin-racing-existing-root")
+    racing_root = _root("admin-racing-new-root")
+    RootGrant.objects.create(
+        root=retained_root,
+        group=retained_group,
+        permissions=Permission.BROWSE,
+    )
+    RootGrant.objects.create(
+        root=racing_root,
+        group=racing_group,
+        permissions=Permission.BROWSE,
+    )
+    user.groups.add(retained_group)
+    User.objects.filter(pk=user.pk).update(authorization_epoch=0)
+    Root.objects.filter(pk__in=(retained_root.pk, racing_root.pk)).update(
+        authorization_epoch=0
+    )
+    clear_authorization_cache()
+    assert effective_permissions(user_id=user.pk, root_id=racing_root.pk) == Permission(0)
+
+    add_applied = Event()
+    admin_serialization_attempted = Event()
+    invalidations: list[tuple[frozenset[object], frozenset[object]]] = []
+
+    def record_invalidation(
+        *, user_ids: frozenset[object], root_ids: frozenset[object]
+    ) -> None:
+        invalidations.append((user_ids, root_ids))
+
+    def add_transaction() -> None:
+        close_old_connections()
+        try:
+            with transaction.atomic():
+                thread_user = User.objects.get(pk=user.pk)
+                thread_group = Group.objects.get(pk=racing_group.pk)
+                thread_user.groups.add(thread_group)
+                add_applied.set()
+                assert admin_serialization_attempted.wait(timeout=10)
+        finally:
+            close_old_connections()
+
+    def admin_transaction() -> None:
+        close_old_connections()
+        try:
+            assert add_applied.wait(timeout=10)
+            thread_user = User.objects.get(pk=user.pk)
+            form_data = _user_change_data(thread_user, groups=[])
+            form_data["date_joined"] = thread_user.date_joined.isoformat()
+            form_data["authorization_epoch"] = thread_user.authorization_epoch
+            form = AegisUserChangeForm(
+                data=form_data,
+                instance=thread_user,
+            )
+            assert form.is_valid(), form.errors
+            assert "groups" in form.changed_data
+            assert form.save(commit=False) is thread_user
+
+            def observe_serialization(
+                execute: _ExecuteQuery,
+                sql: str,
+                params: Any,
+                many: bool,
+                context: dict[str, Any],
+            ) -> Any:
+                normalized = " ".join(sql.upper().split())
+                user_lock = (
+                    normalized.startswith("SELECT")
+                    and 'FROM "IDENTITY_USER"' in normalized
+                    and "FOR UPDATE" in normalized
+                )
+                discovery_lock = "PG_ADVISORY_XACT_LOCK" in normalized
+                if user_lock or discovery_lock:
+                    admin_serialization_attempted.set()
+                return execute(sql, params, many, context)
+
+            with connection.execute_wrapper(observe_serialization):
+                save_user_from_admin(
+                    actor=User.objects.get(pk=actor.pk),
+                    form=form,
+                    request_id="admin_membership_race",
+                )
+        finally:
+            close_old_connections()
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(
+            "aegis_apps.roots.services.invalidate_authorization_cache",
+            record_invalidation,
+        )
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            add_future = executor.submit(add_transaction)
+            admin_future = executor.submit(admin_transaction)
+            add_future.result(timeout=20)
+            admin_future.result(timeout=20)
+
+    assert not user.groups.exists()
+    assert _epochs(user, retained_root, racing_root) == [2, 1, 2]
+    assert invalidations == [
+        (frozenset((user.pk,)), frozenset((racing_root.pk,))),
+        (
+            frozenset((user.pk,)),
+            frozenset((retained_root.pk, racing_root.pk)),
+        ),
+    ]
+    assert effective_permissions(user_id=user.pk, root_id=racing_root.pk) == Permission(0)
 
 
 def test_membership_changes_make_cached_decisions_unreachable_and_revoke_session() -> None:
@@ -434,39 +646,39 @@ def test_overlapping_group_admin_saves_snapshot_members_after_serialization() ->
     def second_transaction() -> None:
         close_old_connections()
         try:
-            with transaction.atomic():
-                thread_actor = User.objects.get(pk=actor.pk)
-                thread_group = Group.objects.get(pk=group.pk)
-                thread_final = User.objects.get(pk=final.pk)
-                form = group_form(thread_group=thread_group, member=thread_final)
-                forms_loaded_from_first.wait(timeout=10)
-                assert first_change_applied.wait(timeout=10)
+            thread_actor = User.objects.get(pk=actor.pk)
+            thread_group = Group.objects.get(pk=group.pk)
+            thread_final = User.objects.get(pk=final.pk)
+            form = group_form(thread_group=thread_group, member=thread_final)
+            forms_loaded_from_first.wait(timeout=10)
+            assert first_change_applied.wait(timeout=10)
 
-                def observe_serialization(
-                    execute: _ExecuteQuery,
-                    sql: str,
-                    params: Any,
-                    many: bool,
-                    context: dict[str, Any],
-                ) -> Any:
-                    normalized = " ".join(sql.upper().split())
-                    group_update = normalized.startswith('UPDATE "AUTH_GROUP"')
-                    group_lock = (
-                        normalized.startswith("SELECT")
-                        and 'FROM "AUTH_GROUP"' in normalized
-                        and "FOR UPDATE" in normalized
-                    )
-                    if group_update or group_lock:
-                        second_serialization_attempted.set()
-                    return execute(sql, params, many, context)
+            def observe_serialization(
+                execute: _ExecuteQuery,
+                sql: str,
+                params: Any,
+                many: bool,
+                context: dict[str, Any],
+            ) -> Any:
+                normalized = " ".join(sql.upper().split())
+                group_update = normalized.startswith('UPDATE "AUTH_GROUP"')
+                group_lock = (
+                    normalized.startswith("SELECT")
+                    and 'FROM "AUTH_GROUP"' in normalized
+                    and "FOR UPDATE" in normalized
+                )
+                discovery_lock = "PG_ADVISORY_XACT_LOCK" in normalized
+                if group_update or group_lock or discovery_lock:
+                    second_serialization_attempted.set()
+                return execute(sql, params, many, context)
 
-                with connection.execute_wrapper(observe_serialization):
-                    save_group_from_admin(
-                        actor=thread_actor,
-                        form=form,
-                        member_ids=(thread_final.pk,),
-                        request_id="overlapping_group_tx2",
-                    )
+            with connection.execute_wrapper(observe_serialization):
+                save_group_from_admin(
+                    actor=thread_actor,
+                    form=form,
+                    member_ids=(thread_final.pk,),
+                    request_id="overlapping_group_tx2",
+                )
         finally:
             close_old_connections()
 
