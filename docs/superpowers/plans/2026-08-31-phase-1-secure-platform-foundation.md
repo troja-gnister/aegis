@@ -2194,6 +2194,8 @@ git push
 - Create: `backend/aegis_apps/common/management/{__init__.py,commands/__init__.py,commands/deploy_database.py,commands/sync_db_privileges.py}`
 - Create: `backend/aegis_apps/audit/migrations/0002_database_append_only.py`
 - Create: `backend/aegis_apps/operations/migrations/0008_database_immutability.py` (depends on `operations.0007_operation_idempotency_namespace_boundary`)
+- Modify: `backend/aegis_apps/operations/heartbeats.py`
+- Modify: `backend/tests/integration/operations/{test_heartbeats,test_run_role}.py`
 - Create: `tests/deployment/test_database_roles.py`
 - Modify: `tests/deployment/test_compose.py`
 - Create: `tests/deployment/test_container_boundaries.py`
@@ -2229,7 +2231,9 @@ def test_operations_role_cannot_change_grants_or_operation_intent(db_role_dsn, o
                 )
 ```
 
-Add equivalent assertions that media/indexer cannot read sessions or identities beyond the opaque columns needed for epoch checks, web cannot update leased execution columns (including `execution_started_at`), all runtime roles cannot alter schema, and no role can update/delete audit rows. Assert that current operation inserts cannot set the migration-only `idempotency_namespace` to `NULL`. For each of operations, indexer, and media, prove that only the role's fenced live-lease transition can set `execution_started_at`; web and unrelated worker roles cannot set or rewrite it.
+Add equivalent assertions that media/indexer cannot read sessions or identities beyond the opaque columns needed for epoch checks, web cannot update leased execution columns (including `execution_started_at`), all runtime roles cannot alter schema, and no role can update/delete audit rows. Assert that current operation inserts cannot set the migration-only `idempotency_namespace` to `NULL`.
+
+Using actual role credentials, exercise the complete Task 10 job lifecycle. Prove operations, indexer, and media can each perform their own fenced durable start; an unstarted claim can be relinquished immediately; retry can set bounded backoff in `available_at`; and an expired, already-started attempt can be taken over and have its start marker cleared for the new attempt. Cross-role and web attempts must fail, while valid terminal transitions preserve the durable start marker.
 
 Run `uv run pytest tests/deployment/test_database_roles.py -q`.
 
@@ -2323,9 +2327,23 @@ ROLE_PRIVILEGES: dict[str, dict[str, tuple[str, ...]]] = {
 }
 ```
 
-Apply column-level `SELECT(id, is_active, authorization_epoch)` on `identity_user` to each worker and column-level `UPDATE(state, attempt_token, execution_started_at, lease_owner, lease_expires_at, attempts, safe_error_code, safe_error_detail, result, updated_at)` on `operations_job`. Web receives no `UPDATE` privilege on `execution_started_at` or any other leased execution column. A role-bound database guard plus the service's attempt-token compare-and-swap must limit `execution_started_at` to the one `NULL`-to-database-time durable-start transition for a live lease whose `target_role` matches the worker login; unrelated worker roles cannot perform it.
+Apply column-level `SELECT(id, is_active, authorization_epoch)` on `identity_user` to each worker and column-level `UPDATE(state, available_at, attempt_token, execution_started_at, lease_owner, lease_expires_at, attempts, safe_error_code, safe_error_detail, result, updated_at)` on `operations_job`. `available_at` is required by both immediate pre-dispatch relinquishment and bounded retry/backoff. Web receives no `UPDATE` privilege on `execution_started_at`, `available_at`, or any other leased execution column.
 
-Do not grant workers direct `INSERT`, `UPDATE`, or `DELETE` on `operations_workerheartbeat`. Give each fixed worker role `EXECUTE` only on migrator-owned, fixed-empty-`search_path` heartbeat publish/allocation functions that bind the row role from `current_user`, perform database-time monotonic publication, and recycle only that role's bounded stale slots. A caller cannot select another role for publication or recycling, and fresh-slot exhaustion fails closed. Give workers `EXECUTE` on the migrator-owned `aegis_effective_permissions(user_uuid, root_uuid)` SQL function with the same fixed empty `search_path`; the function returns only the additive integer mask and prevents broad user/group-membership reads. Revoke all first, grant the allowlist, and compare every managed table/column/function to this structure before commit. Django model deletion of users/roots remains disabled in Phase 1 so web does not receive those table DELETE privileges.
+The database job guard and Task 10 service compare-and-swap must permit exactly these `execution_started_at` cases:
+
+- a role-correct live owner/token start changes `NULL` to authoritative database time exactly once;
+- a role-correct takeover of an expired, already-started attempt increments the fencing token, installs the new lease owner/expiry, and clears non-NULL to `NULL` for the new attempt;
+- a valid live owner/token retry transition may clear non-NULL to `NULL`, clear the lease, and set the bounded future `available_at` value;
+- an unstarted relinquishment requires the marker already be `NULL`, leaves it `NULL`, clears the lease, and sets `available_at` for immediate reclaim;
+- successful, failed, authorization-stale, and attempts-exhausted terminal transitions preserve the marker value.
+
+Ordinary queued/retry claims retain a `NULL` marker. Every other marker change fails, including a stale token, wrong owner, wrong worker role, expired start request, second start write, terminal rewrite, or web update. Database-role regressions cover relinquishment, retry/backoff, expired takeover after start, terminal preservation, successful starts for all three roles, and cross-role/web rejection so the column grant and guard are verified together.
+
+Do not grant workers direct `INSERT`, `UPDATE`, or `DELETE` on `operations_workerheartbeat`. Create exactly three migrator-owned `SECURITY DEFINER` publish/allocation entry points: `aegis_publish_operations_heartbeat(...)`, `aegis_publish_indexer_heartbeat(...)`, and `aegis_publish_media_heartbeat(...)`. Every function sets a fixed empty `search_path`, fully qualifies every referenced object, hard-codes its role literal, and accepts no role argument; it must not infer a role from `current_user` or `session_user`. Revoke `EXECUTE` from `PUBLIC` and grant each function only to its matching login role.
+
+Each role-specific entry point validates the bounded heartbeat schema and nullable current-job reference, obtains authoritative database time, publishes monotonically so an older observation cannot replace newer or stopping state, and allocates/recycles only bounded stale slots for its hard-coded role under that role's allocation lock. A non-NULL current job must be a live running lease for the same hard-coded role and worker ID. It must never recycle another role's row, and it fails closed when all same-role slots are fresh. The production publisher in `backend/aegis_apps/operations/heartbeats.py` dispatches through a fixed `WorkerRole`-to-function mapping when using role-separated runtime credentials and performs no direct heartbeat DML.
+
+Integration and deployment tests connect with each actual worker credential and run `run_role --once` for operations, indexer, and media, proving that each publishes only through its own entry point. They revoke/deny public execution and prove every worker is rejected when calling another role's function or attempting cross-role publication/recycling. Give workers `EXECUTE` on the migrator-owned `aegis_effective_permissions(user_uuid, root_uuid)` SQL function with the same fixed empty `search_path`; the function returns only the additive integer mask and prevents broad user/group-membership reads. Revoke all first, grant the allowlist, and compare every managed table/column/function to this structure before commit. Django model deletion of users/roots remains disabled in Phase 1 so web does not receive those table DELETE privileges.
 
 - [ ] **Step 4: Add PostgreSQL immutability and insertion-boundary triggers**
 
