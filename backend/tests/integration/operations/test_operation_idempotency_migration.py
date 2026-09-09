@@ -14,7 +14,7 @@ from aegis_apps.operations.models import Job, Operation
 from aegis_apps.operations.services import create_operation
 from aegis_apps.roots.models import Root, RootGrant
 from aegis_apps.roots.permissions import Permission
-from django.db import close_old_connections, connection
+from django.db import DatabaseError, close_old_connections, connection, transaction
 from django.db.migrations.executor import MigrationExecutor
 from django.utils import timezone
 
@@ -334,5 +334,29 @@ def test_upgrade_preserves_and_demotes_ambiguous_v1_null_actor_history() -> None
             Operation.objects.get(pk=single_operation.pk).idempotency_namespace
             == "v1"
         )
+        with (
+            pytest.raises(DatabaseError) as caught,
+            transaction.atomic(),
+            connection.cursor() as cursor,
+        ):
+            cursor.execute(
+                """
+                INSERT INTO operations_operation (
+                    id, actor_id, request_id, idempotency_namespace, kind,
+                    request_hash, intent, authorization_snapshot, created_at
+                ) VALUES (
+                    %s, NULL, %s, NULL, 'foundation.probe', %s,
+                    '{"roots": []}', '{"userEpoch": 0, "rootEpochs": {}}',
+                    clock_timestamp()
+                )
+                """,
+                [
+                    uuid.uuid4(),
+                    "post_upgrade_null_namespace",
+                    hashlib.sha256(b"post-upgrade-null").digest(),
+                ],
+            )
+        assert caught.value.__cause__ is not None
+        assert getattr(caught.value.__cause__, "sqlstate", None) == "55000"
     finally:
         MigrationExecutor(connection).migrate(current_leaf_nodes)
