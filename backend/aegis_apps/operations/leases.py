@@ -129,6 +129,10 @@ def _cas_filter(lease: LeaseToken, *, now: datetime) -> Q:
     )
 
 
+def _started_cas_filter(lease: LeaseToken, *, now: datetime) -> Q:
+    return _cas_filter(lease, now=now) & Q(execution_started_at__isnull=False)
+
+
 def _guarded_update(query: Q, **values: object) -> int:
     with _allow_job_execution_updates():
         return Job.objects.filter(query).update(**values)
@@ -191,6 +195,7 @@ def claim_next_job(role: str, worker_id: str, now: datetime) -> LeaseToken | Non
                 state=JobState.RUNNING,
                 attempts=next_attempt,
                 attempt_token=next_token,
+                execution_started_at=None,
                 lease_owner=owner,
                 lease_expires_at=expires_at,
                 safe_error_code=None,
@@ -207,6 +212,21 @@ def claim_next_job(role: str, worker_id: str, now: datetime) -> LeaseToken | Non
                 worker_id=owner,
                 expires_at=expires_at,
             )
+
+
+def start_job_execution(lease: LeaseToken, *, now: datetime) -> bool:
+    token = _validated_lease(lease)
+    start_time = _now(now)
+    with transaction.atomic(durable=True):
+        return (
+            _guarded_update(
+                _cas_filter(token, now=start_time)
+                & Q(execution_started_at__isnull=True),
+                execution_started_at=start_time,
+                updated_at=start_time,
+            )
+            == 1
+        )
 
 
 def renew_lease(lease: LeaseToken, *, now: datetime) -> bool:
@@ -249,7 +269,7 @@ def finish_job(lease: LeaseToken, *, result: object, now: datetime) -> bool:
     normalized_result = validate_probe_result(result)
     with transaction.atomic():
         operation_id = (
-            Job.objects.filter(_cas_filter(token, now=completion_time))
+            Job.objects.filter(_started_cas_filter(token, now=completion_time))
             .values_list("operation_id", flat=True)
             .first()
         )
@@ -265,7 +285,7 @@ def finish_job(lease: LeaseToken, *, result: object, now: datetime) -> bool:
             return False
         return (
             _guarded_update(
-                _cas_filter(token, now=completion_time),
+                _started_cas_filter(token, now=completion_time),
                 state=JobState.SUCCEEDED,
                 lease_owner=None,
                 lease_expires_at=None,
@@ -297,7 +317,8 @@ def relinquish_job(lease: LeaseToken, *, now: datetime) -> bool:
     relinquish_time = _now(now)
     return (
         _guarded_update(
-            _cas_filter(token, now=relinquish_time),
+            _cas_filter(token, now=relinquish_time)
+            & Q(execution_started_at__isnull=True),
             state=JobState.RETRY_WAIT,
             available_at=relinquish_time,
             lease_owner=None,
@@ -355,6 +376,7 @@ def retry_job(
                 _cas_filter(token, now=retry_time),
                 state=JobState.RETRY_WAIT,
                 available_at=retry_time + timedelta(seconds=delay),
+                execution_started_at=None,
                 lease_owner=None,
                 lease_expires_at=None,
                 safe_error_code=code,

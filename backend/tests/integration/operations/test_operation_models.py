@@ -117,6 +117,8 @@ def test_job_intent_is_immutable_and_execution_fields_require_the_lease_boundary
         job.save()
     with pytest.raises(PermissionError, match="lease"):
         Job.objects.filter(pk=job.pk).update(state=JobState.RUNNING)
+    with pytest.raises(PermissionError, match="lease"):
+        Job.objects.filter(pk=job.pk).update(execution_started_at=timezone.now())
     with pytest.raises(PermissionError, match="immutable"):
         Job.objects.filter(pk=job.pk).update(priority=7)
     with pytest.raises(PermissionError, match="immutable"):
@@ -238,6 +240,10 @@ def test_database_rejects_invalid_operation_fields(updates: dict[str, object]) -
             "state": JobState.QUEUED,
             "lease_owner": str(uuid.uuid4()),
             "lease_expires_at": timezone.now() + timedelta(seconds=30),
+        },
+        {
+            "state": JobState.QUEUED,
+            "execution_started_at": timezone.now(),
         },
     ],
 )

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import signal
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 
@@ -42,6 +44,32 @@ def _operation(*, role: str = "operations") -> tuple[User, Operation, Job]:
 def _call_worker(role: str, *, once: bool = True) -> None:
     with patch.object(worker_command, "_new_worker_id", return_value=WORKER_ID):
         call_command("run_role", role=role, once=once)
+
+
+def _identity(role: worker_command.RoleName = "operations") -> worker_command.WorkerIdentity:
+    return worker_command.WorkerIdentity(
+        role=role,
+        worker_id=WORKER_ID,
+        release_id="release-10",
+        schema_identity=SCHEMA_ID,
+        manifest_identity="unconfigured:v1",
+    )
+
+
+def _claimed_operation_job() -> tuple[LeaseToken, Job]:
+    _actor, _operation_record, job = _operation(role="operations")
+    lease = claim_next_job("operations", WORKER_ID, job.available_at)
+    assert lease is not None
+    return lease, job
+
+
+def _assert_relinquished_before_execution(job: Job) -> None:
+    job.refresh_from_db()
+    assert job.state == JobState.RETRY_WAIT
+    assert job.execution_started_at is None
+    assert job.lease_owner is None
+    assert job.lease_expires_at is None
+    assert job.safe_error_code == SafeErrorCode.CLAIM_RELINQUISHED
 
 
 @override_settings(
@@ -340,6 +368,167 @@ def test_shutdown_during_claim_relinquishes_without_dispatch() -> None:
     replacement = claim_next_job("operations", str(uuid.uuid4()), job.available_at)
     assert replacement is not None
     assert replacement.job_id == job.pk
+
+
+@override_settings(AEGIS_PROCESS_ROLE="operations")
+def test_shutdown_during_live_claim_load_relinquishes_before_dispatch() -> None:
+    lease, job = _claimed_operation_job()
+    handler = Mock(return_value={"ok": True})
+    load_live_claim = worker_command._live_claim_job
+
+    def load_then_signal(candidate: LeaseToken, *, role: worker_command.RoleName) -> Job | None:
+        live_job = load_live_claim(candidate, role=role)
+        worker_command.request_shutdown()
+        return live_job
+
+    worker_command._reset_shutdown()
+    try:
+        with (
+            patch.object(worker_command, "_live_claim_job", side_effect=load_then_signal),
+            patch.object(worker_command, "_publish"),
+            patch.dict(
+                worker_command.ROLE_HANDLERS["operations"],
+                {"foundation.probe": handler},
+            ),
+        ):
+            worker_command._execute_claim(_identity(), lease)
+    finally:
+        worker_command._reset_shutdown()
+
+    handler.assert_not_called()
+    _assert_relinquished_before_execution(job)
+
+
+@override_settings(AEGIS_PROCESS_ROLE="operations")
+def test_shutdown_during_authorization_validation_relinquishes_before_dispatch() -> None:
+    lease, job = _claimed_operation_job()
+    handler = Mock(return_value={"ok": True})
+
+    def authorize_then_signal(_operation_record: Operation) -> bool:
+        worker_command.request_shutdown()
+        return True
+
+    worker_command._reset_shutdown()
+    try:
+        with (
+            patch.object(
+                worker_command,
+                "validate_authorization_snapshot",
+                side_effect=authorize_then_signal,
+            ),
+            patch.object(worker_command, "_publish"),
+            patch.dict(
+                worker_command.ROLE_HANDLERS["operations"],
+                {"foundation.probe": handler},
+            ),
+        ):
+            worker_command._execute_claim(_identity(), lease)
+    finally:
+        worker_command._reset_shutdown()
+
+    handler.assert_not_called()
+    _assert_relinquished_before_execution(job)
+
+
+@override_settings(AEGIS_PROCESS_ROLE="operations")
+def test_shutdown_during_running_publication_relinquishes_before_dispatch() -> None:
+    lease, job = _claimed_operation_job()
+    handler = Mock(return_value={"ok": True})
+
+    def publish_then_signal(
+        _candidate: worker_command.WorkerIdentity,
+        *,
+        status: HeartbeatStatus,
+        job_id: uuid.UUID | None,
+    ) -> None:
+        assert status == HeartbeatStatus.RUNNING
+        assert job_id == job.pk
+        worker_command.request_shutdown()
+
+    worker_command._reset_shutdown()
+    try:
+        with (
+            patch.object(worker_command, "_publish", side_effect=publish_then_signal),
+            patch.dict(
+                worker_command.ROLE_HANDLERS["operations"],
+                {"foundation.probe": handler},
+            ),
+        ):
+            worker_command._execute_claim(_identity(), lease)
+    finally:
+        worker_command._reset_shutdown()
+
+    handler.assert_not_called()
+    _assert_relinquished_before_execution(job)
+
+
+@override_settings(AEGIS_PROCESS_ROLE="operations")
+def test_signal_observed_immediately_before_durable_start_prevents_dispatch() -> None:
+    lease, job = _claimed_operation_job()
+    handler = Mock(return_value={"ok": True})
+    serialized_start = worker_command._serialized_execution_start
+
+    @contextmanager
+    def signal_before_start() -> Iterator[None]:
+        signal.raise_signal(signal.SIGTERM)
+        with serialized_start():
+            yield
+
+    worker_command._reset_shutdown()
+    try:
+        with (
+            worker_command._installed_signal_handlers(),
+            patch.object(
+                worker_command,
+                "_serialized_execution_start",
+                signal_before_start,
+            ),
+            patch.object(worker_command, "_publish"),
+            patch.dict(
+                worker_command.ROLE_HANDLERS["operations"],
+                {"foundation.probe": handler},
+            ),
+        ):
+            worker_command._execute_claim(_identity(), lease)
+    finally:
+        worker_command._reset_shutdown()
+
+    handler.assert_not_called()
+    _assert_relinquished_before_execution(job)
+
+
+@override_settings(AEGIS_PROCESS_ROLE="operations")
+def test_signal_observed_immediately_after_durable_start_allows_current_dispatch() -> None:
+    lease, job = _claimed_operation_job()
+    handler = Mock(return_value={"ok": True})
+    durable_start = worker_command.start_job_execution
+
+    def start_then_signal(candidate: LeaseToken, *, now: object) -> bool:
+        started = durable_start(candidate, now=now)
+        signal.raise_signal(signal.SIGTERM)
+        return started
+
+    worker_command._reset_shutdown()
+    try:
+        with (
+            worker_command._installed_signal_handlers(),
+            patch.object(worker_command, "start_job_execution", side_effect=start_then_signal),
+            patch.object(worker_command, "_publish"),
+            patch.dict(
+                worker_command.ROLE_HANDLERS["operations"],
+                {"foundation.probe": handler},
+            ),
+        ):
+            worker_command._execute_claim(_identity(), lease)
+            assert worker_command._shutdown_requested()
+    finally:
+        worker_command._reset_shutdown()
+
+    handler.assert_called_once_with(lease)
+    job.refresh_from_db()
+    assert job.state == JobState.SUCCEEDED
+    assert job.execution_started_at is not None
+    assert job.result == {"ok": True}
 
 
 def test_handler_registry_is_closed_for_all_three_roles() -> None:

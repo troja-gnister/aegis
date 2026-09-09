@@ -8,6 +8,7 @@ from threading import Barrier
 
 import pytest
 from aegis_apps.identity.models import User
+from aegis_apps.operations import leases as lease_services
 from aegis_apps.operations.enums import JobState, SafeErrorCode
 from aegis_apps.operations.leases import (
     LeaseToken,
@@ -111,6 +112,9 @@ def test_expired_takeover_advances_fence_and_stale_worker_cannot_finish() -> Non
     assert replacement is not None
     assert replacement.job_id == stale.job_id == job.id
     assert replacement.attempt_token == stale.attempt_token + 1
+    assert (
+        lease_services.start_job_execution(replacement, now=takeover_time) is True
+    )
     assert finish_job(stale, result={"ok": True}, now=takeover_time) is False
     assert finish_job(replacement, result={"ok": True}, now=takeover_time) is True
     job.refresh_from_db()
@@ -230,6 +234,7 @@ def test_shutdown_relinquishment_credits_an_unstarted_final_attempt() -> None:
     assert job.attempts == 1
     assert job.lease_owner is None
     assert job.lease_expires_at is None
+    assert job.execution_started_at is None
 
     replacement = claim_next_job("media", _worker(), now)
     assert replacement is not None
@@ -238,6 +243,45 @@ def test_shutdown_relinquishment_credits_an_unstarted_final_attempt() -> None:
     job.refresh_from_db()
     assert job.state == JobState.RUNNING
     assert job.attempts == 1
+    assert job.execution_started_at is None
+
+
+def test_execution_start_is_durable_fenced_and_prevents_relinquishment() -> None:
+    _, job = _operation()
+    now = timezone.now()
+    lease = claim_next_job("operations", _worker(), now)
+    assert lease is not None
+
+    assert lease_services.start_job_execution(lease, now=now) is True
+    assert lease_services.start_job_execution(lease, now=now) is False
+    assert relinquish_job(lease, now=now) is False
+
+    job.refresh_from_db()
+    assert job.state == JobState.RUNNING
+    assert job.execution_started_at == now
+    assert job.lease_owner == lease.worker_id
+    assert finish_job(lease, result={"ok": True}, now=now) is True
+    job.refresh_from_db()
+    assert job.state == JobState.SUCCEEDED
+    assert job.execution_started_at == now
+
+
+def test_execution_start_rejects_a_stale_takeover_lease() -> None:
+    _, job = _operation()
+    now = timezone.now()
+    stale = claim_next_job("operations", _worker(), now)
+    assert stale is not None
+    replacement = claim_next_job("operations", _worker(), stale.expires_at)
+    assert replacement is not None
+
+    assert lease_services.start_job_execution(stale, now=stale.expires_at) is False
+    assert (
+        lease_services.start_job_execution(replacement, now=stale.expires_at) is True
+    )
+
+    job.refresh_from_db()
+    assert job.attempt_token == replacement.attempt_token
+    assert job.execution_started_at == stale.expires_at
 
 
 def test_expired_final_attempt_is_terminally_fenced_and_claim_loop_advances() -> None:
@@ -321,6 +365,7 @@ def test_authorization_is_revalidated_before_completion_without_staff_bypass() -
     now = timezone.now()
     lease = claim_next_job("operations", _worker(), now)
     assert lease is not None
+    assert lease_services.start_job_execution(lease, now=now) is True
 
     RootGrant.objects.filter(root=root, user=actor).update(permissions=int(Permission.PREVIEW))
     assert validate_authorization_snapshot(operation) is False

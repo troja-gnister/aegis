@@ -27,6 +27,7 @@ MUTABLE_JOB_FIELDS = frozenset(
         "available_at",
         "attempts",
         "attempt_token",
+        "execution_started_at",
         "lease_owner",
         "lease_expires_at",
         "safe_error_code",
@@ -317,6 +318,7 @@ class Job(models.Model):
     attempts = models.PositiveSmallIntegerField(default=0)
     attempt_token = models.PositiveBigIntegerField(default=0)
     max_attempts = models.PositiveSmallIntegerField(default=5)
+    execution_started_at = models.DateTimeField(null=True, editable=False)
     lease_owner = models.CharField(max_length=36, null=True)
     lease_expires_at = models.DateTimeField(null=True)
     safe_error_code = models.CharField(max_length=64, null=True)
@@ -377,6 +379,19 @@ class Job(models.Model):
                     )
                 ),
                 name="operations_job_running_lease_shape",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(execution_started_at__isnull=True)
+                    | models.Q(
+                        state__in=(
+                            JobState.RUNNING,
+                            JobState.SUCCEEDED,
+                            JobState.FAILED,
+                        )
+                    )
+                ),
+                name="operations_job_execution_start_state",
             ),
             models.CheckConstraint(
                 condition=(

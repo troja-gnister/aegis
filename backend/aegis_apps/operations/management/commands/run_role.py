@@ -9,7 +9,7 @@ import uuid
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from threading import Event
+from threading import Event, Lock
 from types import FrameType
 from typing import Any, Final, Literal, cast
 
@@ -27,6 +27,7 @@ from aegis_apps.operations.leases import (
     fail_job,
     finish_job,
     relinquish_job,
+    start_job_execution,
 )
 from aegis_apps.operations.models import UNCONFIGURED_MANIFEST_IDENTITY, Job
 from aegis_apps.operations.selectors import current_schema_identity
@@ -43,6 +44,8 @@ MAX_POLL_SECONDS: Final = 30.0
 MAX_POLL_JITTER_SECONDS: Final = 30.0
 
 _shutdown = Event()
+_execution_start_gate = Lock()
+_SHUTDOWN_SIGNALS: Final = frozenset((signal.SIGTERM, signal.SIGINT))
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,11 +70,13 @@ ROLE_HANDLERS: dict[str, dict[str, WorkerHandler]] = {
 
 
 def request_shutdown() -> None:
-    _shutdown.set()
+    with _execution_start_gate:
+        _shutdown.set()
 
 
 def _reset_shutdown() -> None:
-    _shutdown.clear()
+    with _execution_start_gate:
+        _shutdown.clear()
 
 
 def _shutdown_requested() -> bool:
@@ -84,7 +89,23 @@ def _wait_for_shutdown(timeout: float) -> None:
 
 def _handle_signal(signum: int, frame: FrameType | None) -> None:
     del signum, frame
-    request_shutdown()
+    with _blocked_shutdown_signals():
+        request_shutdown()
+
+
+@contextmanager
+def _blocked_shutdown_signals() -> Iterator[None]:
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, _SHUTDOWN_SIGNALS)
+    try:
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+
+
+@contextmanager
+def _serialized_execution_start() -> Iterator[None]:
+    with _blocked_shutdown_signals(), _execution_start_gate:
+        yield
 
 
 @contextmanager
@@ -194,28 +215,44 @@ def _live_claim_job(lease: LeaseToken, *, role: RoleName) -> Job | None:
     )
 
 
+def _settle_unstarted_failure(lease: LeaseToken, *, error_code: SafeErrorCode) -> None:
+    with _serialized_execution_start():
+        if _shutdown_requested():
+            relinquish_job(lease, now=timezone.now())
+            return
+        fail_job(lease, error_code=error_code, now=timezone.now())
+
+
+def _start_or_relinquish(lease: LeaseToken) -> bool:
+    with _serialized_execution_start():
+        if _shutdown_requested():
+            relinquish_job(lease, now=timezone.now())
+            return False
+        return start_job_execution(lease, now=timezone.now())
+
+
 def _execute_claim(identity: WorkerIdentity, lease: LeaseToken) -> None:
     job = _live_claim_job(lease, role=identity.role)
     if job is None:
         return
     if not validate_authorization_snapshot(job.operation):
-        fail_job(
+        _settle_unstarted_failure(
             lease,
             error_code=SafeErrorCode.AUTHORIZATION_STALE,
-            now=timezone.now(),
         )
         return
 
     handler = ROLE_HANDLERS[identity.role].get(lease.kind)
     if handler is None:
-        fail_job(
+        _settle_unstarted_failure(
             lease,
             error_code=SafeErrorCode.HANDLER_FAILED,
-            now=timezone.now(),
         )
         return
 
     _publish(identity, status=HeartbeatStatus.RUNNING, job_id=lease.job_id)
+    if not _start_or_relinquish(lease):
+        return
     try:
         result = handler(lease)
     except Exception:
