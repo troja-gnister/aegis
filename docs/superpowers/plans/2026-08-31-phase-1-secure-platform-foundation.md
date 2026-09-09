@@ -2304,22 +2304,18 @@ ROLE_PRIVILEGES: dict[str, dict[str, tuple[str, ...]]] = {
         "operations_workerheartbeat": ("SELECT",),
     },
     "aegis_operations": {
-        "roots_root": ("SELECT",),
-        "roots_rootgrant": ("SELECT",),
         "operations_operation": ("SELECT",),
         "operations_job": ("SELECT",),
         "operations_workerheartbeat": ("SELECT",),
         "audit_auditevent": ("INSERT",),
     },
     "aegis_indexer": {
-        "roots_root": ("SELECT",),
         "operations_operation": ("SELECT",),
         "operations_job": ("SELECT",),
         "operations_workerheartbeat": ("SELECT",),
         "audit_auditevent": ("INSERT",),
     },
     "aegis_media": {
-        "roots_root": ("SELECT",),
         "operations_operation": ("SELECT",),
         "operations_job": ("SELECT",),
         "operations_workerheartbeat": ("SELECT",),
@@ -2328,7 +2324,7 @@ ROLE_PRIVILEGES: dict[str, dict[str, tuple[str, ...]]] = {
 }
 ```
 
-Apply column-level `SELECT(id, is_active, authorization_epoch)` on `identity_user` to each worker and column-level `UPDATE(state, available_at, attempt_token, execution_started_at, lease_owner, lease_expires_at, attempts, safe_error_code, safe_error_detail, result, updated_at)` on `operations_job`. `available_at` is required by both immediate pre-dispatch relinquishment and bounded retry/backoff. Web receives no `UPDATE` privilege on `execution_started_at`, `available_at`, or any other leased execution column.
+Apply only column-level `SELECT(id, mode, active, authorization_epoch)` on `roots_root` to each worker and column-level `UPDATE(state, available_at, attempt_token, execution_started_at, lease_owner, lease_expires_at, attempts, safe_error_code, safe_error_detail, result, updated_at)` on `operations_job`. Workers receive no direct privilege on `identity_user`, `roots_rootgrant`, `auth_group`, or either membership table; authorization validation crosses the opaque boolean function boundary below. `available_at` is required by both immediate pre-dispatch relinquishment and bounded retry/backoff. Web receives no `UPDATE` privilege on `execution_started_at`, `available_at`, or any other leased execution column.
 
 The database job guard and Task 10 service compare-and-swap must permit exactly these `execution_started_at` cases:
 
@@ -2344,9 +2340,9 @@ Do not grant workers direct `INSERT`, `UPDATE`, or `DELETE` on `operations_worke
 
 Each role-specific entry point validates the bounded heartbeat schema and nullable current-job reference, obtains authoritative database time, publishes monotonically so an older observation cannot replace newer or stopping state, and allocates/recycles only bounded stale slots for its hard-coded role under that role's allocation lock. A non-NULL current job must be a live running lease for the same hard-coded role and worker ID. It must never recycle another role's row, and it fails closed when all same-role slots are fresh. The production publisher in `backend/aegis_apps/operations/heartbeats.py` dispatches through a fixed `WorkerRole`-to-function mapping when using role-separated runtime credentials and performs no direct heartbeat DML.
 
-Integration and deployment tests connect with each actual worker credential and run `run_role --once` for operations, indexer, and media, proving that each publishes only through its own entry point. They revoke/deny public execution and prove every worker is rejected when calling another role's function or attempting cross-role publication/recycling. Give workers `EXECUTE` on the migrator-owned `aegis_effective_permissions(user_uuid, root_uuid)` SQL function with the same fixed empty `search_path`; the function returns only the additive integer mask and prevents broad user/group-membership reads. Revoke all first, grant the allowlist, and compare every managed table/column/function to this structure before commit. Django model deletion of users/roots remains disabled in Phase 1 so web does not receive those table DELETE privileges.
+Integration and deployment tests connect with each actual worker credential and run `run_role --once` for operations, indexer, and media, proving that each publishes only through its own entry point. They revoke/deny public execution and prove every worker is rejected when calling another role's function or attempting cross-role publication/recycling. Revoke all first, grant the allowlist, and compare every managed table/column/function to this structure before commit. Django model deletion of users/roots remains disabled in Phase 1 so web does not receive those table DELETE privileges.
 
-Worker-side authorization revalidation must also cross a narrow database boundary rather than use the ORM authorization graph. Create a migrator-owned `SECURITY DEFINER` function `aegis_validate_operation_authorization(operation_uuid)` with a fixed empty `search_path`, fully qualified objects, a single opaque UUID argument, and a boolean-only result. The function validates the persisted intent/snapshot schema, locks every referenced root in deterministic UUID order and then the actor, checks active states and exact authorization epochs, computes additive user/group masks internally, and returns false on any missing, malformed, stale, or insufficient authorization. This preserves Task 10's root-then-user concurrency ordering without granting workers direct root-grant, group, membership, or user-table reads. Revoke `EXECUTE` from `PUBLIC` and grant it only to the three worker logins. Production worker calls in `operations.services.validate_authorization_snapshot()` dispatch to this function by operation ID when connected as a role-separated worker; web and migrator/test paths retain the ORM implementation used when creating and validating intents. Database-role tests prove a worker cannot finish after a concurrent authorization change, cannot directly read membership/grant data, and cannot call the function after its role's execute grant is revoked.
+Worker-side authorization revalidation must also cross a narrow database boundary rather than use the ORM authorization graph. Create a migrator-owned `SECURITY DEFINER` function `aegis_validate_operation_authorization(operation_uuid)` with a fixed empty `search_path`, fully qualified objects, a single opaque UUID argument, and a boolean-only result. The function validates the persisted intent/snapshot schema, locks every referenced root in deterministic UUID order and then the actor, checks active states and exact authorization epochs, computes additive user/group masks internally, and returns false on any missing, malformed, stale, or insufficient authorization. This preserves Task 10's root-then-user concurrency ordering without granting workers direct root-grant, group, membership, or user-table reads. Revoke `EXECUTE` from `PUBLIC` and grant it only to the three worker logins. Inside the function, map the fixed `session_user` login allowlist to one worker role only after privilege synchronization has asserted that runtime logins have no role memberships or `SET ROLE`-capable edges, and require an existing job for the supplied operation whose `target_role` matches that caller role; unknown callers and unassigned operations fail closed. Production worker calls in `operations.services.validate_authorization_snapshot()` dispatch to this function by operation ID when connected as a role-separated worker; web and migrator/test paths retain the ORM implementation used when creating and validating intents. Database-role tests prove a worker cannot query arbitrary authorization masks, cannot validate an operation assigned only to another role, cannot finish after a concurrent authorization change, cannot directly read membership/grant data, and cannot call the function after its role's execute grant is revoked.
 
 - [ ] **Step 4: Add PostgreSQL immutability and insertion-boundary triggers**
 
