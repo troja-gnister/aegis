@@ -159,6 +159,9 @@ def test_database_immutability_migration_leaves_and_dependencies_are_explicit() 
     operations = importlib.import_module(
         "aegis_apps.operations.migrations.0008_database_immutability"
     )
+    complete_guard = importlib.import_module(
+        "aegis_apps.operations.migrations.0009_complete_job_transition_guard"
+    )
 
     assert audit.Migration.dependencies == [
         ("audit", "0002_auditevent_manager_names")
@@ -168,6 +171,118 @@ def test_database_immutability_migration_leaves_and_dependencies_are_explicit() 
         ("roots", "0001_initial"),
         ("identity", "0004_login_throttle"),
     }
+    assert complete_guard.Migration.dependencies == [
+        ("operations", "0008_database_immutability")
+    ]
+    previous_start = operations.FORWARD_SQL.index(
+        "CREATE FUNCTION public.aegis_job_execution_marker_guard()"
+    )
+    previous_end = operations.FORWARD_SQL.index(
+        "CREATE TRIGGER aegis_job_execution_marker",
+        previous_start,
+    )
+    expected_reverse = operations.FORWARD_SQL[
+        previous_start:previous_end
+    ].replace("CREATE FUNCTION ", "CREATE OR REPLACE FUNCTION ", 1)
+    assert complete_guard.REVERSE_SQL.strip() == expected_reverse.strip()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "state = 'succeeded', result = '{\"ok\": true}'",
+        "attempt_token = attempt_token + 1",
+        "available_at = available_at + interval '1 day'",
+        (
+            "state = 'retry_wait', safe_error_code = 'claim_relinquished', "
+            "safe_error_detail = 'The unstarted claim was released safely.'"
+        ),
+    ),
+)
+def test_complete_job_guard_rejects_forged_queued_transitions(
+    mutation: str,
+) -> None:
+    job = _job_for_role("operations")
+
+    _assert_runtime_rejected(
+        "aegis_operations",
+        f"UPDATE public.operations_job SET {mutation} WHERE id = %s",
+        [job.pk],
+    )
+
+
+def test_complete_job_guard_rejects_unfenced_running_mutations() -> None:
+    job = _job_for_role("operations")
+    worker_id = str(uuid.uuid4())
+    _claim_as_role(role="operations", job=job, worker_id=worker_id)
+
+    _assert_runtime_rejected(
+        "aegis_operations",
+        "UPDATE public.operations_job SET lease_owner = %s WHERE id = %s",
+        [str(uuid.uuid4()), job.pk],
+    )
+    _assert_runtime_rejected(
+        "aegis_operations",
+        "UPDATE public.operations_job "
+        "SET attempt_token = attempt_token + 1 WHERE id = %s",
+        [job.pk],
+    )
+    _assert_runtime_rejected(
+        "aegis_operations",
+        "UPDATE public.operations_job "
+        "SET available_at = available_at + interval '1 day' WHERE id = %s",
+        [job.pk],
+    )
+
+
+def test_complete_job_guard_rejects_terminal_and_error_rewrites() -> None:
+    succeeded = _job_for_role("operations")
+    failed = _job_for_role("operations")
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE public.operations_job
+               SET state = 'succeeded', result = '{"ok": true}',
+                   lease_owner = NULL, lease_expires_at = NULL,
+                   safe_error_code = NULL, safe_error_detail = NULL
+             WHERE id = %s
+            """,
+            [succeeded.pk],
+        )
+        cursor.execute(
+            """
+            UPDATE public.operations_job
+               SET state = 'failed', result = NULL,
+                   lease_owner = NULL, lease_expires_at = NULL,
+                   safe_error_code = 'handler_failed',
+                   safe_error_detail = 'The job handler failed safely.'
+             WHERE id = %s
+            """,
+            [failed.pk],
+        )
+
+    _assert_runtime_rejected(
+        "aegis_operations",
+        "UPDATE public.operations_job SET result = '{\"ok\": false}' WHERE id = %s",
+        [succeeded.pk],
+    )
+    _assert_runtime_rejected(
+        "aegis_operations",
+        """
+        UPDATE public.operations_job
+           SET state = 'failed', result = NULL,
+               safe_error_code = 'handler_failed',
+               safe_error_detail = 'The job handler failed safely.'
+         WHERE id = %s
+        """,
+        [succeeded.pk],
+    )
+    _assert_runtime_rejected(
+        "aegis_operations",
+        "UPDATE public.operations_job "
+        "SET safe_error_detail = 'forged failure detail' WHERE id = %s",
+        [failed.pk],
+    )
 
 
 def test_runtime_role_cannot_rewrite_or_remove_append_only_records() -> None:
@@ -406,7 +521,7 @@ def test_unstarted_relinquishment_preserves_null_marker_for_immediate_reclaim() 
                lease_owner = NULL,
                lease_expires_at = NULL,
                safe_error_code = 'claim_relinquished',
-               safe_error_detail = 'claim released',
+               safe_error_detail = 'The unstarted claim was released safely.',
                result = NULL,
                updated_at = pg_catalog.clock_timestamp()
          WHERE id = %s
@@ -447,7 +562,7 @@ def test_retry_marker_reset_is_bounded_and_expired_takeover_clears_marker() -> N
                lease_owner = NULL,
                lease_expires_at = NULL,
                safe_error_code = 'retryable_failure',
-               safe_error_detail = 'bounded retry',
+               safe_error_detail = 'The job will be retried.',
                result = NULL,
                updated_at = pg_catalog.clock_timestamp()
          WHERE id = %s
@@ -464,7 +579,7 @@ def test_retry_marker_reset_is_bounded_and_expired_takeover_clears_marker() -> N
                lease_owner = NULL,
                lease_expires_at = NULL,
                safe_error_code = 'retryable_failure',
-               safe_error_detail = 'bounded retry',
+               safe_error_detail = 'The job will be retried.',
                result = NULL,
                updated_at = pg_catalog.clock_timestamp()
          WHERE id = %s
@@ -518,6 +633,37 @@ def test_retry_marker_reset_is_bounded_and_expired_takeover_clears_marker() -> N
     assert job.attempts == 2
     assert job.lease_owner == replacement_id
     assert job.execution_started_at is None
+
+
+def test_complete_transition_guard_reverses_to_the_0008_function_body() -> None:
+    executor = MigrationExecutor(connection)
+    current_leaves = executor.loader.graph.leaf_nodes()
+    predecessor = [("operations", "0008_database_immutability")]
+    try:
+        executor.migrate(predecessor)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_catalog.pg_get_functiondef("
+                "'public.aegis_job_execution_marker_guard()'::regprocedure)"
+            )
+            row = cursor.fetchone()
+        assert row is not None
+        assert (
+            "IF OLD.execution_started_at IS NOT DISTINCT FROM "
+            "NEW.execution_started_at THEN"
+        ) in row[0]
+        assert "job execution transition is invalid" not in row[0]
+    finally:
+        MigrationExecutor(connection).migrate(current_leaves)
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT pg_catalog.pg_get_functiondef("
+            "'public.aegis_job_execution_marker_guard()'::regprocedure)"
+        )
+        current_row = cursor.fetchone()
+    assert current_row is not None
+    assert "job execution transition is invalid" in current_row[0]
 
 
 def test_schema_owner_flush_and_reverse_migration_remain_available() -> None:

@@ -24,10 +24,21 @@ from aegis_apps.common.database_privileges import (
     synchronize_database_privileges,
 )
 from aegis_apps.identity.models import User
-from aegis_apps.operations.models import Operation
+from aegis_apps.operations.leases import (
+    claim_next_job,
+    fail_job,
+    finish_job,
+    relinquish_job,
+    renew_lease,
+    retry_job,
+    start_job_execution,
+)
+from aegis_apps.operations.models import Job, Operation
 from aegis_apps.operations.services import create_operation, enqueue_job
 from aegis_apps.roots.models import Root, RootGrant
 from django.db import connection, transaction
+from django.test import override_settings
+from django.utils import timezone
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
@@ -447,6 +458,36 @@ def _create_authorized_operation() -> tuple[User, Root, Operation]:
         intent={"roots": [{"id": str(root.id), "permissions": 3}]},
     )
     return actor, root, operation
+
+
+def _create_job_for_role(
+    role: str,
+    *,
+    max_attempts: int = 5,
+) -> Job:
+    unique = uuid.uuid4().hex
+    actor = User.objects.create_user(username=f"job-lifecycle-{unique}")
+    operation = create_operation(
+        actor=actor,
+        request_id=f"lifecycle_{unique}",
+        kind="foundation.probe",
+        intent={"roots": []},
+    )
+    if role == "operations":
+        job = operation.jobs.get(target_role=role)
+        if max_attempts != job.max_attempts:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE public.operations_job SET max_attempts = %s WHERE id = %s",
+                    [max_attempts, job.id],
+                )
+            job.refresh_from_db()
+        return job
+    return enqueue_job(
+        operation=operation,
+        target_role=role,
+        max_attempts=max_attempts,
+    )
 
 
 def _clear_worker_heartbeats() -> None:
@@ -1135,3 +1176,406 @@ def test_authorization_execute_revocation_is_enforced_and_safely_restored(
 
     with role_database.connect("aegis_operations") as worker:
         assert _authorization_is_valid(worker, operation.id) is True
+
+
+def test_actual_worker_cannot_forge_job_state_or_fencing_fields(
+    role_database: RoleDatabase,
+) -> None:
+    actor = User.objects.create_user(username=f"job-guard-{uuid.uuid4()}")
+    operation = create_operation(
+        actor=actor,
+        request_id=f"job_guard_{uuid.uuid4().hex}",
+        kind="foundation.probe",
+        intent={"roots": []},
+    )
+    job = operation.jobs.get()
+
+    with role_database.connect("aegis_operations") as worker:
+        _assert_sqlstate(
+            worker,
+            "UPDATE public.operations_job "
+            "SET state = 'succeeded', result = '{\"ok\": true}' "
+            "WHERE id = %s",
+            (job.id,),
+            sqlstate="55000",
+        )
+        _assert_sqlstate(
+            worker,
+            "UPDATE public.operations_job "
+            "SET attempt_token = attempt_token + 1 WHERE id = %s",
+            (job.id,),
+            sqlstate="55000",
+        )
+        _assert_sqlstate(
+            worker,
+            "UPDATE public.operations_job "
+            "SET available_at = available_at + interval '1 day' WHERE id = %s",
+            (job.id,),
+            sqlstate="55000",
+        )
+
+        owner_id = str(uuid.uuid4())
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE public.operations_job
+                   SET state = 'running', attempts = 1, attempt_token = 1,
+                       execution_started_at = NULL, lease_owner = %s,
+                       lease_expires_at = pg_catalog.clock_timestamp()
+                                          + interval '30 seconds',
+                       safe_error_code = NULL, safe_error_detail = NULL,
+                       result = NULL
+                 WHERE id = %s
+                """,
+                [owner_id, job.id],
+            )
+        _assert_sqlstate(
+            worker,
+            "UPDATE public.operations_job SET lease_owner = %s WHERE id = %s",
+            (str(uuid.uuid4()), job.id),
+            sqlstate="55000",
+        )
+        _assert_sqlstate(
+            worker,
+            "UPDATE public.operations_job "
+            "SET attempt_token = attempt_token + 1 WHERE id = %s",
+            (job.id,),
+            sqlstate="55000",
+        )
+        _assert_sqlstate(
+            worker,
+            "UPDATE public.operations_job "
+            "SET attempts = attempts + 1, attempt_token = attempt_token + 1 "
+            "WHERE id = %s",
+            (job.id,),
+            sqlstate="55000",
+        )
+        _assert_sqlstate(
+            worker,
+            "UPDATE public.operations_job "
+            "SET available_at = available_at + interval '1 day' WHERE id = %s",
+            (job.id,),
+            sqlstate="55000",
+        )
+        _assert_sqlstate(
+            worker,
+            "UPDATE public.operations_job "
+            "SET lease_expires_at = lease_expires_at + interval '1 day' "
+            "WHERE id = %s",
+            (job.id,),
+            sqlstate="55000",
+        )
+        with worker.cursor() as cursor:
+            cursor.execute(
+                "UPDATE public.operations_job "
+                "SET updated_at = '2000-01-01T00:00:00Z' WHERE id = %s "
+                "RETURNING updated_at",
+                [job.id],
+            )
+            updated_row = cursor.fetchone()
+        assert updated_row is not None
+        assert updated_row[0].year != 2000
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE public.operations_job
+                   SET state = 'retry_wait', available_at = pg_catalog.clock_timestamp(),
+                       execution_started_at = NULL, lease_owner = NULL,
+                       lease_expires_at = NULL,
+                       safe_error_code = 'claim_relinquished',
+                       safe_error_detail = 'The unstarted claim was released safely.',
+                       result = NULL
+                 WHERE id = %s
+                """,
+                [job.id],
+            )
+        _assert_sqlstate(
+            worker,
+            "UPDATE public.operations_job "
+            "SET safe_error_code = 'retryable_failure', "
+            "safe_error_detail = 'The job will be retried.' WHERE id = %s",
+            (job.id,),
+            sqlstate="55000",
+        )
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE public.operations_job
+                   SET state = 'succeeded', execution_started_at = NULL,
+                       lease_owner = NULL, lease_expires_at = NULL,
+                       safe_error_code = NULL, safe_error_detail = NULL,
+                       result = '{"ok": true}'
+                 WHERE id = %s
+                """,
+                [job.id],
+            )
+        _assert_sqlstate(
+            worker,
+            "UPDATE public.operations_job "
+            "SET result = '{\"ok\": false}' WHERE id = %s",
+            (job.id,),
+            sqlstate="55000",
+        )
+        _assert_sqlstate(
+            worker,
+            "UPDATE public.operations_job "
+            "SET state = 'failed', result = NULL, "
+            "safe_error_code = 'handler_failed', "
+            "safe_error_detail = 'The job handler failed safely.' WHERE id = %s",
+            (job.id,),
+            sqlstate="55000",
+        )
+
+
+@pytest.mark.parametrize("role", ("operations", "indexer", "media"))
+def test_actual_worker_can_claim_renew_start_and_finish_its_job(
+    role_database: RoleDatabase,
+    role: str,
+) -> None:
+    job = _create_job_for_role(role)
+    worker_id = str(uuid.uuid4())
+    with (
+        override_settings(AEGIS_PROCESS_ROLE=role),
+        _django_login(f"aegis_{role}", role_database.passwords[f"aegis_{role}"]),
+    ):
+        claim_time = timezone.now()
+        lease = claim_next_job(role, worker_id, claim_time)
+        assert lease is not None and lease.job_id == job.id
+        assert renew_lease(lease, now=claim_time) is True
+        assert start_job_execution(lease, now=claim_time) is True
+        assert finish_job(lease, result={"ok": True}, now=claim_time) is True
+
+        stored = Job.objects.get(pk=job.id)
+        assert stored.state == "succeeded"
+        assert stored.execution_started_at is not None
+        assert stored.result == {"ok": True}
+        assert stored.lease_owner is None
+        assert stored.lease_expires_at is None
+
+
+def test_actual_worker_can_relinquish_and_immediately_reclaim(
+    role_database: RoleDatabase,
+) -> None:
+    job = _create_job_for_role("operations")
+    with (
+        override_settings(AEGIS_PROCESS_ROLE="operations"),
+        _django_login(
+            "aegis_operations",
+            role_database.passwords["aegis_operations"],
+        ),
+    ):
+        first = claim_next_job("operations", str(uuid.uuid4()), timezone.now())
+        assert first is not None and first.job_id == job.id
+        assert relinquish_job(first, now=timezone.now()) is True
+        replacement = claim_next_job(
+            "operations",
+            str(uuid.uuid4()),
+            timezone.now(),
+        )
+        assert replacement is not None and replacement.job_id == job.id
+        assert replacement.attempt_token == first.attempt_token + 1
+
+        stored = Job.objects.get(pk=job.id)
+        assert stored.state == "running"
+        assert stored.attempts == 1
+        assert stored.execution_started_at is None
+
+
+def test_actual_worker_can_retry_before_and_after_execution_start(
+    role_database: RoleDatabase,
+) -> None:
+    first_job = _create_job_for_role("media")
+    second_job = _create_job_for_role("media")
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE public.operations_job SET priority = 2 WHERE id = %s",
+            [first_job.id],
+        )
+        cursor.execute(
+            "UPDATE public.operations_job SET priority = 1 WHERE id = %s",
+            [second_job.id],
+        )
+    with (
+        override_settings(AEGIS_PROCESS_ROLE="media"),
+        _django_login("aegis_media", role_database.passwords["aegis_media"]),
+    ):
+        first = claim_next_job("media", str(uuid.uuid4()), timezone.now())
+        assert first is not None and first.job_id == first_job.id
+        assert retry_job(
+            first,
+            error_code="retryable_failure",
+            now=timezone.now(),
+        ) is True
+
+        second = claim_next_job("media", str(uuid.uuid4()), timezone.now())
+        assert second is not None and second.job_id == second_job.id
+        assert start_job_execution(second, now=timezone.now()) is True
+        assert retry_job(
+            second,
+            error_code="retryable_failure",
+            now=timezone.now(),
+        ) is True
+
+        for job_id in (first_job.id, second_job.id):
+            stored = Job.objects.get(pk=job_id)
+            assert stored.state == "retry_wait"
+            assert stored.execution_started_at is None
+            assert stored.lease_owner is None
+            assert stored.safe_error_code == "retryable_failure"
+            assert stored.safe_error_detail == "The job will be retried."
+
+
+def test_actual_worker_can_publish_only_fixed_safe_failure_transitions(
+    role_database: RoleDatabase,
+) -> None:
+    authorization_job = _create_job_for_role("indexer")
+    handler_job = _create_job_for_role("indexer")
+    exhausted_job = _create_job_for_role("indexer", max_attempts=1)
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE public.operations_job SET priority = 30 WHERE id = %s",
+            [authorization_job.id],
+        )
+        cursor.execute(
+            "UPDATE public.operations_job SET priority = 20 WHERE id = %s",
+            [handler_job.id],
+        )
+        cursor.execute(
+            "UPDATE public.operations_job SET priority = 10 WHERE id = %s",
+            [exhausted_job.id],
+        )
+
+    with (
+        override_settings(AEGIS_PROCESS_ROLE="indexer"),
+        _django_login("aegis_indexer", role_database.passwords["aegis_indexer"]),
+    ):
+        authorization = claim_next_job(
+            "indexer",
+            str(uuid.uuid4()),
+            timezone.now(),
+        )
+        assert authorization is not None
+        assert authorization.job_id == authorization_job.id
+        assert fail_job(
+            authorization,
+            error_code="authorization_stale",
+            now=timezone.now(),
+        ) is True
+
+        handler = claim_next_job("indexer", str(uuid.uuid4()), timezone.now())
+        assert handler is not None and handler.job_id == handler_job.id
+        assert start_job_execution(handler, now=timezone.now()) is True
+        assert fail_job(
+            handler,
+            error_code="handler_failed",
+            now=timezone.now(),
+        ) is True
+
+        exhausted = claim_next_job("indexer", str(uuid.uuid4()), timezone.now())
+        assert exhausted is not None and exhausted.job_id == exhausted_job.id
+        assert retry_job(
+            exhausted,
+            error_code="retryable_failure",
+            now=timezone.now(),
+        ) is True
+
+        assert Job.objects.get(pk=authorization_job.id).safe_error_detail == (
+            "Authorization changed before execution completed."
+        )
+        assert Job.objects.get(pk=handler_job.id).safe_error_detail == (
+            "The job handler failed safely."
+        )
+        exhausted_stored = Job.objects.get(pk=exhausted_job.id)
+        assert exhausted_stored.state == "failed"
+        assert exhausted_stored.safe_error_code == "attempts_exhausted"
+        assert exhausted_stored.safe_error_detail == (
+            "The job exhausted its attempts."
+        )
+
+
+def test_actual_worker_can_take_over_expired_started_attempt(
+    role_database: RoleDatabase,
+) -> None:
+    job = _create_job_for_role("operations")
+    original_worker = str(uuid.uuid4())
+    with (
+        override_settings(AEGIS_PROCESS_ROLE="operations"),
+        _django_login(
+            "aegis_operations",
+            role_database.passwords["aegis_operations"],
+        ),
+    ):
+        original = claim_next_job("operations", original_worker, timezone.now())
+        assert original is not None and original.job_id == job.id
+        assert start_job_execution(original, now=timezone.now()) is True
+        original_started_at = Job.objects.get(pk=job.id).execution_started_at
+        assert original_started_at is not None
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE public.operations_job "
+            "SET lease_expires_at = pg_catalog.clock_timestamp() - interval '1 second' "
+            "WHERE id = %s",
+            [job.id],
+        )
+
+    replacement_worker = str(uuid.uuid4())
+    with (
+        override_settings(AEGIS_PROCESS_ROLE="operations"),
+        _django_login(
+            "aegis_operations",
+            role_database.passwords["aegis_operations"],
+        ),
+    ):
+        replacement = claim_next_job(
+            "operations",
+            replacement_worker,
+            timezone.now(),
+        )
+        assert replacement is not None and replacement.job_id == job.id
+        assert replacement.attempt_token == original.attempt_token + 1
+        taken_over = Job.objects.get(pk=job.id)
+        assert taken_over.execution_started_at is None
+        assert taken_over.lease_owner == replacement_worker
+        assert start_job_execution(replacement, now=timezone.now()) is True
+        assert finish_job(
+            replacement,
+            result={"ok": True},
+            now=timezone.now(),
+        ) is True
+
+
+def test_actual_worker_terminally_fences_an_expired_final_attempt(
+    role_database: RoleDatabase,
+) -> None:
+    job = _create_job_for_role("media", max_attempts=1)
+    with (
+        override_settings(AEGIS_PROCESS_ROLE="media"),
+        _django_login("aegis_media", role_database.passwords["aegis_media"]),
+    ):
+        lease = claim_next_job("media", str(uuid.uuid4()), timezone.now())
+        assert lease is not None and lease.job_id == job.id
+        assert start_job_execution(lease, now=timezone.now()) is True
+        started_at = Job.objects.get(pk=job.id).execution_started_at
+        assert started_at is not None
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE public.operations_job "
+            "SET lease_expires_at = pg_catalog.clock_timestamp() - interval '1 second' "
+            "WHERE id = %s",
+            [job.id],
+        )
+
+    with (
+        override_settings(AEGIS_PROCESS_ROLE="media"),
+        _django_login("aegis_media", role_database.passwords["aegis_media"]),
+    ):
+        assert claim_next_job("media", str(uuid.uuid4()), timezone.now()) is None
+        stored = Job.objects.get(pk=job.id)
+        assert stored.state == "failed"
+        assert stored.attempt_token == lease.attempt_token + 1
+        assert stored.execution_started_at == started_at
+        assert stored.safe_error_code == "attempts_exhausted"
