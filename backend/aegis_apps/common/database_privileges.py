@@ -23,12 +23,12 @@ MANAGED_TABLE_COLUMNS: Final[dict[str, tuple[str, ...]]] = {
     "django_admin_log": (
         "id",
         "action_time",
-        "user_id",
-        "content_type_id",
         "object_id",
         "object_repr",
         "action_flag",
         "change_message",
+        "content_type_id",
+        "user_id",
     ),
     "auth_permission": ("id", "name", "content_type_id", "codename"),
     "auth_group_permissions": ("id", "group_id", "permission_id"),
@@ -65,11 +65,11 @@ MANAGED_TABLE_COLUMNS: Final[dict[str, tuple[str, ...]]] = {
         "occurred_at",
         "event_type",
         "outcome",
-        "actor_id",
         "request_id",
         "root_id",
         "object_id",
         "metadata",
+        "actor_id",
     ),
     "roots_root": (
         "id",
@@ -84,27 +84,26 @@ MANAGED_TABLE_COLUMNS: Final[dict[str, tuple[str, ...]]] = {
     ),
     "roots_rootgrant": (
         "id",
-        "root_id",
-        "user_id",
-        "group_id",
         "permissions",
         "created_at",
         "updated_at",
+        "group_id",
+        "root_id",
+        "user_id",
     ),
     "operations_operation": (
         "id",
-        "actor_id",
         "request_id",
-        "idempotency_namespace",
         "kind",
         "request_hash",
         "intent",
         "authorization_snapshot",
         "created_at",
+        "actor_id",
+        "idempotency_namespace",
     ),
     "operations_job": (
         "id",
-        "operation_id",
         "target_role",
         "kind",
         "payload",
@@ -114,7 +113,6 @@ MANAGED_TABLE_COLUMNS: Final[dict[str, tuple[str, ...]]] = {
         "attempts",
         "attempt_token",
         "max_attempts",
-        "execution_started_at",
         "lease_owner",
         "lease_expires_at",
         "safe_error_code",
@@ -122,6 +120,8 @@ MANAGED_TABLE_COLUMNS: Final[dict[str, tuple[str, ...]]] = {
         "result",
         "created_at",
         "updated_at",
+        "operation_id",
+        "execution_started_at",
     ),
     "operations_workerheartbeat": (
         "id",
@@ -154,7 +154,7 @@ ROLE_TABLE_PRIVILEGES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
         "django_admin_log": ("SELECT", "INSERT"),
         "auth_permission": ("SELECT",),
         "auth_group_permissions": ("SELECT", "INSERT", "DELETE"),
-        "auth_group": ("SELECT", "INSERT", "UPDATE", "DELETE"),
+        "auth_group": ("SELECT", "INSERT", "UPDATE"),
         "django_content_type": ("SELECT",),
         "django_session": ("SELECT", "INSERT", "UPDATE", "DELETE"),
         "identity_user_groups": ("SELECT", "INSERT", "DELETE"),
@@ -788,10 +788,10 @@ def _verify_schema_manifest(cursor: Any) -> None:
 
     cursor.execute(
         """
-        SELECT sequence_name
-          FROM information_schema.sequences
-         WHERE sequence_schema = 'public'
-         ORDER BY sequence_name
+        SELECT sequencename
+          FROM pg_catalog.pg_sequences
+         WHERE schemaname = 'public'
+         ORDER BY sequencename
         """
     )
     sequences = tuple(row[0] for row in cursor.fetchall())
@@ -842,10 +842,25 @@ def _verify_role_boundaries(cursor: Any) -> None:
 
     cursor.execute(
         """
-        SELECT table_name, tableowner
+        SELECT pg_catalog.pg_get_userbyid(database.datdba),
+               pg_catalog.pg_get_userbyid(namespace.nspowner)
+          FROM pg_catalog.pg_database AS database
+          JOIN pg_catalog.pg_namespace AS namespace
+            ON namespace.nspname = 'public'
+         WHERE database.datname = pg_catalog.current_database()
+        """
+    )
+    if cursor.fetchone() != ("aegis_migrator", "aegis_migrator"):
+        raise PrivilegeDriftError(
+            "database and application schema must be owned by the migrator"
+        )
+
+    cursor.execute(
+        """
+        SELECT tablename, tableowner
           FROM pg_catalog.pg_tables
          WHERE schemaname = 'public'
-           AND table_name = ANY(%s)
+           AND tablename = ANY(%s)
         """,
         [list(MANAGED_TABLE_COLUMNS)],
     )
@@ -854,6 +869,23 @@ def _verify_role_boundaries(cursor: Any) -> None:
         owner != "aegis_migrator" for _table, owner in owners
     ):
         raise PrivilegeDriftError("application tables must be owned by the migrator")
+
+    cursor.execute(
+        """
+        SELECT sequencename, sequenceowner
+          FROM pg_catalog.pg_sequences
+         WHERE schemaname = 'public'
+           AND sequencename = ANY(%s)
+        """,
+        [list(MANAGED_SEQUENCES)],
+    )
+    sequence_owners = cursor.fetchall()
+    if len(sequence_owners) != len(MANAGED_SEQUENCES) or any(
+        owner != "aegis_migrator" for _sequence, owner in sequence_owners
+    ):
+        raise PrivilegeDriftError(
+            "application sequences must be owned by the migrator"
+        )
 
 
 def _install_boundary_functions(cursor: Any) -> None:
@@ -864,15 +896,41 @@ def _install_boundary_functions(cursor: Any) -> None:
 
 def _apply_grants(cursor: Any) -> None:
     role_list = ", ".join(_quoted(role) for role in RUNTIME_DATABASE_ROLES)
+    cursor.execute("SELECT pg_catalog.current_database()")
+    database_row = cursor.fetchone()
+    if database_row is None or not isinstance(database_row[0], str):
+        raise PrivilegeSynchronizationError("database identity is unavailable")
+    database = connection.ops.quote_name(database_row[0])
+
+    cursor.execute(f"REVOKE ALL PRIVILEGES ON DATABASE {database} FROM PUBLIC")
+    cursor.execute(f"REVOKE ALL PRIVILEGES ON DATABASE {database} FROM {role_list}")
+    cursor.execute(f"GRANT CONNECT ON DATABASE {database} TO {role_list}")
+    cursor.execute("REVOKE ALL PRIVILEGES ON SCHEMA public FROM PUBLIC")
     cursor.execute(f"REVOKE ALL PRIVILEGES ON SCHEMA public FROM {role_list}")
     cursor.execute(f"GRANT USAGE ON SCHEMA public TO {role_list}")
+    cursor.execute("REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM PUBLIC")
     cursor.execute(f"REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM {role_list}")
+    cursor.execute("REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC")
     cursor.execute(
         f"REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM {role_list}"
     )
+    cursor.execute("REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC")
     cursor.execute(
         f"REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM {role_list}"
     )
+
+    for table, table_column_names in MANAGED_TABLE_COLUMNS.items():
+        quoted_columns = ", ".join(
+            _quoted(column) for column in table_column_names
+        )
+        cursor.execute(
+            f"REVOKE ALL PRIVILEGES ({quoted_columns}) "
+            f"ON TABLE public.{_quoted(table)} FROM PUBLIC"
+        )
+        cursor.execute(
+            f"REVOKE ALL PRIVILEGES ({quoted_columns}) "
+            f"ON TABLE public.{_quoted(table)} FROM {role_list}"
+        )
 
     for role, table_privileges in ROLE_TABLE_PRIVILEGES.items():
         for table, privileges in table_privileges.items():
@@ -881,9 +939,9 @@ def _apply_grants(cursor: Any) -> None:
                 f"ON TABLE public.{_quoted(table)} TO {_quoted(role)}"
             )
     for role, table_columns in ROLE_COLUMN_PRIVILEGES.items():
-        for table, columns in table_columns.items():
+        for table, column_privileges in table_columns.items():
             by_privilege: dict[str, list[str]] = {}
-            for column, privileges in columns.items():
+            for column, privileges in column_privileges.items():
                 for privilege in privileges:
                     by_privilege.setdefault(privilege, []).append(column)
             for privilege, column_names in by_privilege.items():
@@ -946,10 +1004,37 @@ def _verify_function_boundaries(cursor: Any) -> None:
 
 def _verify_effective_grants(cursor: Any) -> None:
     for role in RUNTIME_DATABASE_ROLES:
+        cursor.execute(
+            """
+            SELECT pg_catalog.has_database_privilege(
+                       %s, pg_catalog.current_database(), 'CONNECT'
+                   ),
+                   pg_catalog.has_database_privilege(
+                       %s, pg_catalog.current_database(), 'CREATE'
+                   ),
+                   pg_catalog.has_database_privilege(
+                       %s, pg_catalog.current_database(), 'TEMPORARY'
+                   ),
+                   pg_catalog.has_schema_privilege(%s, 'public', 'USAGE'),
+                   pg_catalog.has_schema_privilege(%s, 'public', 'CREATE')
+            """,
+            [role, role, role, role, role],
+        )
+        if cursor.fetchone() != (True, False, False, True, False):
+            raise PrivilegeDriftError("database or schema privilege drift")
+
         for table, columns in MANAGED_TABLE_COLUMNS.items():
             table_grants = ROLE_TABLE_PRIVILEGES[role].get(table, ())
             column_grants = ROLE_COLUMN_PRIVILEGES[role].get(table, {})
-            for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE"):
+            for privilege in (
+                "SELECT",
+                "INSERT",
+                "UPDATE",
+                "DELETE",
+                "TRUNCATE",
+                "REFERENCES",
+                "TRIGGER",
+            ):
                 cursor.execute(
                     "SELECT has_table_privilege(%s, %s, %s)",
                     [role, f"public.{table}", privilege],
@@ -957,7 +1042,7 @@ def _verify_effective_grants(cursor: Any) -> None:
                 if cursor.fetchone() != (privilege in table_grants,):
                     raise PrivilegeDriftError("database table privilege drift")
             for column in columns:
-                for privilege in ("SELECT", "INSERT", "UPDATE"):
+                for privilege in ("SELECT", "INSERT", "UPDATE", "REFERENCES"):
                     expected = privilege in table_grants or privilege in column_grants.get(
                         column, ()
                     )
@@ -986,6 +1071,58 @@ def _verify_effective_grants(cursor: Any) -> None:
             )
             if cursor.fetchone() != (expected,):
                 raise PrivilegeDriftError("database function privilege drift")
+
+    cursor.execute(
+        """
+        SELECT pg_catalog.has_database_privilege(
+                   'public', pg_catalog.current_database(), 'CONNECT'
+               ),
+               pg_catalog.has_database_privilege(
+                   'public', pg_catalog.current_database(), 'CREATE'
+               ),
+               pg_catalog.has_database_privilege(
+                   'public', pg_catalog.current_database(), 'TEMPORARY'
+               ),
+               pg_catalog.has_schema_privilege('public', 'public', 'USAGE'),
+               pg_catalog.has_schema_privilege('public', 'public', 'CREATE')
+        """
+    )
+    if cursor.fetchone() != (False, False, False, False, False):
+        raise PrivilegeDriftError("public database or schema privilege drift")
+
+    for table, columns in MANAGED_TABLE_COLUMNS.items():
+        for privilege in (
+            "SELECT",
+            "INSERT",
+            "UPDATE",
+            "DELETE",
+            "TRUNCATE",
+            "REFERENCES",
+            "TRIGGER",
+        ):
+            cursor.execute(
+                "SELECT pg_catalog.has_table_privilege('public', %s, %s)",
+                [f"public.{table}", privilege],
+            )
+            if cursor.fetchone() != (False,):
+                raise PrivilegeDriftError("public table privilege drift")
+        for column in columns:
+            for privilege in ("SELECT", "INSERT", "UPDATE", "REFERENCES"):
+                cursor.execute(
+                    "SELECT pg_catalog.has_column_privilege('public', %s, %s, %s)",
+                    [f"public.{table}", column, privilege],
+                )
+                if cursor.fetchone() != (False,):
+                    raise PrivilegeDriftError("public column privilege drift")
+
+    for sequence in MANAGED_SEQUENCES:
+        for privilege in ("USAGE", "SELECT", "UPDATE"):
+            cursor.execute(
+                "SELECT pg_catalog.has_sequence_privilege('public', %s, %s)",
+                [f"public.{sequence}", privilege],
+            )
+            if cursor.fetchone() != (False,):
+                raise PrivilegeDriftError("public sequence privilege drift")
 
     for signature in MANAGED_FUNCTION_SIGNATURES.values():
         cursor.execute(

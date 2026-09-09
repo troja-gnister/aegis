@@ -2292,7 +2292,7 @@ ROLE_PRIVILEGES: dict[str, dict[str, tuple[str, ...]]] = {
     "aegis_web": {
         "django_content_type": ("SELECT",),
         "auth_permission": ("SELECT",),
-        "auth_group": ("SELECT", "INSERT", "UPDATE", "DELETE"),
+        "auth_group": ("SELECT", "INSERT", "UPDATE"),
         "auth_group_permissions": ("SELECT", "INSERT", "DELETE"),
         "identity_user": ("SELECT", "INSERT", "UPDATE"),
         "identity_user_groups": ("SELECT", "INSERT", "DELETE"),
@@ -2332,6 +2332,10 @@ ROLE_PRIVILEGES: dict[str, dict[str, tuple[str, ...]]] = {
     },
 }
 ```
+
+Binding correction: web intentionally has no `auth_group DELETE`. Phase 1 exposes no
+group-deletion service or admin action, and deletion without the audited authorization-epoch
+boundary would violate the narrower identity contract.
 
 Apply only column-level `SELECT(id, mode, active, authorization_epoch)` on `roots_root` to each worker and column-level `UPDATE(state, available_at, attempt_token, execution_started_at, lease_owner, lease_expires_at, attempts, safe_error_code, safe_error_detail, result, updated_at)` on `operations_job`. Workers receive no direct privilege on `identity_user`, `roots_rootgrant`, `auth_group`, or either membership table; authorization validation crosses the opaque boolean function boundary below. `available_at` is required by both immediate pre-dispatch relinquishment and bounded retry/backoff. Web receives no `UPDATE` privilege on `execution_started_at`, `available_at`, or any other leased execution column. Web receives only column-level `UPDATE(id)` on `operations_operation` so PostgreSQL permits the existing `SELECT FOR UPDATE` idempotency locks; the append-only trigger rejects every actual change. Remove the redundant `GroupIdentity.select_for_update()` calls from the identity/root service paths that already hold the canonical Group lock so `identity_groupidentity` remains `SELECT, INSERT` only.
 
