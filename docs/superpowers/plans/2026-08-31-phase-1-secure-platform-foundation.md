@@ -2355,7 +2355,7 @@ Create `audit.0003_database_append_only`, depending explicitly on `audit.0002_au
 The immutable triggers may permit only the table/schema owner (the migrator in deployed environments) to perform Django migration reversal and test-database flush maintenance. Determine that trust from PostgreSQL ownership/membership metadata, not from a caller-settable GUC or payload value. Privilege synchronization rejects every runtime-role membership edge to the migrator/owner, so runtime roles can never take this path. Focused tests prove schema-owner flush and reverse migration work, while actual runtime logins are still denied `UPDATE`, `DELETE`, and `TRUNCATE` by grants/triggers.
 
 ```sql
-CREATE FUNCTION aegis_reject_change() RETURNS trigger
+CREATE FUNCTION aegis_audit_event_append_only_guard() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
   RAISE EXCEPTION 'immutable application record' USING ERRCODE = '55000';
@@ -2364,11 +2364,18 @@ $$;
 
 CREATE TRIGGER audit_event_immutable
 BEFORE UPDATE OR DELETE OR TRUNCATE ON audit_auditevent
-FOR EACH STATEMENT EXECUTE FUNCTION aegis_reject_change();
+FOR EACH STATEMENT EXECUTE FUNCTION aegis_audit_event_append_only_guard();
+
+CREATE FUNCTION aegis_operation_intent_append_only_guard() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'immutable application record' USING ERRCODE = '55000';
+END;
+$$;
 
 CREATE TRIGGER operation_intent_immutable
 BEFORE UPDATE OR DELETE OR TRUNCATE ON operations_operation
-FOR EACH STATEMENT EXECUTE FUNCTION aegis_reject_change();
+FOR EACH STATEMENT EXECUTE FUNCTION aegis_operation_intent_append_only_guard();
 ```
 
 Use a row-level `BEFORE UPDATE` trigger for jobs that compares every immutable column with `IS DISTINCT FROM` and raises SQLSTATE 55000; `execution_started_at` is deliberately excluded from that immutable comparison. A separate role-bound guard enforces the complete Step 3 transition allowlist: fenced `NULL`-to-database-time start, fenced non-NULL-to-`NULL` reset on valid retry or role-correct expired takeover, `NULL` preservation during relinquishment and ordinary claim, and marker preservation across terminal transitions. It rejects every other change, including web, wrong-role, wrong-owner, stale-token, expired-start, repeated-start, and terminal-rewrite attempts. Use statement triggers for job DELETE/TRUNCATE. Reverse SQL drops only these named triggers/functions.
