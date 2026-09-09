@@ -4,13 +4,18 @@ import signal
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 
 import pytest
 from aegis_apps.identity.models import User
 from aegis_apps.operations.enums import HeartbeatStatus, JobState, SafeErrorCode
-from aegis_apps.operations.leases import LeaseToken, claim_next_job
+from aegis_apps.operations.leases import (
+    LeaseToken,
+    claim_next_job,
+    start_job_execution,
+)
 from aegis_apps.operations.management.commands import run_role as worker_command
 from aegis_apps.operations.models import Job, Operation, WorkerHeartbeat
 from aegis_apps.operations.selectors import SchemaCompatibilityError
@@ -501,9 +506,9 @@ def test_signal_observed_immediately_before_durable_start_prevents_dispatch() ->
 def test_signal_observed_immediately_after_durable_start_allows_current_dispatch() -> None:
     lease, job = _claimed_operation_job()
     handler = Mock(return_value={"ok": True})
-    durable_start = worker_command.start_job_execution
+    durable_start = start_job_execution
 
-    def start_then_signal(candidate: LeaseToken, *, now: object) -> bool:
+    def start_then_signal(candidate: LeaseToken, *, now: datetime) -> bool:
         started = durable_start(candidate, now=now)
         signal.raise_signal(signal.SIGTERM)
         return started
