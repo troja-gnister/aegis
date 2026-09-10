@@ -273,9 +273,6 @@ def test_role_init_keeps_passwords_out_of_shell_and_psql_state() -> None:
         text=True,
     ).returncode == 0
     assert "--no-psqlrc" in source
-    assert (
-        "unset PGPASSWORD PGPASSFILE PGOPTIONS PGSERVICE PGSERVICEFILE" in source
-    )
     assert "set -x" not in source
     assert "$(" not in source
     assert "`" not in source
@@ -304,6 +301,87 @@ def test_role_init_keeps_passwords_out_of_shell_and_psql_state() -> None:
     ):
         assert f"SET LOCAL {setting};" in source
         assert source.index(f"SET LOCAL {setting};") < first_server_read
+
+
+def test_role_init_removes_password_environment_before_starting_psql(
+    tmp_path: Path,
+) -> None:
+    psql_probe = tmp_path / "psql"
+    psql_probe.write_text(
+        """#!/bin/sh
+set -eu
+for name in POSTGRES_PASSWORD POSTGRES_PASSWORD_FILE PGPASSWORD PGPASSFILE \
+    PGOPTIONS PGSERVICE PGSERVICEFILE
+do
+    if env | grep -q "^${name}="; then
+        printf '%s\\n' 'password environment reached psql' >&2
+        exit 97
+    fi
+done
+exit 0
+""",
+        encoding="utf-8",
+    )
+    psql_probe.chmod(0o555)
+
+    result = _docker(
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--cap-add",
+        "CHOWN",
+        "--cap-add",
+        "FOWNER",
+        "--cap-add",
+        "SETGID",
+        "--cap-add",
+        "SETUID",
+        "--tmpfs",
+        "/run/secrets:rw,nosuid,nodev,size=64k,mode=0700",
+        "--mount",
+        f"type=bind,src={SCRIPT},dst=/aegis-init/001-roles.sh,readonly",
+        "--mount",
+        f"type=bind,src={psql_probe},dst=/test-bin/psql,readonly",
+        "--env",
+        "PATH=/test-bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "--env",
+        "POSTGRES_USER=postgres",
+        "--env",
+        f"POSTGRES_DB={DATABASE_NAME}",
+        "--env",
+        "POSTGRES_PASSWORD=superuser-environment-canary",
+        "--env",
+        "POSTGRES_PASSWORD_FILE=/run/secrets/superuser-environment-canary",
+        "--env",
+        "PGPASSWORD=libpq-environment-canary",
+        "--env",
+        "PGPASSFILE=/run/secrets/libpq-environment-canary",
+        "--env",
+        "PGOPTIONS=environment-canary",
+        "--env",
+        "PGSERVICE=environment-canary",
+        "--env",
+        "PGSERVICEFILE=/run/secrets/environment-canary",
+        "--entrypoint",
+        "sh",
+        POSTGRES_IMAGE,
+        "-c",
+        "set -eu; "
+        "for name in db_migrator_password db_web_password "
+        "db_operations_password db_indexer_password db_media_password; do "
+        "printf 'role-secret\\n' > /run/secrets/$name; "
+        "chown 70:70 /run/secrets/$name; chmod 0400 /run/secrets/$name; done; "
+        "chown 70:70 /run/secrets; chmod 0700 /run/secrets; "
+        "exec gosu postgres /aegis-init/001-roles.sh",
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "canary" not in result.stdout + result.stderr
 
 
 @pytest.mark.integration
