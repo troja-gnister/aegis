@@ -10,25 +10,25 @@ The canonical platform design is [docs/superpowers/specs/2026-08-31-aegis-platfo
 
 Aegis will provide a secure browser interface for files mounted into its Docker deployment. It is designed first for phones and tablets, while remaining efficient on desktop browsers.
 
-- Browse, search, upload, organize, preview, stream, download, delete, and restore files.
+- Browse, search, upload, organize, preview, stream, and download files while keeping every mounted original unchanged.
 - Handle at least 1,000,000 indexed entries and 50,000 entries in one folder on the initial target hardware.
 - Show responsive photo and video libraries with thumbnails, metadata filters, and mobile viewers.
-- Preview PDF, text, and CSV files without downloading the complete file when avoidable.
+- Preview PDF, plain text, CSV, and common spreadsheet files without downloading the complete file when avoidable.
 - Support multiple accounts, groups, separately granted roots, and operation-level permissions.
 - When AI is enabled, run it locally on CPU by default, optionally accelerate it with a GPU, and use frontier APIs only after explicit configuration and per-capability opt-in.
 - Deploy as a small set of coordinated containers with PostgreSQL and explicit host or network-storage mounts.
 
 ## Principles and boundaries
 
-1. **Mounted files are authoritative.** Originals keep their normal paths and remain usable without Aegis. PostgreSQL is a rebuildable catalog plus the source of truth for users, grants, organization, jobs, and audit history.
+1. **Mounted files are authoritative and read-only.** Originals keep their normal paths, remain usable without Aegis, and are never renamed, moved, overwritten, or deleted by an Aegis container. PostgreSQL is a rebuildable catalog plus the source of truth for users, grants, organization, jobs, and audit history.
 2. **Browsing is indexed.** Normal API requests never enumerate large directories. Stable keyset cursors and bounded responses keep directory size from becoming request cost.
 3. **Private and secure by default.** Authentication, authorization, root containment, safe content delivery, auditability, and internet-facing hardening are platform requirements.
 4. **Local intelligence is optional.** Core file and media features work when AI is disabled or unavailable. Aegis never silently sends content to a cloud model.
 5. **Mobile web is the primary client.** The PWA uses virtualized collections, touch-sized controls, resumable transfers, and a dark-first accessible interface.
 6. **Scaling is measured.** Performance gates use representative million-entry fixtures and constrained baseline hardware, not only small developer datasets.
-7. **Operational state is explicit.** Mutations, indexing, media processing, and AI work are durable, observable, retryable jobs rather than hidden in web requests.
+7. **Operational state is explicit.** Managed publications, indexing, media processing, and AI work are durable, observable, retryable jobs rather than hidden in web requests.
 
-The first release does not include collaborative editing, desktop sync, WebDAV, historical file versions, public sharing, or automatic physical reorganization by AI. Those features require later design work rather than shortcuts in the v1 data model.
+The first release does not include collaborative editing, desktop sync, WebDAV, public sharing, in-place modification of mounted originals, or automatic physical reorganization by AI. Those features require later design work rather than shortcuts in the v1 data model.
 
 ## Architecture at a glance
 
@@ -37,14 +37,14 @@ The first release does not include collaborative editing, desktop sync, WebDAV, 
 | React + TypeScript PWA | Mobile-first files, photos, search, viewers, settings, and transfer manager |
 | Django web/API | Same-origin sessions, authorization, metadata APIs, operation journal, admin, and internal delivery authorization |
 | PostgreSQL | Accounts, grants, indexed catalog, organization, audit, durable jobs, and optional vectors |
-| File operations role | Upload publication, copy/move/delete work, trash retention, and crash recovery on writable roots |
+| File operations role | Immutable upload/version publication and copy-on-write jobs in managed storage; read-only access to originals |
 | Indexer role | Initial scans, filesystem events, checkpointed reconciliation, and catalog repair |
 | Media role | Thumbnails, metadata, PDF/text/CSV extraction, video probing, and compatibility transcodes |
 | Optional local AI role | CPU or GPU inference and preparation of explicitly approved provider payloads |
 | Optional frontier connector | Audited, allowlisted provider egress without original-root mounts |
 | Delivery gateway | Static assets, request limits, authorized byte-range delivery, and an optional automatic-TLS profile |
 
-All application roles will ship from one versioned codebase and image where practical. PostgreSQL is the initial coordination and job store; Redis is not a required dependency. Originals stay on explicitly mounted roots. Derivatives, upload staging, model data, and quarantine use separate role-scoped Aegis volumes, while recoverable deletions use hidden trash inside each writable root.
+All application roles will ship from one versioned codebase and image where practical. PostgreSQL is the initial coordination and job store; Redis is not a required dependency. Originals stay unchanged on explicitly mounted read-only roots. Upload staging, immutable managed versions, derivatives, model data, and quarantine use separate role-scoped Aegis volumes. Only regenerable derivative caches may be evicted; originals and published managed versions are never byte-deletion targets.
 
 ## Feature matrix
 
@@ -69,10 +69,10 @@ Every feature pull request must update its row. Implemented and Verified rows li
 | AUTH-004 | Optional administrator-enforced TOTP | Planned | Phase 6 | — |
 | FILE-001 | Indexed directory API with stable keyset cursor pagination | Planned | Phase 2 | — |
 | FILE-002 | Deployment-declared mount slots, logical roots, and safe path containment | In progress | Phase 1 | [Phase 1 plan](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md) |
-| FILE-003 | Resumable uploads with staging, progress, and conflict handling | Planned | Phase 2 | — |
-| FILE-004 | Create folder, rename, move, copy, and idempotent operation recovery | Planned | Phase 2 | — |
+| FILE-003 | Resumable uploads into immutable managed storage with progress and conflict handling | Planned | Phase 2 | — |
+| FILE-004 | Copy-on-write folders, copies, logical organization, and idempotent operation recovery | Planned | Phase 2 | — |
 | FILE-005 | Authorized downloads and browser-compatible byte-range streaming | Planned | Phase 2 | — |
-| FILE-006 | Root-local recycle bin, restore, and configurable retention | Planned | Phase 2 | — |
+| FILE-006 | Reversible metadata archive/hide state with no source or managed-version byte deletion | Planned | Phase 2 | — |
 | FILE-007 | Filesystem event ingestion plus checkpointed full reconciliation | Planned | Phase 2 | — |
 | FILE-008 | Permission-safe filename and path search | Planned | Phase 2 | — |
 | UX-001 | Dark responsive authenticated application shell | In progress | Phase 1 | [Phase 1 plan](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md) |
@@ -86,6 +86,8 @@ Every feature pull request must update its row. Implemented and Verified rows li
 | DOC-001 | Progressive PDF viewer and page thumbnails | Planned | Phase 3 | — |
 | DOC-002 | Escaped, chunked text viewing with encoding detection | Planned | Phase 3 | — |
 | DOC-003 | Server-paged CSV viewing with bounded filtering | Planned | Phase 3 | — |
+| DOC-004 | Sandboxed viewing of common spreadsheet formats | Planned | Phase 3 | — |
+| DOC-005 | Non-collaborative text/CSV/spreadsheet edits and safe PDF annotations/forms as new immutable managed versions | Planned | Phase 3 | — |
 | META-001 | EXIF/GPS/date/type/size extraction and filtering | Planned | Phase 4 | — |
 | ORG-001 | Albums, tags, ratings, favorites, and duplicate candidates | Planned | Phase 4 | — |
 | SEARCH-001 | Permission-safe combined filename and metadata search | Planned | Phase 4 | — |
@@ -96,13 +98,13 @@ Every feature pull request must update its row. Implemented and Verified rows li
 | AI-004 | Explicit per-capability frontier API connector | Planned | Phase 5 | — |
 | SEC-001 | Hardened same-origin edge, least-privilege containers, and safe content handling | In progress | Phase 1 | [Phase 1 plan](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md) |
 | SEC-002 | Authentication, grant, and administration audit trail | In progress | Phase 1 | [Phase 1 plan](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md) |
-| SEC-003 | File mutation, trash, and restore audit trail | Planned | Phase 2 | — |
+| SEC-003 | Managed publication, version, copy, and archive audit trail | Planned | Phase 2 | — |
 | SEC-004 | Frontier egress audit trail and isolation tests | Planned | Phase 5 | — |
 | SEC-005 | Release security/rate-limit review and hostile-content gate | Planned | Phase 6 | — |
 | PERF-001 | Automated 1,000,000-entry and 50,000-entry-folder performance suite | Planned | Phase 2 | — |
 | OPS-001 | Documented backup, restore, upgrade, failure-injection, and recovery workflows | Planned | Phase 6 | — |
 | EXT-001 | WebDAV and desktop synchronization | Deferred | Later | — |
-| EXT-002 | Historical file versions and controlled sharing | Deferred | Later | — |
+| EXT-002 | Controlled sharing | Deferred | Later | — |
 | EXT-003 | Certified 10,000,000+ entry operation and storage adapters | Deferred | Later | — |
 | EXT-004 | Collaborative editing | Deferred | Later | — |
 
@@ -114,12 +116,12 @@ The current focus is **[Phase 1 — Secure foundation](docs/superpowers/plans/20
 | --- | --- | --- | --- |
 | 0 — Design and checkpoint | Canonical README/specification, legacy release tag, and first bounded implementation plan | Design reviewed, legacy state recoverable by name, and clean documentation checkpoint | Verified |
 | 1 — Secure foundation | Django/React/PostgreSQL/Compose skeleton, same-origin auth, role-scoped credentials/volumes, mount slots, users/groups/grants, fenced job/operation primitives, health, and CI | A user can sign in and reach only an authorized root shell through the least-privilege deployed stack | In progress |
-| 2 — Scalable drive core | Indexer, cursor browser, functional mobile Files/transfers UI, search, resumable upload, full mutations, trash, reconciliation, and audit | Complete UI and API workflows pass against 1M total entries and a 50K-entry folder | Planned |
-| 3 — Mobile media and documents | Installable PWA navigation, thumbnails, photo timeline, photo/video viewers, range/HLS delivery, and PDF/text/CSV viewers | Mobile interaction budgets and Chromium/WebKit browser journeys pass | Planned |
+| 2 — Scalable drive core | Indexer, cursor browser, functional mobile Files/transfers UI, search, resumable managed uploads, immutable versions/copies, metadata-only archive, reconciliation, and audit | Complete UI and API workflows pass against 1M total entries and a 50K-entry folder | Planned |
+| 3 — Mobile media and documents | Installable PWA navigation, thumbnails, photo timeline, photo/video viewers, range/HLS delivery, PDF/text/CSV/spreadsheet viewers, and copy-on-write document editing | Mobile interaction budgets and Chromium/WebKit browser journeys pass | Planned |
 | 4 — Search and human organization | Rich metadata, albums, tags, ratings, favorites, duplicates, and full-text search | Combined search remains correct and permission-safe across users and roots | Planned |
 | 5 — Local intelligence | CPU AI, optional GPU, semantic search, provenance, smart albums, and opt-in frontier providers | Files remain fully usable with AI disabled or failed; no unapproved egress occurs | Planned |
 | 6 — Release hardening | Backup/restore drills, hostile media tests, failure injection, security review, upgrade path, and operations guide | A documented recovery exercise and release checklist pass for v1 | Planned |
-| Later | WebDAV/sync, versions, controlled sharing, 10M+ certification, storage adapters, and separately specified collaboration | Each capability receives its own approved specification and scale/security gate | Deferred |
+| Later | WebDAV/sync, controlled sharing, 10M+ certification, storage adapters, and separately specified collaboration | Each capability receives its own approved specification and scale/security gate | Deferred |
 
 ## Performance contract
 
@@ -146,7 +148,8 @@ Directory APIs use bounded page sizes, compact list records, compound indexes, a
 - Active or unknown content is downloaded as an attachment; browser-rendered text is escaped.
 - Originals and APIs are not stored in browser caches; authenticated thumbnails must revalidate against the current session and authorization epoch.
 - Secrets are injected through Docker secrets or protected configuration and are redacted from logs.
-- Containers run unprivileged with minimal mounts and capabilities; indexing, media, and AI roles never receive write access to originals.
+- Containers run unprivileged with minimal mounts and capabilities; every application role receives originals read-only, and the web role receives no originals mount.
+- Future uploads, copies, and edits create immutable versions in a separate managed append-only store. No API or job permanently deletes original or versioned content; cleanup is limited to regenerable derivatives and unpublished Aegis-owned temporary artifacts outside original roots.
 - Cloud model use is disabled by default, explicitly selected per capability, and recorded in the audit trail.
 
 ## Development and documentation

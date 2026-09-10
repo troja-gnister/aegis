@@ -4,6 +4,7 @@ import hashlib
 import os
 from dataclasses import replace
 from pathlib import Path
+from typing import Literal
 
 import pytest
 import yaml
@@ -115,7 +116,7 @@ def test_render_is_deterministic_and_enforces_role_scoped_long_bind_mounts(
         f"{readonly.stat().st_ino}|read_only|"
         f"{photos_fingerprint}",
         f"uploads|/srv/aegis/roots/uploads|{writable.stat().st_dev}|"
-        f"{writable.stat().st_ino}|read_write|"
+        f"{writable.stat().st_ino}|read_only|"
         f"{uploads_fingerprint}",
     ]
 
@@ -141,7 +142,7 @@ def test_render_is_deterministic_and_enforces_role_scoped_long_bind_mounts(
         for target in root_targets:
             assert _root_mount(services[role], target)["read_only"] is True
     assert _root_mount(services["operations"], "/srv/aegis/roots/photos")["read_only"] is True
-    assert _root_mount(services["operations"], "/srv/aegis/roots/uploads")["read_only"] is False
+    assert _root_mount(services["operations"], "/srv/aegis/roots/uploads")["read_only"] is True
     for service in services.values():
         for mount in service.get("volumes", []):
             assert mount["type"] == "bind"
@@ -247,16 +248,16 @@ def test_backend_attestation_checks_identity_exact_mountpoint_and_role_mode(
     digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
     manifest = MountManifest.load(manifest_path, digest)
     mountinfo = tmp_path / "mountinfo"
-    mountinfo.write_text(
+    readonly_mountinfo = (
         "\n".join(
             [
                 "36 25 0:32 / /srv/aegis/roots/photos ro - ext4 /dev/sda rw",
-                "37 25 0:33 / /srv/aegis/roots/uploads rw - ext4 /dev/sdb rw",
+                "37 25 0:33 / /srv/aegis/roots/uploads ro - ext4 /dev/sdb rw",
             ]
         )
-        + "\n",
-        encoding="ascii",
+        + "\n"
     )
+    mountinfo.write_text(readonly_mountinfo, encoding="ascii")
     real_stat = os.stat
 
     def container_stat(
@@ -270,7 +271,19 @@ def test_backend_attestation_checks_identity_exact_mountpoint_and_role_mode(
 
     monkeypatch.setattr(os, "stat", container_stat)
 
-    attest_mounts(manifest, "operations", mountinfo_path=mountinfo)
-    with pytest.raises(MountAttestationError, match="uploads") as caught:
-        attest_mounts(manifest, "indexer", mountinfo_path=mountinfo)
-    assert str(writable) not in str(caught.value)
+    roles: tuple[Literal["operations", "indexer", "media"], ...] = (
+        "operations",
+        "indexer",
+        "media",
+    )
+    for role in roles:
+        attest_mounts(manifest, role, mountinfo_path=mountinfo)
+
+    mountinfo.write_text(
+        readonly_mountinfo.replace("uploads ro", "uploads rw"),
+        encoding="ascii",
+    )
+    for role in roles:
+        with pytest.raises(MountAttestationError, match="uploads") as caught:
+            attest_mounts(manifest, role, mountinfo_path=mountinfo)
+        assert str(writable) not in str(caught.value)

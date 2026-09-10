@@ -107,7 +107,7 @@ version = 1
 slot_id = "photos"
 source = "{source}"
 container_path = "/srv/aegis/roots/photos"
-mode = "read_only"
+mode = "read_write"
 expected_identity = "{local_identity(source)}"
 """.strip()
         + "\n",
@@ -216,7 +216,7 @@ version = 1
 slot_id = "photos"
 source = "{source}"
 container_path = "/srv/aegis/roots/photos"
-mode = "read_only"
+mode = "read_write"
 expected_identity = "{local_identity(source)}"
 """.strip()
         + "\n",
@@ -247,7 +247,12 @@ expected_identity = "{local_identity(source)}"
         check=True,
         capture_output=True,
         text=True,
-        env=os.environ | {"AEGIS_UID": str(os.geteuid()), "AEGIS_GID": str(os.getegid())},
+        env=os.environ
+        | {
+            "AEGIS_UID": str(os.geteuid()),
+            "AEGIS_GID": str(os.getegid()),
+            "AEGIS_RELEASE_ID": "mount-test-release",
+        },
     )
     rendered = json.loads(result.stdout)
     services = rendered["services"]
@@ -262,6 +267,12 @@ expected_identity = "{local_identity(source)}"
         command = " ".join(services[role]["command"])
         assert "aegisctl mounts attest" in command
         assert f"--role {role}" in command
+        root_mount = next(
+            mount
+            for mount in services[role]["volumes"]
+            if mount["target"] == "/srv/aegis/roots/photos"
+        )
+        assert root_mount["read_only"] is True
     generated = yaml.safe_load(output.read_text(encoding="ascii"))
     for service in generated["services"].values():
         targets = [mount["target"] for mount in service.get("volumes", [])]
@@ -324,7 +335,12 @@ expected_identity = "{local_identity(source)}"
         check=True,
         capture_output=True,
         text=True,
-        env=os.environ | {"AEGIS_UID": str(os.geteuid()), "AEGIS_GID": str(os.getegid())},
+        env=os.environ
+        | {
+            "AEGIS_UID": str(os.geteuid()),
+            "AEGIS_GID": str(os.getegid()),
+            "AEGIS_RELEASE_ID": "mount-test-release",
+        },
     )
     services = json.loads(configured.stdout)["services"]
     expected_sources = {
@@ -379,7 +395,11 @@ expected_identity = "{local_identity(source)}"
             text=True,
             timeout=60,
             env=os.environ
-            | {"AEGIS_UID": str(os.geteuid()), "AEGIS_GID": str(os.getegid())},
+            | {
+                "AEGIS_UID": str(os.geteuid()),
+                "AEGIS_GID": str(os.getegid()),
+                "AEGIS_RELEASE_ID": "mount-test-release",
+            },
         )
     finally:
         subprocess.run(
@@ -390,7 +410,11 @@ expected_identity = "{local_identity(source)}"
             stderr=subprocess.DEVNULL,
             timeout=30,
             env=os.environ
-            | {"AEGIS_UID": str(os.geteuid()), "AEGIS_GID": str(os.getegid())},
+            | {
+                "AEGIS_UID": str(os.geteuid()),
+                "AEGIS_GID": str(os.getegid()),
+                "AEGIS_RELEASE_ID": "mount-test-release",
+            },
         )
 
     assert runtime.returncode == 0, runtime.stderr
@@ -556,13 +580,13 @@ expected_identity = "{local_identity(source)}"
         )
 
     indexer = run("indexer", readonly=True)
-    operations_wrong_mode = run("operations", readonly=True)
-    operations = run("operations", readonly=False)
+    operations = run("operations", readonly=True)
+    operations_writable = run("operations", readonly=False)
     wrong_digest = run("indexer", readonly=True, expected_digest="0" * 64)
 
     assert indexer.returncode == 0, indexer.stderr
     assert operations.returncode == 0, operations.stderr
-    for rejected in (operations_wrong_mode, wrong_digest):
+    for rejected in (operations_writable, wrong_digest):
         assert rejected.returncode != 0
         error = json.loads(rejected.stderr)
         assert error["status"] == "error"

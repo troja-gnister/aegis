@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -214,66 +213,6 @@ def local_identity(path: Path) -> str:
     return f"local:{info.st_dev}:{info.st_ino}"
 
 
-def _writable_probe(root_fd: int, slot_id: str) -> None:
-    reserved = ".aegis-preflight"
-    created_reserved = False
-    probe_fd = -1
-    first_name = f"probe-{secrets.token_hex(16)}"
-    second_name = f"probe-{secrets.token_hex(16)}"
-    owned_names: set[str] = set()
-    try:
-        try:
-            os.mkdir(reserved, mode=0o700, dir_fd=root_fd)
-            created_reserved = True
-        except FileExistsError:
-            info = os.stat(reserved, dir_fd=root_fd, follow_symlinks=False)
-            if not stat.S_ISDIR(info.st_mode):
-                raise ConfigError(
-                    f"mount slot {slot_id}: writable probe unavailable"
-                ) from None
-        probe_fd = os.open(
-            reserved,
-            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
-            dir_fd=root_fd,
-        )
-        fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        if os.listdir(probe_fd):
-            raise ConfigError(f"mount slot {slot_id}: writable probe area is not empty")
-        file_fd = os.open(
-            first_name,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
-            0o600,
-            dir_fd=probe_fd,
-        )
-        owned_names.add(first_name)
-        try:
-            os.write(file_fd, b"aegis-preflight-v1\n")
-            os.fsync(file_fd)
-            fcntl.flock(file_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        finally:
-            os.close(file_fd)
-        os.rename(first_name, second_name, src_dir_fd=probe_fd, dst_dir_fd=probe_fd)
-        owned_names.remove(first_name)
-        owned_names.add(second_name)
-        os.fsync(probe_fd)
-        os.unlink(second_name, dir_fd=probe_fd)
-        owned_names.remove(second_name)
-        os.fsync(probe_fd)
-    except ConfigError:
-        raise
-    except (OSError, BlockingIOError) as exc:
-        raise ConfigError(f"mount slot {slot_id}: writable probe failed") from exc
-    finally:
-        if probe_fd >= 0:
-            for name in tuple(owned_names):
-                with suppress(OSError):
-                    os.unlink(name, dir_fd=probe_fd)
-            os.close(probe_fd)
-        if created_reserved:
-            with suppress(OSError):
-                os.rmdir(reserved, dir_fd=root_fd)
-
-
 def preflight_slots(slots: list[SlotSpec] | tuple[SlotSpec, ...]) -> tuple[ValidatedSlot, ...]:
     if not 1 <= len(slots) <= MAX_SLOTS:
         raise ConfigError("invalid mount slot count")
@@ -326,8 +265,6 @@ def preflight_slots(slots: list[SlotSpec] | tuple[SlotSpec, ...]) -> tuple[Valid
             fd_info = os.fstat(root_fd)
             if (fd_info.st_dev, fd_info.st_ino) != identity_pair:
                 raise ConfigError(f"mount slot {checked.slot_id}: source changed")
-            if checked.mode == "read_write":
-                _writable_probe(root_fd, checked.slot_id)
         except ConfigError:
             raise
         except OSError as exc:
@@ -523,7 +460,7 @@ def render_artifacts(
     attestation_raw = (
         "".join(
             f"{slot.slot_id}|{slot.container_path}|{slot.filesystem_id}|"
-            f"{slot.root_inode}|{slot.mode}|{slot.mount_fingerprint}\n"
+            f"{slot.root_inode}|read_only|{slot.mount_fingerprint}\n"
             for slot in validated
         )
     ).encode("ascii")
@@ -617,7 +554,7 @@ def render_artifacts(
             _bind(slot.source, slot.container_path, read_only=True)
         )
         service_volumes["operations"].append(
-            _bind(slot.source, slot.container_path, read_only=slot.mode == "read_only")
+            _bind(slot.source, slot.container_path, read_only=True)
         )
     compose_raw = yaml.safe_dump(
         {"services": services},
@@ -728,12 +665,9 @@ def attest_mounts(
     records = parse_mountinfo(raw)
     for slot in manifest.slots.values():
         record = records.get(slot.container_path.as_posix())
-        required_mode: Mode = (
-            slot.mode if role == "operations" else "read_only"
-        )
         if (
             record is None
-            or record.effective_mode != required_mode
+            or record.effective_mode != "read_only"
             or not secrets.compare_digest(
                 record.mount_fingerprint, slot.mount_fingerprint
             )

@@ -15,7 +15,7 @@
 - Execute in an isolated worktree created with `superpowers:using-git-worktrees` on branch `rewrite/phase-1-foundation`.
 - Before deleting legacy files, verify annotated tag `legacy-hardening-cli-v0.1.0` resolves to commit `1cb4277`.
 - Phase 1 implements only PLAT-001, PLAT-002, OPS-002, AUTH-001, AUTH-002, AUTH-003, FILE-002, UX-001, SEC-001, and SEC-002.
-- Do not implement file enumeration, uploads, file mutations, trash, previews, media/document processing, AI, semantic search, WebDAV, or collaboration.
+- Do not implement file enumeration, managed uploads/versions/copies, logical archive, previews, media/document processing, AI, semantic search, WebDAV, or collaboration.
 - Python is `>=3.13,<3.14`; Django is `>=5.2.17,<5.3`; Django REST Framework is `>=3.16.1,<3.17`; PostgreSQL is major 18.
 - Node.js is major 24 LTS; React is `>=19.2,<20`; Vite is `>=8.1,<9`.
 - Commit `uv.lock` and `frontend/package-lock.json`; CI and images install from frozen locks.
@@ -23,7 +23,8 @@
 - Browser authentication uses revocable server-side Django sessions and CSRF cookies. Never store bearer tokens in browser storage.
 - Passwords use Argon2id. Authentication errors are generic and login throttling is shared through PostgreSQL.
 - Root grants are additive across direct user and Django-group grants. There are no deny rules, and platform-superuser status never implies product data access.
-- The web service receives no original-root mount. Gateway/indexer/media receive read-only roots; only operations may receive a writable root.
+- The web service receives no original-root mount. Gateway, operations, indexer, media, and future AI roles receive every original root read-only. No application container may create, rename, move, overwrite, or unlink anything below an original root.
+- The legacy `read_write` slot value remains parseable as inert host-capability metadata, but it never grants a writable container mount or authorizes a write probe. Cleanup is limited to Aegis-owned generated artifacts outside original roots.
 - All containers run unprivileged, drop all capabilities, use read-only application filesystems, have no Docker socket, and receive only role-scoped secrets and volumes.
 - PostgreSQL is the initial durable queue and coordination store. Do not add Redis.
 - Use UUIDs for externally visible application objects. Never return a host/container root path from an API.
@@ -1602,7 +1603,7 @@ def test_nested_sources_are_rejected(tmp_path) -> None:
         )
 ```
 
-Also test duplicate real paths through symlinks, duplicate `(filesystem, inode)` identities, duplicate remote identities, invalid container paths, inaccessible sources, and a writable slot whose bounded reserved-area probe cannot create/sync/rename/fsync/unlink cleanly.
+Also test duplicate real paths through symlinks, duplicate `(filesystem, inode)` identities, duplicate remote identities, invalid container paths, inaccessible sources, and a legacy `read_write` declaration whose preflight inspects readability/identity without creating or changing anything below the source.
 
 Run `uv run pytest backend/tests/unit/aegisctl/test_mounts.py -q`.
 
@@ -1633,7 +1634,7 @@ class ValidatedSlot:
     expected_identity: str
 ```
 
-`local_identity(path)` returns `local:<st_dev>:<st_ino>`. `inspect` prints that value only after resolving the source and checking that it is a directory. Preflight compares the observed local identity to a configured local identity, compares remote identities pairwise, resolves sources without following entries below the root, compares ancestor relationships, and fails when distinction is ambiguous. For writable slots, perform only bounded probes beneath `.aegis-preflight/`: create with `O_EXCL|O_NOFOLLOW`, fsync, rename, directory-fsync, advisory lock, unlink, and directory cleanup. Refuse a preexisting nonempty probe location; do not delete arbitrary contents.
+`local_identity(path)` returns `local:<st_dev>:<st_ino>`. `inspect` prints that value only after resolving the source and checking that it is a readable directory. Preflight compares the observed local identity to a configured local identity, compares remote identities pairwise, resolves sources without following entries below the root, compares ancestor relationships, and fails when distinction is ambiguous. It may inspect metadata and readability but never creates, locks, renames, writes, or unlinks anything below an original root. The accepted `read_write` declaration does not change this behavior.
 
 - [ ] **Step 4: Render deterministic generated artifacts**
 
@@ -1654,7 +1655,7 @@ Write the manifest atomically with mode 0600 and this schema:
 }
 ```
 
-The manifest omits host source paths. The Compose override contains source paths and mounts every slot read-only into gateway, indexer, and media; operations receives read-write only when the slot is declared read-write. It mounts the sanitized JSON manifest into web and workers, mounts a line-oriented attestation into gateway, and supplies both SHA-256 digests as non-secret configuration. Web and migrate never receive original-root mounts. Sort by slot ID so repeated renders are stable apart from manifest timestamp.
+The manifest omits host source paths. The Compose override contains source paths and mounts every slot read-only into gateway, operations, indexer, and media, regardless of the declared compatibility mode. It mounts the sanitized JSON manifest into web and workers, mounts a line-oriented attestation into gateway, and supplies both SHA-256 digests as non-secret configuration. The gateway attestation records the effective `read_only` grant. Web and migrate never receive original-root mounts. Sort by slot ID so repeated renders are stable apart from manifest timestamp.
 
 The gateway attestation has one strict ASCII record per slot:
 
@@ -1662,7 +1663,7 @@ The gateway attestation has one strict ASCII record per slot:
 family-photos|/srv/aegis/roots/family-photos|123|456|read_only
 ```
 
-The Nginx entrypoint verifies its configured digest, rejects delimiters/newlines in fields, compares `stat -Lc '%d|%i'` for every root, and verifies the rendered Compose mount is read-only. A mismatch exits before Nginx starts. Backend `mounts attest` performs the same identity/mode checks before a worker becomes ready and returns only slot IDs in errors.
+The Nginx entrypoint verifies its configured digest, rejects delimiters/newlines in fields, compares `stat -Lc '%d|%i'` for every root, and verifies the rendered Compose mount is read-only. A mismatch exits before Nginx starts. Backend `mounts attest` performs the same identity/mode checks before a worker becomes ready, rejects an actual read-write original mount for every role, and returns only slot IDs in errors.
 
 Ignore only the concrete generated outputs `deploy/mounts.manifest.json`, `deploy/mounts.gateway.attestation`, and `compose.mounts.generated.yaml`; keep the example and entrypoint tracked.
 
@@ -1730,7 +1731,7 @@ uv run aegisctl mounts validate --config deploy/mounts.example.toml
 uv run pytest tests/deployment/test_rendered_mounts.py -q
 ```
 
-The deployment test creates temporary absolute sources, captures their expected identities, invokes preflight/render through the CLI, passes the generated override to `docker compose config`, and executes each role's attestation command. Do not weaken validation to make the example's illustrative source exist. Expected: generated config gives no original mount to web/migrate, gives no write mount to gateway/indexer/media, contains no duplicate destination, and fails startup after an identity/digest mismatch.
+The deployment test creates temporary absolute sources, including one declared `read_write`, captures their expected identities, invokes preflight/render through the CLI, passes the generated override to `docker compose config`, and executes each role's attestation command. Do not weaken validation to make the example's illustrative source exist. Expected: generated config gives no original mount to web/migrate, gives no write mount to gateway/operations/indexer/media, contains no duplicate destination, and fails startup after an identity/digest/mode mismatch. A real read-write operations bind must be rejected.
 
 - [ ] **Step 7: Commit and push mount-slot tooling**
 
@@ -2436,7 +2437,7 @@ def test_web_has_no_originals_and_gateway_has_no_database(rendered_compose) -> N
     assert "DATABASE_URL" not in services["gateway"].get("environment", {})
 ```
 
-Assert every application service has `read_only`, `cap_drop: ALL`, `no-new-privileges`, an explicit unprivileged user, bounded tmpfs, role-only volumes/secrets, an internal network, no privileged mode, no host PID/IPC/network namespace, and no Docker socket. Assert only operations can receive writable original slots and no core application role has an external network.
+Assert every application service has `read_only`, `cap_drop: ALL`, `no-new-privileges`, an explicit unprivileged user, bounded tmpfs, role-only volumes/secrets, an internal network, no privileged mode, no host PID/IPC/network namespace, and no Docker socket. Assert every original slot is read-only in gateway/operations/indexer/media (including a declared `read_write` slot), web receives none, and no core application role has an external network.
 
 - [ ] **Step 6: Start the complete role-separated stack**
 
@@ -2632,7 +2633,7 @@ Also cover zero roots, API session expiry, keyboard activation, 320/390 CSS-pixe
 
 - [ ] **Step 6: Implement the approved dark responsive shell**
 
-Use deep-slate canvas/surfaces, indigo primary actions, cyan focus/accent, high-contrast text, visible `:focus-visible`, safe-area insets, and reduced-motion media queries. The Phase 1 shell shows authorized root cards and their logical read-only/read-write status only. A root card is not yet a directory browser; activating it displays a clear “file browsing arrives in Phase 2” state without requesting a filesystem path or entry list.
+Use deep-slate canvas/surfaces, indigo primary actions, cyan focus/accent, high-contrast text, visible `:focus-visible`, safe-area insets, and reduced-motion media queries. The Phase 1 shell shows authorized root cards and their compatibility host-capability declaration while making clear that effective original access is always read-only. A root card is not yet a directory browser; activating it displays a clear “file browsing arrives in Phase 2” state without requesting a filesystem path or entry list.
 
 ```css
 .interactive {

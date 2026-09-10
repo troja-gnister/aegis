@@ -122,7 +122,7 @@ def test_local_identity_mismatch_does_not_disclose_source(tmp_path: Path) -> Non
     assert "local:1:2" not in str(caught.value)
 
 
-def test_writable_probe_refuses_preexisting_nonempty_reserved_directory(
+def test_read_write_declaration_is_inert_and_does_not_touch_source(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "source"
@@ -131,22 +131,21 @@ def test_writable_probe_refuses_preexisting_nonempty_reserved_directory(
     sentinel = reserved / "operator-owned"
     sentinel.write_text("keep", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="probe"):
-        preflight_slots([_slot(source, "source", mode="read_write")])
+    validated = preflight_slots([_slot(source, "source", mode="read_write")])
 
+    assert validated[0].mode == "read_write"
     assert sentinel.read_text(encoding="utf-8") == "keep"
 
 
-def test_writable_probe_leaves_preexisting_empty_reserved_directory(tmp_path: Path) -> None:
+def test_read_write_declaration_does_not_create_a_probe_directory(tmp_path: Path) -> None:
     source = tmp_path / "source"
     reserved = source / ".aegis-preflight"
-    reserved.mkdir(parents=True)
+    source.mkdir()
 
     validated = preflight_slots([_slot(source, "source", mode="read_write")])
 
     assert validated[0].slot_id == "source"
-    assert reserved.is_dir()
-    assert list(reserved.iterdir()) == []
+    assert not reserved.exists()
 
 
 def test_manifest_write_is_atomic_sanitized_and_exactly_0600(tmp_path: Path) -> None:
