@@ -3,10 +3,14 @@ import os
 import subprocess
 import urllib.request
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from aegis_apps.common import runtime_checks
+from django.test import override_settings
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 UV_IMAGE = (
@@ -246,19 +250,20 @@ def test_caddy_overwrites_forwarding_headers_without_deleting_replacements() -> 
 def test_web_healthcheck_connects_loopback_with_public_authority_and_https(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    command = rendered_compose()["services"]["web"]["healthcheck"]["test"][-1]
     captured: dict[str, object] = {}
 
-    def capture(request: urllib.request.Request, *, timeout: int) -> None:
+    def capture(
+        request: urllib.request.Request, *, timeout: int
+    ) -> nullcontext[SimpleNamespace]:
         captured["url"] = request.full_url
         captured["host"] = request.get_header("Host")
         captured["forwarded_proto"] = request.get_header("X-forwarded-proto")
         captured["timeout"] = timeout
+        return nullcontext(SimpleNamespace(status=200))
 
-    monkeypatch.setenv("AEGIS_PUBLIC_URL", "https://public.example.test:9443")
-    monkeypatch.setattr(urllib.request, "urlopen", capture)
-
-    exec(command, {})
+    monkeypatch.setattr(runtime_checks.urllib.request, "urlopen", capture)
+    with override_settings(AEGIS_PUBLIC_URL="https://public.example.test:9443"):
+        runtime_checks.probe_local_web()
 
     assert captured == {
         "url": "http://127.0.0.1:8000/health/live",
@@ -512,7 +517,10 @@ def test_production_tls_profile_rejects_invalid_host_before_acme(
         "--profile",
         "tls",
     ]
-    environment = os.environ | {"AEGIS_TLS_HOST": rejected_host}
+    environment = os.environ | {
+        "AEGIS_RELEASE_ID": "tls-rejection-test",
+        "AEGIS_TLS_HOST": rejected_host,
+    }
 
     try:
         result = subprocess.run(
