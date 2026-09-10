@@ -161,6 +161,35 @@ def test_database_credentials_commands_and_volumes_are_role_scoped() -> None:
             assert expected_users[other_name] not in service["environment"].values()
 
 
+def test_backend_healthchecks_verify_the_exact_runtime_boundary() -> None:
+    services = rendered_compose()["services"]
+
+    assert services["web"]["healthcheck"]["test"] == [
+        "CMD",
+        "python",
+        "manage.py",
+        "check_runtime",
+        "--role",
+        "web",
+        "--require-http",
+    ]
+    for role in WORKER_SERVICES:
+        assert services[role]["healthcheck"]["test"] == [
+            "CMD",
+            "python",
+            "manage.py",
+            "check_runtime",
+            "--role",
+            role,
+        ]
+    for name in ("web", *WORKER_SERVICES):
+        healthcheck = services[name]["healthcheck"]
+        assert healthcheck["interval"] == "5s"
+        assert healthcheck["timeout"] == "5s"
+        assert healthcheck["retries"] == 20
+        assert healthcheck["start_period"] == "10s"
+
+
 def test_postgres_stages_fixed_source_secrets_into_uid_70_private_tmpfs() -> None:
     postgres = rendered_compose()["services"]["postgres"]
 

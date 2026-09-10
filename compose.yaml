@@ -110,18 +110,11 @@ services:
       migrate:
         condition: service_completed_successfully
     healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - >-
-          import os,urllib.parse,urllib.request;
-          authority=urllib.parse.urlsplit(os.environ['AEGIS_PUBLIC_URL']).netloc;
-          request=urllib.request.Request('http://127.0.0.1:8000/health/live',headers={'Host':authority,'X-Forwarded-Proto':'https'});
-          urllib.request.urlopen(request, timeout=2)
+      test: [CMD, python, manage.py, check_runtime, --role, web, --require-http]
       interval: 5s
-      timeout: 3s
+      timeout: 5s
       retries: 20
+      start_period: 10s
 
   operations:
     <<: *backend-runtime
@@ -141,6 +134,12 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, python, manage.py, check_runtime, --role, operations]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
 
   indexer:
     <<: *backend-runtime
@@ -158,6 +157,12 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, python, manage.py, check_runtime, --role, indexer]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
 
   media:
     <<: *backend-runtime
@@ -178,6 +183,12 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, python, manage.py, check_runtime, --role, media]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
 
   gateway:
     image: aegis-gateway

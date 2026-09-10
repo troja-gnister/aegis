@@ -378,3 +378,4 @@ def test_deployment_commands_are_discoverable() -> None:
 
     assert commands["sync_db_privileges"] == "aegis_apps.common"
     assert commands["deploy_database"] == "aegis_apps.common"
+    assert commands["check_runtime"] == "aegis_apps.common"
