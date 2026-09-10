@@ -59,4 +59,5 @@ do
 done
 
 unset PGPASSWORD PGPASSFILE PGOPTIONS PGSERVICE PGSERVICEFILE
+umask 0022
 exec /usr/local/bin/docker-entrypoint.sh "$@"

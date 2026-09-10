@@ -33,6 +33,7 @@ services:
       context: .
       dockerfile: docker/postgres.Dockerfile
     entrypoint: [/usr/local/bin/aegis-postgres-entrypoint]
+    command: [postgres]
     user: "0:0"
     environment:
       POSTGRES_DB: "${AEGIS_DB_NAME:-aegis}"
