@@ -2203,6 +2203,7 @@ git push
 - Modify: `backend/tests/integration/operations/{test_authorization_locking,test_heartbeats,test_operation_services,test_run_role}.py`
 - Create: `backend/tests/unit/common/test_database_privileges.py`
 - Create: `tests/deployment/test_database_roles.py`
+- Create: `tests/deployment/test_postgres_role_init.py`
 - Modify: `tests/deployment/test_compose.py`
 - Create: `tests/deployment/test_container_boundaries.py`
 
@@ -2247,7 +2248,33 @@ Expected: FAIL because the runtime roles/privileges do not exist.
 
 - [ ] **Step 2: Create roles from Docker secrets without exposing values**
 
-`001-roles.sh` reads each password from the fixed `/run/secrets/db_migrator_password`, `db_web_password`, `db_operations_password`, `db_indexer_password`, and `db_media_password` files, passes it to `psql` as a bound variable, creates or rotates only the named login, and revokes public schema/database privileges. It must not enable shell tracing, interpolate a password into a logged command, or accept a password from an environment variable. The migrator owns the application schema; runtime roles receive no ownership.
+`001-roles.sh` accepts only the fixed `/run/secrets/db_migrator_password`,
+`db_web_password`, `db_operations_password`, `db_indexer_password`, and
+`db_media_password` paths. Before invoking `psql`, it requires each path to be a
+non-symlink regular file owned by PostgreSQL uid/gid 70, mode `0400` or `0600`, and
+between 1 and 4,096 bytes. `psql` disables startup files and receives no password in
+its variables, environment, or arguments; the PostgreSQL server reads each fixed path
+directly. Before those reads, the initialization transaction disables statement,
+duration, parameter, and error-statement logging locally and pins password encryption
+to SCRAM-SHA-256, so weaker or more verbose cluster defaults cannot expose or downgrade
+the credentials. Initialization creates or rotates only the named logins, revokes PUBLIC
+schema/database access, revokes both global and public-schema migrator default privileges
+from PUBLIC and every runtime role, and gives runtime roles only database CONNECT and
+public-schema USAGE at bootstrap. Object grants remain the responsibility of
+`sync_db_privileges`.
+
+Binding secret-staging requirement: Compose file-backed secret uid/gid/mode semantics
+are not portable enough for a server-side uid-70 read. The PostgreSQL container must
+stage the five source secrets into a private `/run/secrets` tmpfs as uid/gid 70 mode
+`0400` before invoking the official PostgreSQL entrypoint; it must not weaken the init
+script's ownership or mode validation. The disposable PostgreSQL 18 test proves both
+the staged metadata and successful server-side reads. This staging is implemented with
+the Task 11 Compose isolation slice, not by mounting the persistent database volume.
+
+The shell must not enable tracing, interpolate a password into a logged command, or
+accept a password from an environment variable. Before any mutation, SQL rejects an
+existing managed role with a broader attribute or any membership edge. The migrator
+owns only the application database/schema; runtime roles receive no ownership.
 
 Use separate Compose secrets and `DATABASE_PASSWORD_FILE` for every role. Gateway receives no database host, username, password, Django secret, manifest, staging volume, or worker credential.
 
@@ -2257,7 +2284,7 @@ Use server-side reads of fixed secret paths plus `format(..., %I, %L)` rather th
 DO $role_setup$
 DECLARE
   role_password text := regexp_replace(
-    pg_read_file('/run/secrets/db_web_password'), E'\\r?\\n$', ''
+    pg_catalog.pg_read_file('/run/secrets/db_web_password'), E'\\r?\\n$', ''
   );
 BEGIN
   IF role_password = '' OR octet_length(role_password) > 4096 THEN
