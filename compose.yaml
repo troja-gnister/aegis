@@ -28,28 +28,41 @@ x-backend-environment: &backend-environment
 
 services:
   postgres:
-    image: postgres:18.6-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2
+    image: aegis-postgres
+    build:
+      context: .
+      dockerfile: docker/postgres.Dockerfile
+    entrypoint: [/usr/local/bin/aegis-postgres-entrypoint]
+    user: "0:0"
     environment:
       POSTGRES_DB: "${AEGIS_DB_NAME:-aegis}"
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_superuser_password
     networks: [backend]
+    read_only: true
+    tmpfs:
+      - /run/aegis-source-secrets:size=64k,noexec,nosuid,nodev,uid=0,gid=0,mode=0700
+      - /run/secrets:size=64k,noexec,nosuid,nodev,uid=70,gid=70,mode=0700
+      - /var/run/postgresql:size=16m,noexec,nosuid,nodev,uid=70,gid=70,mode=0775
+      - /tmp:size=16m,noexec,nosuid,nodev,uid=70,gid=70,mode=1777
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    security_opt: [no-new-privileges:true]
     volumes:
       - postgres-data:/var/lib/postgresql
-      - ./deploy/postgres/init:/docker-entrypoint-initdb.d:ro
     secrets:
       - source: postgres-superuser-password
-        target: postgres_superuser_password
+        target: /run/aegis-source-secrets/postgres_superuser_password
       - source: db-migrator-password
-        target: db_migrator_password
+        target: /run/aegis-source-secrets/db_migrator_password
       - source: db-web-password
-        target: db_web_password
+        target: /run/aegis-source-secrets/db_web_password
       - source: db-operations-password
-        target: db_operations_password
+        target: /run/aegis-source-secrets/db_operations_password
       - source: db-indexer-password
-        target: db_indexer_password
+        target: /run/aegis-source-secrets/db_indexer_password
       - source: db-media-password
-        target: db_media_password
+        target: /run/aegis-source-secrets/db_media_password
     healthcheck:
       test: [CMD-SHELL, 'pg_isready -U postgres -d "${AEGIS_DB_NAME:-aegis}"']
       interval: 5s
@@ -59,7 +72,7 @@ services:
 
   migrate:
     <<: *backend-runtime
-    command: [python, manage.py, migrate, --noinput]
+    command: [python, manage.py, deploy_database]
     environment:
       <<: *backend-environment
       AEGIS_DB_USER: aegis_migrator
