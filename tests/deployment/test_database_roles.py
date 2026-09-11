@@ -585,6 +585,36 @@ def test_sync_rejects_unsafe_migrator_attributes(
         role_database.synchronize()
 
 
+def test_sync_rejects_memberships_connected_to_the_migrator(
+    role_database: RoleDatabase,
+) -> None:
+    unexpected_role = f"aegis_membership_{uuid.uuid4().hex[:12]}"
+    with connection.cursor() as cursor:
+        cursor.execute(
+            sql.SQL("CREATE ROLE {} NOLOGIN").format(_quote(unexpected_role))
+        )
+        cursor.execute(
+            sql.SQL("GRANT {} TO aegis_migrator").format(_quote(unexpected_role))
+        )
+    try:
+        with pytest.raises(
+            PrivilegeSynchronizationError,
+            match="managed database role membership is unsafe",
+        ):
+            role_database.synchronize()
+    finally:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                sql.SQL("REVOKE {} FROM aegis_migrator").format(
+                    _quote(unexpected_role)
+                )
+            )
+            cursor.execute(
+                sql.SQL("DROP ROLE {}").format(_quote(unexpected_role))
+            )
+        role_database.synchronize()
+
+
 def test_table_column_sequence_and_function_grants_match_the_allowlist(
     role_database: RoleDatabase,
 ) -> None:
@@ -749,6 +779,124 @@ def test_sync_removes_every_public_managed_object_grant(
                     [f"public.{sequence}", privilege],
                 )
                 assert cursor.fetchone() == (False,)
+
+
+def test_sync_removes_every_unexpected_explicit_grantee(
+    role_database: RoleDatabase,
+) -> None:
+    rogue_role = f'aegis rogue " {uuid.uuid4().hex[:8]}'
+    rogue_password = secrets.token_urlsafe(48)
+    heartbeat_signature = MANAGED_FUNCTION_SIGNATURES[
+        "aegis_publish_operations_heartbeat"
+    ]
+    heartbeat_name = heartbeat_signature.split("(", maxsplit=1)[0]
+    rogue_connection: psycopg.Connection[Any] | None = None
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                sql.SQL(
+                    "CREATE ROLE {} LOGIN NOINHERIT NOSUPERUSER NOCREATEDB "
+                    "NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD {}"
+                ).format(_quote(rogue_role), sql.Literal(rogue_password))
+            )
+            cursor.execute(
+                sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(
+                    _quote(role_database.database_name),
+                    _quote(rogue_role),
+                )
+            )
+            cursor.execute(
+                sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(
+                    _quote(rogue_role)
+                )
+            )
+            cursor.execute(
+                sql.SQL("GRANT SELECT ON public.operations_job TO {}").format(
+                    _quote(rogue_role)
+                )
+            )
+            cursor.execute(
+                sql.SQL(
+                    "GRANT UPDATE (intent) ON public.operations_operation TO {}"
+                ).format(_quote(rogue_role))
+            )
+            cursor.execute(
+                sql.SQL("GRANT USAGE ON public.auth_group_id_seq TO {}").format(
+                    _quote(rogue_role)
+                )
+            )
+            cursor.execute(
+                sql.SQL(f"GRANT EXECUTE ON FUNCTION {heartbeat_signature} TO {{}}")
+                .format(_quote(rogue_role))
+            )
+            cursor.execute(
+                sql.SQL(
+                    "ALTER DEFAULT PRIVILEGES FOR ROLE aegis_migrator "
+                    "GRANT SELECT ON TABLES TO {}"
+                ).format(_quote(rogue_role))
+            )
+
+        rogue_connection = psycopg.connect(
+            dbname=role_database.database_name,
+            host=role_database.host,
+            port=role_database.port,
+            user=rogue_role,
+            password=rogue_password,
+            connect_timeout=5,
+            autocommit=True,
+        )
+
+        role_database.synchronize()
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT has_database_privilege(%s, current_database(), 'CONNECT'), "
+                "has_schema_privilege(%s, 'public', 'USAGE'), "
+                "has_table_privilege(%s, 'public.operations_job', 'SELECT'), "
+                "has_column_privilege(%s, 'public.operations_operation', "
+                "'intent', 'UPDATE'), "
+                "has_sequence_privilege(%s, 'public.auth_group_id_seq', 'USAGE'), "
+                "has_function_privilege(%s, %s, 'EXECUTE')",
+                [
+                    rogue_role,
+                    rogue_role,
+                    rogue_role,
+                    rogue_role,
+                    rogue_role,
+                    rogue_role,
+                    heartbeat_signature,
+                ],
+            )
+            assert cursor.fetchone() == (False, False, False, False, False, False)
+            cursor.execute(
+                """
+                SELECT count(*)
+                  FROM pg_catalog.pg_default_acl AS defaults
+                  CROSS JOIN LATERAL pg_catalog.aclexplode(defaults.defaclacl) AS acl
+                 WHERE defaults.defaclrole = (
+                           SELECT oid
+                             FROM pg_catalog.pg_roles
+                            WHERE rolname = 'aegis_migrator'
+                       )
+                   AND acl.grantee = (
+                           SELECT oid FROM pg_catalog.pg_roles WHERE rolname = %s
+                       )
+                """,
+                [rogue_role],
+            )
+            assert cursor.fetchone() == (0,)
+
+        _assert_sqlstate(
+            rogue_connection,
+            f"SELECT {heartbeat_name}(%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            _heartbeat_parameters(),
+        )
+    finally:
+        if rogue_connection is not None:
+            rogue_connection.close()
+        with connection.cursor() as cursor:
+            cursor.execute(sql.SQL("DROP OWNED BY {}").format(_quote(rogue_role)))
+            cursor.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(_quote(rogue_role)))
 
 
 def test_actual_roles_enforce_representative_write_and_read_denials(

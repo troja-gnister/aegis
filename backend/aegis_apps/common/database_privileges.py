@@ -11,6 +11,7 @@ RUNTIME_DATABASE_ROLES: Final = (
     "aegis_indexer",
     "aegis_media",
 )
+MANAGED_DATABASE_ROLES: Final = ("aegis_migrator", *RUNTIME_DATABASE_ROLES)
 WORKER_DATABASE_ROLE_MAP: Final = {
     "aegis_operations": "operations",
     "aegis_indexer": "indexer",
@@ -860,11 +861,11 @@ def _verify_role_boundaries(cursor: Any) -> None:
          WHERE member.rolname = ANY(%s)
             OR granted.rolname = ANY(%s)
         """,
-        [list(RUNTIME_DATABASE_ROLES), list(RUNTIME_DATABASE_ROLES)],
+        [list(MANAGED_DATABASE_ROLES), list(MANAGED_DATABASE_ROLES)],
     )
     memberships = frozenset((row[0], row[1]) for row in cursor.fetchall())
     if memberships != ALLOWED_ROLE_MEMBERSHIPS:
-        raise PrivilegeDriftError("runtime database role membership is unsafe")
+        raise PrivilegeDriftError("managed database role membership is unsafe")
 
     cursor.execute(
         """
@@ -920,8 +921,104 @@ def _install_boundary_functions(cursor: Any) -> None:
     cursor.execute(AUTHORIZATION_FUNCTION_SQL)
 
 
+def _unexpected_explicit_grantees(cursor: Any) -> tuple[str, ...]:
+    cursor.execute(
+        """
+        WITH explicit_grantee AS (
+            SELECT acl.grantee
+              FROM pg_catalog.pg_database AS database
+              CROSS JOIN LATERAL pg_catalog.aclexplode(database.datacl) AS acl
+             WHERE database.datname = pg_catalog.current_database()
+            UNION
+            SELECT acl.grantee
+              FROM pg_catalog.pg_namespace AS namespace
+              CROSS JOIN LATERAL pg_catalog.aclexplode(namespace.nspacl) AS acl
+             WHERE namespace.nspname = 'public'
+            UNION
+            SELECT acl.grantee
+              FROM pg_catalog.pg_class AS relation
+              JOIN pg_catalog.pg_namespace AS namespace
+                ON namespace.oid = relation.relnamespace
+              CROSS JOIN LATERAL pg_catalog.aclexplode(relation.relacl) AS acl
+             WHERE namespace.nspname = 'public'
+               AND relation.relname = ANY(%s)
+            UNION
+            SELECT acl.grantee
+              FROM pg_catalog.pg_attribute AS attribute
+              JOIN pg_catalog.pg_class AS relation
+                ON relation.oid = attribute.attrelid
+              JOIN pg_catalog.pg_namespace AS namespace
+                ON namespace.oid = relation.relnamespace
+              CROSS JOIN LATERAL pg_catalog.aclexplode(attribute.attacl) AS acl
+             WHERE namespace.nspname = 'public'
+               AND relation.relname = ANY(%s)
+               AND NOT attribute.attisdropped
+            UNION
+            SELECT acl.grantee
+              FROM pg_catalog.pg_proc AS function
+              JOIN pg_catalog.pg_namespace AS namespace
+                ON namespace.oid = function.pronamespace
+             CROSS JOIN LATERAL pg_catalog.aclexplode(function.proacl) AS acl
+             WHERE namespace.nspname = 'public'
+               AND function.proname = ANY(%s)
+            UNION
+            SELECT acl.grantee
+              FROM pg_catalog.pg_default_acl AS defaults
+              CROSS JOIN LATERAL pg_catalog.aclexplode(defaults.defaclacl) AS acl
+             WHERE defaults.defaclrole = (
+                       SELECT role.oid
+                         FROM pg_catalog.pg_roles AS role
+                        WHERE role.rolname = 'aegis_migrator'
+                   )
+               AND (
+                    defaults.defaclnamespace = 0
+                    OR defaults.defaclnamespace = (
+                        SELECT namespace.oid
+                          FROM pg_catalog.pg_namespace AS namespace
+                         WHERE namespace.nspname = 'public'
+                    )
+               )
+        )
+        SELECT pg_catalog.quote_ident(role.rolname)
+          FROM explicit_grantee
+          JOIN pg_catalog.pg_roles AS role
+            ON role.oid = explicit_grantee.grantee
+         WHERE NOT (role.rolname = ANY(%s))
+         ORDER BY role.rolname
+        """,
+        [
+            [*MANAGED_TABLE_COLUMNS, *MANAGED_SEQUENCES],
+            list(MANAGED_TABLE_COLUMNS),
+            list(MANAGED_FUNCTION_SIGNATURES),
+            list(MANAGED_DATABASE_ROLES),
+        ],
+    )
+    return tuple(row[0] for row in cursor.fetchall())
+
+
+def _reset_default_privileges(cursor: Any, grantee_list: str) -> None:
+    for object_kind in ("TABLES", "SEQUENCES", "FUNCTIONS", "TYPES"):
+        cursor.execute(
+            "ALTER DEFAULT PRIVILEGES FOR ROLE aegis_migrator "
+            f"REVOKE ALL PRIVILEGES ON {object_kind} FROM PUBLIC, {grantee_list}"
+        )
+        cursor.execute(
+            "ALTER DEFAULT PRIVILEGES FOR ROLE aegis_migrator IN SCHEMA public "
+            f"REVOKE ALL PRIVILEGES ON {object_kind} FROM PUBLIC, {grantee_list}"
+        )
+    cursor.execute(
+        "ALTER DEFAULT PRIVILEGES FOR ROLE aegis_migrator "
+        f"REVOKE ALL PRIVILEGES ON SCHEMAS FROM PUBLIC, {grantee_list}"
+    )
+
+
 def _apply_grants(cursor: Any) -> None:
-    role_list = ", ".join(_quoted(role) for role in RUNTIME_DATABASE_ROLES)
+    runtime_role_list = ", ".join(_quoted(role) for role in RUNTIME_DATABASE_ROLES)
+    reset_roles = (*RUNTIME_DATABASE_ROLES, *_unexpected_explicit_grantees(cursor))
+    reset_role_list = ", ".join(
+        role if role not in RUNTIME_DATABASE_ROLES else _quoted(role)
+        for role in reset_roles
+    )
     cursor.execute("SELECT pg_catalog.current_database()")
     database_row = cursor.fetchone()
     if database_row is None or not isinstance(database_row[0], str):
@@ -929,20 +1026,29 @@ def _apply_grants(cursor: Any) -> None:
     database = connection.ops.quote_name(database_row[0])
 
     cursor.execute(f"REVOKE ALL PRIVILEGES ON DATABASE {database} FROM PUBLIC")
-    cursor.execute(f"REVOKE ALL PRIVILEGES ON DATABASE {database} FROM {role_list}")
-    cursor.execute(f"GRANT CONNECT ON DATABASE {database} TO {role_list}")
+    cursor.execute(
+        f"REVOKE ALL PRIVILEGES ON DATABASE {database} FROM {reset_role_list}"
+    )
+    cursor.execute(f"GRANT CONNECT ON DATABASE {database} TO {runtime_role_list}")
     cursor.execute("REVOKE ALL PRIVILEGES ON SCHEMA public FROM PUBLIC")
-    cursor.execute(f"REVOKE ALL PRIVILEGES ON SCHEMA public FROM {role_list}")
-    cursor.execute(f"GRANT USAGE ON SCHEMA public TO {role_list}")
+    cursor.execute(
+        f"REVOKE ALL PRIVILEGES ON SCHEMA public FROM {reset_role_list}"
+    )
+    cursor.execute(f"GRANT USAGE ON SCHEMA public TO {runtime_role_list}")
     cursor.execute("REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM PUBLIC")
-    cursor.execute(f"REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM {role_list}")
+    cursor.execute(
+        "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public "
+        f"FROM {reset_role_list}"
+    )
     cursor.execute("REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC")
     cursor.execute(
-        f"REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM {role_list}"
+        "REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public "
+        f"FROM {reset_role_list}"
     )
     cursor.execute("REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC")
     cursor.execute(
-        f"REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM {role_list}"
+        "REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public "
+        f"FROM {reset_role_list}"
     )
 
     for table, table_column_names in MANAGED_TABLE_COLUMNS.items():
@@ -955,8 +1061,10 @@ def _apply_grants(cursor: Any) -> None:
         )
         cursor.execute(
             f"REVOKE ALL PRIVILEGES ({quoted_columns}) "
-            f"ON TABLE public.{_quoted(table)} FROM {role_list}"
+            f"ON TABLE public.{_quoted(table)} FROM {reset_role_list}"
         )
+
+    _reset_default_privileges(cursor, reset_role_list)
 
     for role, table_privileges in ROLE_TABLE_PRIVILEGES.items():
         for table, privileges in table_privileges.items():
@@ -985,7 +1093,7 @@ def _apply_grants(cursor: Any) -> None:
 
     for function_name, signature in MANAGED_FUNCTION_SIGNATURES.items():
         cursor.execute(f"REVOKE ALL ON FUNCTION {signature} FROM PUBLIC")
-        cursor.execute(f"REVOKE ALL ON FUNCTION {signature} FROM {role_list}")
+        cursor.execute(f"REVOKE ALL ON FUNCTION {signature} FROM {reset_role_list}")
         for role, functions in ROLE_FUNCTION_PRIVILEGES.items():
             if function_name in functions:
                 cursor.execute(
@@ -1171,6 +1279,35 @@ def _verify_effective_grants(cursor: Any) -> None:
         )
         if cursor.fetchone() != (False,):
             raise PrivilegeDriftError("database function public privilege drift")
+
+    if _unexpected_explicit_grantees(cursor):
+        raise PrivilegeDriftError("unexpected database privilege grantee")
+
+    cursor.execute(
+        """
+        SELECT EXISTS (
+            SELECT 1
+              FROM pg_catalog.pg_default_acl AS defaults
+              CROSS JOIN LATERAL pg_catalog.aclexplode(defaults.defaclacl) AS acl
+             WHERE defaults.defaclrole = (
+                       SELECT role.oid
+                         FROM pg_catalog.pg_roles AS role
+                        WHERE role.rolname = 'aegis_migrator'
+                   )
+               AND (
+                    defaults.defaclnamespace = 0
+                    OR defaults.defaclnamespace = (
+                        SELECT namespace.oid
+                          FROM pg_catalog.pg_namespace AS namespace
+                         WHERE namespace.nspname = 'public'
+                    )
+               )
+               AND acl.grantee <> defaults.defaclrole
+        )
+        """
+    )
+    if cursor.fetchone() != (False,):
+        raise PrivilegeDriftError("database default privilege drift")
 
 
 def synchronize_database_privileges() -> None:
