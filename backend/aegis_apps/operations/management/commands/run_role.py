@@ -18,6 +18,7 @@ from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError, CommandParser
 from django.utils import timezone
 
+from aegis_apps.common.database_privileges import require_runtime_database_login
 from aegis_apps.operations.config import validated_release_identity
 from aegis_apps.operations.enums import HeartbeatStatus, JobState, SafeErrorCode, WorkerRole
 from aegis_apps.operations.heartbeats import publish_heartbeat
@@ -178,6 +179,8 @@ def _startup(*, role: object, worker_id: str) -> WorkerIdentity:
         settings.AEGIS_RELEASE_ID,
         production=settings.AEGIS_ENVIRONMENT == "production",
     )
+    if settings.AEGIS_ENVIRONMENT != "test":
+        require_runtime_database_login(worker_role)
 
     manifest = configured_manifest()
     if manifest is None:

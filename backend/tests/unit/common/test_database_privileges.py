@@ -5,6 +5,7 @@ import inspect
 import uuid
 from unittest.mock import patch
 
+import pytest
 from aegis_apps.identity import admin_services as identity_admin_services
 from aegis_apps.operations import heartbeats, services
 from aegis_apps.operations.models import Operation, WorkerHeartbeat
@@ -371,6 +372,48 @@ def test_role_runtime_authorization_uses_opaque_database_boundary() -> None:
         assert services.validate_authorization_snapshot(operation) is True
 
     validation_boundary.assert_called_once_with(operation.id)
+
+
+@override_settings(AEGIS_ENVIRONMENT="production", AEGIS_PROCESS_ROLE="operations")
+def test_miswired_worker_heartbeat_never_falls_back_to_owner_orm() -> None:
+    with (
+        patch.object(
+            heartbeats,
+            "current_database_login",
+            return_value="aegis_migrator",
+            create=True,
+        ),
+        patch.object(heartbeats, "_publish_heartbeat", create=True) as owner_publish,
+        pytest.raises(ValueError, match="database role boundary"),
+    ):
+        heartbeats.publish_heartbeat(
+            role="operations",
+            worker_id=str(uuid.uuid4()),
+            release_id="release-11",
+            schema_identity="sha256:" + "a" * 64,
+            manifest_identity="b" * 64,
+        )
+
+    owner_publish.assert_not_called()
+
+
+@override_settings(AEGIS_ENVIRONMENT="production", AEGIS_PROCESS_ROLE="operations")
+@pytest.mark.django_db
+def test_miswired_worker_authorization_never_falls_back_to_owner_orm() -> None:
+    operation = Operation(id=uuid.uuid4())
+    with (
+        patch.object(
+            services,
+            "current_database_login",
+            return_value="aegis_migrator",
+            create=True,
+        ),
+        patch.object(Operation.objects, "filter") as owner_query,
+        pytest.raises(ValueError, match="database role boundary"),
+    ):
+        services.validate_authorization_snapshot(operation)
+
+    owner_query.assert_not_called()
 
 
 def test_deployment_commands_are_discoverable() -> None:

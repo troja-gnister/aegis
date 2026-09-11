@@ -442,6 +442,8 @@ def validate_authorization_snapshot(operation: Operation) -> bool:
             if database_role != configured_role:
                 return False
             return _validate_authorization_snapshot_via_database(operation.pk)
+        if settings.AEGIS_ENVIRONMENT != "test":
+            raise ValueError("worker authorization database role boundary mismatch")
     with transaction.atomic():
         stored = (
             Operation.objects.filter(pk=operation.pk)

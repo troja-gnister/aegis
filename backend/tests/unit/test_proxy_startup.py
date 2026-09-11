@@ -3,7 +3,9 @@ from __future__ import annotations
 import socket
 
 import pytest
+from aegis import proxy
 from aegis.proxy import ProxyTrustError, main, resolve_trusted_proxy_ips
+from django.test import override_settings
 
 
 def _address(value: str) -> tuple[int, int, int, str, tuple[str, int]]:
@@ -73,3 +75,51 @@ def test_proxy_start_execs_uvicorn_with_only_resolved_and_loopback_trust(
         "--log-config",
         "/app/backend/aegis/uvicorn_logging.json",
     ]
+
+
+@override_settings(AEGIS_ENVIRONMENT="production")
+def test_proxy_verifies_web_database_login_before_dns_and_listener(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    def verify(role: str) -> None:
+        events.append(f"database:{role}")
+
+    def resolve() -> tuple[str, str]:
+        events.append("proxy")
+        return ("127.0.0.1", "172.28.0.9")
+
+    def capture(_executable: str, _arguments: list[str]) -> None:
+        events.append("listener")
+        raise RuntimeError("exec intercepted")
+
+    monkeypatch.setattr(proxy, "require_runtime_database_login", verify, raising=False)
+    monkeypatch.setattr(proxy, "resolve_trusted_proxy_ips", resolve)
+    monkeypatch.setattr(proxy.os, "execvp", capture)
+
+    with pytest.raises(RuntimeError, match="exec intercepted"):
+        main()
+
+    assert events == ["database:web", "proxy", "listener"]
+
+
+@override_settings(AEGIS_ENVIRONMENT="production")
+def test_proxy_database_login_mismatch_prevents_dns_and_listener(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def reject(_role: str) -> None:
+        raise RuntimeError("runtime database login does not match")
+
+    def unexpected_resolve() -> tuple[str, str]:
+        raise AssertionError("proxy DNS must not run")
+
+    def unexpected_exec(_executable: str, _arguments: list[str]) -> None:
+        raise AssertionError("listener must not start")
+
+    monkeypatch.setattr(proxy, "require_runtime_database_login", reject, raising=False)
+    monkeypatch.setattr(proxy, "resolve_trusted_proxy_ips", unexpected_resolve)
+    monkeypatch.setattr(proxy.os, "execvp", unexpected_exec)
+
+    with pytest.raises(RuntimeError, match="runtime database login does not match"):
+        main()

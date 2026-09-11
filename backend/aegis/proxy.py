@@ -5,6 +5,9 @@ import os
 import socket
 from typing import NoReturn
 
+from aegis_apps.common.database_privileges import require_runtime_database_login
+from django.conf import settings
+
 
 class ProxyTrustError(RuntimeError):
     """Raised when the sole trusted gateway peer cannot be identified safely."""
@@ -29,6 +32,8 @@ def resolve_trusted_proxy_ips() -> tuple[str, str]:
 
 
 def main() -> NoReturn:
+    if settings.AEGIS_ENVIRONMENT != "test":
+        require_runtime_database_login("web")
     trusted_proxy_ips = ",".join(resolve_trusted_proxy_ips())
     arguments = [
         "uvicorn",

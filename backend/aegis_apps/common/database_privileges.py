@@ -16,6 +16,12 @@ WORKER_DATABASE_ROLE_MAP: Final = {
     "aegis_indexer": "indexer",
     "aegis_media": "media",
 }
+RUNTIME_PROCESS_DATABASE_ROLES: Final = {
+    "web": "aegis_web",
+    "operations": "aegis_operations",
+    "indexer": "aegis_indexer",
+    "media": "aegis_media",
+}
 ALLOWED_ROLE_MEMBERSHIPS: Final[frozenset[tuple[str, str]]] = frozenset()
 
 MANAGED_TABLE_COLUMNS: Final[dict[str, tuple[str, ...]]] = {
@@ -754,6 +760,15 @@ def current_database_login() -> str:
     if row is None or not isinstance(row[0], str):
         raise PrivilegeSynchronizationError("database login identity is unavailable")
     return row[0]
+
+
+def require_runtime_database_login(process_role: object) -> str:
+    if not isinstance(process_role, str):
+        raise PrivilegeSynchronizationError("runtime database login does not match")
+    expected_login = RUNTIME_PROCESS_DATABASE_ROLES.get(process_role)
+    if expected_login is None or current_database_login() != expected_login:
+        raise PrivilegeSynchronizationError("runtime database login does not match")
+    return expected_login
 
 
 def _normalized_privileges(values: Sequence[str]) -> str:

@@ -78,6 +78,7 @@ def _assert_relinquished_before_execution(job: Job) -> None:
 
 
 @override_settings(
+    AEGIS_ENVIRONMENT="production",
     AEGIS_PROCESS_ROLE="indexer",
     AEGIS_RELEASE_ID="release-10",
 )
@@ -88,6 +89,9 @@ def test_startup_orders_role_validation_attestation_schema_heartbeat_then_claim(
     def load_manifest() -> SimpleNamespace:
         events.append("manifest")
         return manifest
+
+    def verify_database_login(role: str) -> None:
+        events.append(f"database:{role}")
 
     def attest(candidate: object, role: str) -> None:
         assert candidate is manifest
@@ -107,6 +111,12 @@ def test_startup_orders_role_validation_attestation_schema_heartbeat_then_claim(
         return None
 
     with (
+        patch.object(
+            worker_command,
+            "require_runtime_database_login",
+            side_effect=verify_database_login,
+            create=True,
+        ),
         patch.object(worker_command, "configured_manifest", side_effect=load_manifest),
         patch.object(worker_command, "attest_mounts", side_effect=attest),
         patch.object(worker_command, "current_schema_identity", side_effect=schema),
@@ -116,6 +126,7 @@ def test_startup_orders_role_validation_attestation_schema_heartbeat_then_claim(
         _call_worker("indexer")
 
     assert events == [
+        "database:indexer",
         "manifest",
         "attest:indexer",
         "schema",
@@ -123,6 +134,34 @@ def test_startup_orders_role_validation_attestation_schema_heartbeat_then_claim(
         "claim:indexer",
         f"heartbeat:{HeartbeatStatus.STOPPING}",
     ]
+
+
+@override_settings(
+    AEGIS_ENVIRONMENT="production",
+    AEGIS_PROCESS_ROLE="operations",
+    AEGIS_RELEASE_ID="release-10",
+)
+def test_database_login_mismatch_fails_before_manifest_or_worker_work() -> None:
+    with (
+        patch.object(
+            worker_command,
+            "require_runtime_database_login",
+            side_effect=ValueError("private database identity"),
+            create=True,
+        ),
+        patch.object(worker_command, "configured_manifest") as manifest,
+        patch.object(worker_command, "current_schema_identity") as schema,
+        patch.object(worker_command, "publish_heartbeat") as heartbeat,
+        patch.object(worker_command, "claim_next_job") as claim_job,
+        pytest.raises(CommandError, match=r"^worker startup failed$") as caught,
+    ):
+        _call_worker("operations")
+
+    assert "identity" not in str(caught.value)
+    manifest.assert_not_called()
+    schema.assert_not_called()
+    heartbeat.assert_not_called()
+    claim_job.assert_not_called()
 
 
 @override_settings(AEGIS_PROCESS_ROLE="media")

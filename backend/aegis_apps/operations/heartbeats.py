@@ -324,6 +324,8 @@ def publish_heartbeat(
                 schema_identity=schema_identity,
                 manifest_identity=manifest_identity,
             )
+        if settings.AEGIS_ENVIRONMENT != "test":
+            raise ValueError("worker heartbeat database role boundary mismatch")
     return _publish_heartbeat(
         role=role,
         worker_id=worker_id,
