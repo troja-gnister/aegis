@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, Final
 
-from django.db import connection
+from django.db import connection, transaction
 
 RUNTIME_DATABASE_ROLES: Final = (
     "aegis_web",
@@ -815,7 +815,11 @@ def _verify_schema_manifest(cursor: Any) -> None:
         raise PrivilegeDriftError("database sequence privilege manifest drift")
 
 
-def _verify_role_boundaries(cursor: Any) -> None:
+def _verify_role_boundaries(
+    cursor: Any,
+    *,
+    require_complete_schema: bool = True,
+) -> None:
     cursor.execute("SELECT session_user, current_user")
     if cursor.fetchone() != ("aegis_migrator", "aegis_migrator"):
         raise PrivilegeSynchronizationError(
@@ -892,9 +896,9 @@ def _verify_role_boundaries(cursor: Any) -> None:
         [list(MANAGED_TABLE_COLUMNS)],
     )
     owners = cursor.fetchall()
-    if len(owners) != len(MANAGED_TABLE_COLUMNS) or any(
-        owner != "aegis_migrator" for _table, owner in owners
-    ):
+    if (
+        require_complete_schema and len(owners) != len(MANAGED_TABLE_COLUMNS)
+    ) or any(owner != "aegis_migrator" for _table, owner in owners):
         raise PrivilegeDriftError("application tables must be owned by the migrator")
 
     cursor.execute(
@@ -907,9 +911,9 @@ def _verify_role_boundaries(cursor: Any) -> None:
         [list(MANAGED_SEQUENCES)],
     )
     sequence_owners = cursor.fetchall()
-    if len(sequence_owners) != len(MANAGED_SEQUENCES) or any(
-        owner != "aegis_migrator" for _sequence, owner in sequence_owners
-    ):
+    if (
+        require_complete_schema and len(sequence_owners) != len(MANAGED_SEQUENCES)
+    ) or any(owner != "aegis_migrator" for _sequence, owner in sequence_owners):
         raise PrivilegeDriftError(
             "application sequences must be owned by the migrator"
         )
@@ -1308,6 +1312,12 @@ def _verify_effective_grants(cursor: Any) -> None:
     )
     if cursor.fetchone() != (False,):
         raise PrivilegeDriftError("database default privilege drift")
+
+
+def verify_database_deployment_prerequisites() -> None:
+    with transaction.atomic(durable=True), connection.cursor() as cursor:
+        cursor.execute("SELECT pg_advisory_xact_lock(%s, %s)", [1095059273, 11])
+        _verify_role_boundaries(cursor, require_complete_schema=False)
 
 
 def synchronize_database_privileges() -> None:

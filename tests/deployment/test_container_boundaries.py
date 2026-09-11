@@ -241,7 +241,7 @@ def test_postgres_staging_wrapper_never_reads_secret_values_into_shell_state() -
     source = wrapper.read_text(encoding="utf-8")
 
     syntax = subprocess.run(
-        ["sh", "-n", str(wrapper)],
+        ["bash", "-n", str(wrapper)],
         check=False,
         capture_output=True,
         text=True,
@@ -256,9 +256,10 @@ def test_postgres_staging_wrapper_never_reads_secret_values_into_shell_state() -
     assert 'cp "$source_path" "$staged_path"' in source
     assert 'chown 70:70 "$staged_path"' in source
     assert 'chmod 0400 "$staged_path"' in source
-    assert source.index("umask 0022") < source.index(
-        'exec /usr/local/bin/docker-entrypoint.sh "$@"'
-    )
+    assert "--aegis-reconcile-existing-database" in source
+    assert "source /usr/local/bin/docker-entrypoint.sh" in source
+    assert 'exec gosu postgres "$0"' in source
+    assert 'exec /usr/local/bin/docker-entrypoint.sh "$@"' in source
     for name in POSTGRES_SECRET_SOURCES:
         assert name.replace("-", "_") in source
 
@@ -320,6 +321,87 @@ def protected_volume_created_at() -> str | None:
         text=True,
     )
     return result.stdout.strip() if result.returncode == 0 else None
+
+
+def wait_for_postgres_health(
+    project: str,
+    override: Path,
+    *,
+    timeout: float = 90,
+) -> str:
+    identity = docker_compose(project, override, "ps", "--quiet", "postgres")
+    assert identity.returncode == 0
+    container_id = identity.stdout.strip()
+    assert container_id
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        health = subprocess.run(
+            [
+                "docker",
+                "inspect",
+                container_id,
+                "--format",
+                "{{if .State.Health}}{{.State.Health.Status}}{{end}}",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if health.stdout.strip() == "healthy":
+            return container_id
+        if health.stdout.strip() == "unhealthy":
+            pytest.fail("disposable PostgreSQL became unhealthy", pytrace=False)
+        time.sleep(0.25)
+    pytest.fail("disposable PostgreSQL did not become healthy", pytrace=False)
+
+
+def run_database_probe(
+    *,
+    project: str,
+    scratch: Path,
+    label: str,
+    role: str,
+    password: str,
+    statement: str,
+) -> subprocess.CompletedProcess[str]:
+    escaped_password = password.replace("\\", "\\\\").replace(":", "\\:")
+    pgpass = scratch / f"{label}.pgpass"
+    pgpass.write_text(
+        f"postgres:5432:aegis:{role}:{escaped_password}\n",
+        encoding="utf-8",
+    )
+    pgpass.chmod(0o600)
+    return subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            f"{project}_backend",
+            "--mount",
+            f"type=bind,src={pgpass},dst=/run/probe.pgpass,readonly",
+            "--env",
+            "PGPASSFILE=/run/probe.pgpass",
+            POSTGRES_BASE_IMAGE,
+            "psql",
+            "--no-psqlrc",
+            "--no-password",
+            "--host",
+            "postgres",
+            "--dbname",
+            "aegis",
+            "--username",
+            role,
+            "--tuples-only",
+            "--no-align",
+            "--command",
+            statement,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
 
 
 @pytest.mark.integration
@@ -555,4 +637,222 @@ def test_live_postgres_stages_secrets_and_drops_to_uid_70(tmp_path: Path) -> Non
                 ).returncode
                 != 0
             )
+        assert protected_volume_created_at() == protected_created_at
+
+
+@pytest.mark.integration
+def test_postgres_reconciles_populated_accepted_base_and_rotated_secrets(
+    tmp_path: Path,
+) -> None:
+    protected_created_at = protected_volume_created_at()
+    project = f"aegis-task11-upgrade-{uuid.uuid4().hex[:10]}"
+    initial_values = {
+        "postgres-superuser-password": f"initial-super-{secrets.token_urlsafe(24)}",
+        "db-migrator-password": f"initial-migrator-{secrets.token_urlsafe(24)}",
+        "db-web-password": f"initial-web-{secrets.token_urlsafe(24)}",
+        "db-operations-password": f"initial-operations-{secrets.token_urlsafe(24)}",
+        "db-indexer-password": f"initial-indexer-{secrets.token_urlsafe(24)}",
+        "db-media-password": f"initial-media-{secrets.token_urlsafe(24)}",
+        "django-secret-key": secrets.token_urlsafe(48),
+        "auth-throttle-hmac-key": secrets.token_urlsafe(48),
+    }
+    rotated_values = {
+        **initial_values,
+        "db-migrator-password": f"rotated-migrator-{secrets.token_urlsafe(24)}",
+        "db-web-password": f"rotated-web-{secrets.token_urlsafe(24)}",
+        "db-operations-password": f"rotated-operations-{secrets.token_urlsafe(24)}",
+        "db-indexer-password": f"rotated-indexer-{secrets.token_urlsafe(24)}",
+        "db-media-password": f"rotated-media-{secrets.token_urlsafe(24)}",
+    }
+    secret_files: dict[str, Path] = {}
+    for name, value in initial_values.items():
+        path = tmp_path / name
+        path.write_text(value + "\n", encoding="utf-8")
+        path.chmod(0o600)
+        secret_files[name] = path
+
+    override = tmp_path / "compose.upgrade.json"
+    override.write_text(
+        json.dumps(
+            {
+                "secrets": {
+                    name: {"file": str(path)} for name, path in secret_files.items()
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    all_sensitive_values = tuple(initial_values.values()) + tuple(rotated_values.values())
+    container_ids: list[str] = []
+    try:
+        first_start = docker_compose(
+            project,
+            override,
+            "up",
+            "--detach",
+            "--build",
+            "postgres",
+        )
+        assert first_start.returncode == 0
+        container_ids.append(wait_for_postgres_health(project, override))
+
+        accepted_base_state = docker_compose(
+            project,
+            override,
+            "exec",
+            "-T",
+            "--user",
+            "70:70",
+            "postgres",
+            "psql",
+            "--no-psqlrc",
+            "--no-password",
+            "--username",
+            "postgres",
+            "--dbname",
+            "aegis",
+            "--set",
+            "ON_ERROR_STOP=1",
+            "--command",
+            "SET ROLE aegis_migrator; "
+            "CREATE TABLE public.aegis_accepted_base_probe "
+            "(id integer PRIMARY KEY, marker text NOT NULL); "
+            "INSERT INTO public.aegis_accepted_base_probe VALUES (1, 'preserved'); "
+            "ALTER DEFAULT PRIVILEGES FOR ROLE aegis_migrator IN SCHEMA public "
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO aegis_web; "
+            "ALTER DEFAULT PRIVILEGES FOR ROLE aegis_migrator IN SCHEMA public "
+            "GRANT USAGE, SELECT ON SEQUENCES TO aegis_web; "
+            "RESET ROLE; "
+            "ALTER ROLE aegis_migrator INHERIT; "
+            "ALTER ROLE aegis_web INHERIT; "
+            "ALTER ROLE aegis_operations INHERIT; "
+            "ALTER ROLE aegis_indexer INHERIT; "
+            "ALTER ROLE aegis_media INHERIT; "
+            "ALTER SCHEMA public OWNER TO pg_database_owner;",
+        )
+        assert accepted_base_state.returncode == 0, accepted_base_state.stderr
+
+        stopped = docker_compose(project, override, "down", "--remove-orphans")
+        assert stopped.returncode == 0
+
+        for name, value in rotated_values.items():
+            secret_files[name].write_text(value + "\n", encoding="utf-8")
+            secret_files[name].chmod(0o600)
+        secret_files["db-web-password"].write_text("", encoding="utf-8")
+
+        invalid_start = docker_compose(project, override, "up", "--detach", "postgres")
+        assert invalid_start.returncode == 0
+        time.sleep(1)
+        invalid_identity = docker_compose(project, override, "ps", "--quiet", "postgres")
+        invalid_container_id = invalid_identity.stdout.strip()
+        if invalid_container_id:
+            container_ids.append(invalid_container_id)
+            invalid_logs = subprocess.run(
+                ["docker", "logs", invalid_container_id],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            assert "database secret staging refused" in (
+                invalid_logs.stdout + invalid_logs.stderr
+            )
+            assert not any(
+                value in invalid_logs.stdout + invalid_logs.stderr
+                for value in all_sensitive_values
+            )
+        stopped = docker_compose(project, override, "down", "--remove-orphans")
+        assert stopped.returncode == 0
+
+        secret_files["db-web-password"].write_text(
+            rotated_values["db-web-password"] + "\n",
+            encoding="utf-8",
+        )
+        secret_files["db-web-password"].chmod(0o600)
+        restarted = docker_compose(project, override, "up", "--detach", "postgres")
+        assert restarted.returncode == 0
+        container_ids.append(wait_for_postgres_health(project, override))
+
+        roles = ("migrator", "web", "operations", "indexer", "media")
+        for role in roles:
+            database_role = f"aegis_{role}"
+            old_authentication = run_database_probe(
+                project=project,
+                scratch=tmp_path,
+                label=f"old-{role}",
+                role=database_role,
+                password=initial_values[f"db-{role}-password"],
+                statement="SELECT session_user",
+            )
+            assert old_authentication.returncode != 0
+            new_authentication = run_database_probe(
+                project=project,
+                scratch=tmp_path,
+                label=f"new-{role}",
+                role=database_role,
+                password=rotated_values[f"db-{role}-password"],
+                statement="SELECT session_user || '|' || current_user",
+            )
+            assert new_authentication.returncode == 0
+            assert new_authentication.stdout.strip() == f"{database_role}|{database_role}"
+
+        preserved = run_database_probe(
+            project=project,
+            scratch=tmp_path,
+            label="preserved-row",
+            role="aegis_migrator",
+            password=rotated_values["db-migrator-password"],
+            statement=(
+                "SELECT marker FROM public.aegis_accepted_base_probe WHERE id = 1; "
+                "SELECT pg_get_userbyid(nspowner) FROM pg_namespace "
+                "WHERE nspname = 'public'; "
+                "SELECT count(*) FROM pg_roles WHERE rolname LIKE 'aegis_%' "
+                "AND (rolinherit OR rolsuper OR rolcreatedb OR rolcreaterole "
+                "OR rolreplication OR rolbypassrls); "
+                "SELECT count(*) FROM pg_default_acl AS defaults "
+                "CROSS JOIN LATERAL aclexplode(defaults.defaclacl) AS acl "
+                "WHERE defaults.defaclrole = "
+                "(SELECT oid FROM pg_roles WHERE rolname = 'aegis_migrator') "
+                "AND acl.grantee = "
+                "(SELECT oid FROM pg_roles WHERE rolname = 'aegis_web');"
+            ),
+        )
+        assert preserved.returncode == 0, preserved.stderr
+        assert preserved.stdout.splitlines() == ["preserved", "aegis_migrator", "0", "0"]
+
+        for container_id in container_ids:
+            logs = subprocess.run(
+                ["docker", "logs", container_id],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            assert not any(
+                value in logs.stdout + logs.stderr for value in all_sensitive_values
+            )
+    finally:
+        docker_compose(project, override, "down", "--remove-orphans", timeout=60)
+        volumes = subprocess.run(
+            [
+                "docker",
+                "volume",
+                "ls",
+                "--filter",
+                f"label=com.docker.compose.project={project}",
+                "--format",
+                "{{.Name}}",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+        assert "aegis_postgres-data" not in volumes
+        for volume in volumes:
+            assert volume.startswith(f"{project}_")
+            removed = subprocess.run(
+                ["docker", "volume", "rm", volume],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            assert removed.returncode == 0
         assert protected_volume_created_at() == protected_created_at

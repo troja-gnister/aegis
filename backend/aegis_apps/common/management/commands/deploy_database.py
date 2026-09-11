@@ -13,6 +13,7 @@ from aegis_apps.common.database_privileges import (
     PrivilegeSynchronizationError,
     current_database_login,
     synchronize_database_privileges,
+    verify_database_deployment_prerequisites,
 )
 from aegis_apps.operations.config import validated_release_identity
 from aegis_apps.operations.selectors import current_schema_identity
@@ -32,6 +33,7 @@ class Command(BaseCommand):
                 settings.AEGIS_RELEASE_ID,
                 production=settings.AEGIS_ENVIRONMENT == "production",
             )
+            verify_database_deployment_prerequisites()
             call_command("migrate", interactive=False, verbosity=1)
             executor = MigrationExecutor(connection)
             targets = executor.loader.graph.leaf_nodes()

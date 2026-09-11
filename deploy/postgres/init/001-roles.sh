@@ -99,6 +99,18 @@ BEGIN
         RAISE EXCEPTION 'database role initialization requires its bootstrap owner';
     END IF;
 
+    IF (
+        SELECT pg_catalog.pg_get_userbyid(database.datdba)
+          FROM pg_catalog.pg_database AS database
+         WHERE database.datname = pg_catalog.current_database()
+    ) NOT IN (session_user, 'aegis_migrator') OR (
+        SELECT pg_catalog.pg_get_userbyid(namespace.nspowner)
+          FROM pg_catalog.pg_namespace AS namespace
+         WHERE namespace.nspname = 'public'
+    ) NOT IN (session_user, 'aegis_migrator', 'pg_database_owner') THEN
+        RAISE EXCEPTION 'database ownership state is not an accepted upgrade base';
+    END IF;
+
     FOREACH managed_role IN ARRAY ARRAY[
         'aegis_migrator'::name,
         'aegis_web'::name,
@@ -113,7 +125,6 @@ BEGIN
              WHERE rolname = managed_role
                AND (
                     rolsuper
-                    OR rolinherit
                     OR rolcreatedb
                     OR rolcreaterole
                     OR rolreplication
@@ -222,15 +233,24 @@ ALTER DEFAULT PRIVILEGES FOR ROLE aegis_migrator
 ALTER DEFAULT PRIVILEGES FOR ROLE aegis_migrator
     REVOKE ALL PRIVILEGES ON FUNCTIONS
     FROM PUBLIC, aegis_web, aegis_operations, aegis_indexer, aegis_media;
+ALTER DEFAULT PRIVILEGES FOR ROLE aegis_migrator
+    REVOKE ALL PRIVILEGES ON TYPES
+    FROM PUBLIC, aegis_web, aegis_operations, aegis_indexer, aegis_media;
+ALTER DEFAULT PRIVILEGES FOR ROLE aegis_migrator
+    REVOKE ALL PRIVILEGES ON SCHEMAS
+    FROM PUBLIC, aegis_web, aegis_operations, aegis_indexer, aegis_media;
 ALTER DEFAULT PRIVILEGES FOR ROLE aegis_migrator IN SCHEMA public
     REVOKE ALL PRIVILEGES ON TABLES
-    FROM aegis_web, aegis_operations, aegis_indexer, aegis_media;
+    FROM PUBLIC, aegis_web, aegis_operations, aegis_indexer, aegis_media;
 ALTER DEFAULT PRIVILEGES FOR ROLE aegis_migrator IN SCHEMA public
     REVOKE ALL PRIVILEGES ON SEQUENCES
-    FROM aegis_web, aegis_operations, aegis_indexer, aegis_media;
+    FROM PUBLIC, aegis_web, aegis_operations, aegis_indexer, aegis_media;
 ALTER DEFAULT PRIVILEGES FOR ROLE aegis_migrator IN SCHEMA public
     REVOKE ALL PRIVILEGES ON FUNCTIONS
-    FROM aegis_web, aegis_operations, aegis_indexer, aegis_media;
+    FROM PUBLIC, aegis_web, aegis_operations, aegis_indexer, aegis_media;
+ALTER DEFAULT PRIVILEGES FOR ROLE aegis_migrator IN SCHEMA public
+    REVOKE ALL PRIVILEGES ON TYPES
+    FROM PUBLIC, aegis_web, aegis_operations, aegis_indexer, aegis_media;
 
 COMMIT;
 SQL
