@@ -1,15 +1,12 @@
-import {useEffect} from "react";
+import {useEffect, type PropsWithChildren} from "react";
+import {useAuthSession} from "../features/auth/session";
 import {AppShell} from "../layout/AppShell";
 
-export function App() {
+export function App({children}: PropsWithChildren) {
+  const {session} = useAuthSession();
   useEffect(() => {
     document.documentElement.dataset.theme = "dark";
   }, []);
 
-  return (
-    <AppShell>
-      <h1>Secure file access</h1>
-      <p>The authenticated root shell is delivered later in Phase 1.</p>
-    </AppShell>
-  );
+  return <AppShell username={session.user.username}>{children}</AppShell>;
 }

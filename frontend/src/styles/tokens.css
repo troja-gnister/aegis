@@ -1,12 +1,19 @@
 :root {
+  color-scheme: dark;
   --color-canvas: #0b1220;
   --color-surface: #111827;
   --color-surface-raised: #172033;
+  --color-surface-hover: #1e2a42;
+  --color-border: #2a3854;
   --color-text: #f8fafc;
   --color-text-muted: #a8b3c7;
   --color-primary: #818cf8;
+  --color-primary-strong: #6366f1;
   --color-accent: #22d3ee;
   --color-danger: #fb7185;
-  --focus-ring: 0 0 0 3px rgb(34 211 238 / 55%);
+  --color-success: #5eead4;
+  --shadow-raised: 0 18px 48px rgb(0 0 0 / 28%);
   --touch-target: 44px;
+  --radius-small: 0.625rem;
+  --radius-large: 1rem;
 }
