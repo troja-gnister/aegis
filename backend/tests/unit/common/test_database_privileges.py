@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import importlib
 import inspect
 import uuid
 from unittest.mock import patch
 
 import pytest
+from aegis_apps.common import database_privileges
 from aegis_apps.identity import admin_services as identity_admin_services
 from aegis_apps.operations import heartbeats, services
 from aegis_apps.operations.models import Operation, WorkerHeartbeat
@@ -133,12 +133,8 @@ EXPECTED_TABLE_COLUMNS = {
 }
 
 
-def _privileges() -> object:
-    return importlib.import_module("aegis_apps.common.database_privileges")
-
-
 def test_privilege_source_explicitly_assigns_every_table_column_and_sequence() -> None:
-    privilege_source = _privileges()
+    privilege_source = database_privileges
 
     assert privilege_source.MANAGED_TABLE_COLUMNS == EXPECTED_TABLE_COLUMNS
     assert privilege_source.ROLE_TABLE_PRIVILEGES["aegis_web"][
@@ -165,7 +161,7 @@ def test_privilege_source_explicitly_assigns_every_table_column_and_sequence() -
 
 
 def test_worker_grants_are_column_fenced_without_authorization_graph_access() -> None:
-    privilege_source = _privileges()
+    privilege_source = database_privileges
     expected_job_updates = {
         column: ("UPDATE",)
         for column in (
@@ -208,7 +204,7 @@ def test_worker_grants_are_column_fenced_without_authorization_graph_access() ->
 
 
 def test_function_execution_allowlist_is_exact_and_public_is_never_a_grantee() -> None:
-    privilege_source = _privileges()
+    privilege_source = database_privileges
 
     assert privilege_source.ROLE_FUNCTION_PRIVILEGES == {
         "aegis_web": (),
@@ -256,7 +252,7 @@ def test_function_execution_allowlist_is_exact_and_public_is_never_a_grantee() -
 
 
 def test_authorization_boundary_bounds_json_and_does_not_mask_database_faults() -> None:
-    privilege_source = _privileges()
+    privilege_source = database_privileges
     normalized = " ".join(privilege_source.AUTHORIZATION_FUNCTION_SQL.split()).lower()
 
     assert "octet_length(operation_intent::text) > 16384" in normalized
@@ -266,7 +262,7 @@ def test_authorization_boundary_bounds_json_and_does_not_mask_database_faults() 
 
 
 def test_privilege_sync_requires_an_explicit_database_transaction() -> None:
-    privilege_source = _privileges()
+    privilege_source = database_privileges
     source = inspect.getsource(privilege_source.synchronize_database_privileges)
 
     assert "connection.in_atomic_block" in source
@@ -274,7 +270,7 @@ def test_privilege_sync_requires_an_explicit_database_transaction() -> None:
 
 
 def test_privilege_sync_requires_authenticated_migrator_not_set_role() -> None:
-    privilege_source = _privileges()
+    privilege_source = database_privileges
     source = inspect.getsource(privilege_source._verify_role_boundaries)
 
     assert "SELECT session_user, current_user" in source
@@ -282,7 +278,7 @@ def test_privilege_sync_requires_authenticated_migrator_not_set_role() -> None:
 
 
 def test_boundary_function_metadata_is_verified_exactly() -> None:
-    privilege_source = _privileges()
+    privilege_source = database_privileges
     source = inspect.getsource(privilege_source._verify_function_boundaries)
 
     assert "prosecdef" in source
@@ -293,7 +289,7 @@ def test_boundary_function_metadata_is_verified_exactly() -> None:
 
 
 def test_public_function_execution_is_checked_from_catalog_acl() -> None:
-    privilege_source = _privileges()
+    privilege_source = database_privileges
     source = inspect.getsource(privilege_source._verify_effective_grants)
 
     assert "aclexplode" in source
@@ -302,7 +298,7 @@ def test_public_function_execution_is_checked_from_catalog_acl() -> None:
 
 
 def test_runtime_roles_must_have_no_membership_edges() -> None:
-    privilege_source = _privileges()
+    privilege_source = database_privileges
 
     assert privilege_source.RUNTIME_DATABASE_ROLES == (
         "aegis_web",

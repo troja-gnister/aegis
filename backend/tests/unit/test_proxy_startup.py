@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import socket
 
 import pytest
@@ -96,7 +97,7 @@ def test_proxy_verifies_web_database_login_before_dns_and_listener(
 
     monkeypatch.setattr(proxy, "require_runtime_database_login", verify, raising=False)
     monkeypatch.setattr(proxy, "resolve_trusted_proxy_ips", resolve)
-    monkeypatch.setattr(proxy.os, "execvp", capture)
+    monkeypatch.setattr(os, "execvp", capture)
 
     with pytest.raises(RuntimeError, match="exec intercepted"):
         main()
@@ -119,7 +120,7 @@ def test_proxy_database_login_mismatch_prevents_dns_and_listener(
 
     monkeypatch.setattr(proxy, "require_runtime_database_login", reject, raising=False)
     monkeypatch.setattr(proxy, "resolve_trusted_proxy_ips", unexpected_resolve)
-    monkeypatch.setattr(proxy.os, "execvp", unexpected_exec)
+    monkeypatch.setattr(os, "execvp", unexpected_exec)
 
     with pytest.raises(RuntimeError, match="runtime database login does not match"):
         main()
