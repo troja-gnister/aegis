@@ -26,6 +26,7 @@
 - The web service receives no original-root mount. Gateway, operations, indexer, media, and future AI roles receive every original root read-only. No application container may create, rename, move, overwrite, or unlink anything below an original root.
 - The legacy `read_write` slot value remains parseable as inert host-capability metadata, but it never grants a writable container mount or authorizes a write probe. Cleanup is limited to Aegis-owned generated artifacts outside original roots.
 - Application containers run unprivileged, drop all capabilities, use read-only application filesystems, have no Docker socket, and receive only role-scoped secrets and volumes. PostgreSQL alone starts a constrained UID-0 bootstrap to stage secrets and initialize its own storage, then runs the database as UID 70; it receives no original-root mounts.
+- No-egress enforcement covers web, processing, and database roles on internal networks. The accepted gateway topology joins external `edge` for host ingress and permits outbound connectivity despite gateway's read-only original mounts; the optional public TLS front also needs ACME egress. This exception must be explicit in verification evidence. A stronger gateway outbound guarantee requires a supported front-proxy or host-firewall design and validation beyond this phase's accepted topology; future frontier egress remains isolated from processing roles.
 - PostgreSQL is the initial durable queue and coordination store. Do not add Redis.
 - Use UUIDs for externally visible application objects. Never return a host/container root path from an API.
 - Use real PostgreSQL for integration tests. SQLite is not an accepted substitute.
@@ -2451,7 +2452,7 @@ def test_web_has_no_originals_and_gateway_has_no_database(rendered_compose) -> N
     assert "DATABASE_URL" not in services["gateway"].get("environment", {})
 ```
 
-Assert every application service has `read_only`, `cap_drop: ALL`, `no-new-privileges`, an explicit unprivileged user, bounded tmpfs, role-only volumes/secrets, an internal network, no privileged mode, no host PID/IPC/network namespace, and no Docker socket. Assert every original slot is read-only in gateway/operations/indexer/media (including a declared `read_write` slot), web receives none, and no core application role has an external network.
+Assert every application service has `read_only`, `cap_drop: ALL`, `no-new-privileges`, an explicit unprivileged user, bounded tmpfs, role-only volumes/secrets, no privileged mode, no host PID/IPC/network namespace, and no Docker socket. Assert every original slot is read-only in gateway/operations/indexer/media (including a declared `read_write` slot), and web receives none. Web, processing, and database roles must use only internal networks and pass outbound-denial checks. Gateway also joins external `edge` for host ingress under the accepted Task 4 topology; gateway and the optional public TLS front are explicit exceptions to outbound denial, with no stronger gateway isolation claim. Keep optional future frontier egress separate from processing roles.
 
 - [ ] **Step 6: Start the complete role-separated stack**
 

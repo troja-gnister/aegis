@@ -12,6 +12,8 @@ Every original is mounted read-only in gateway/operations/indexer/media; web and
 
 Application processes use unprivileged UIDs, read-only filesystems, dropped capabilities, no Docker socket, and role-scoped secrets. PostgreSQL is the narrow bootstrap exception: its entrypoint starts as UID 0 to stage private secrets and initialize ownership inside its own storage, then runs PostgreSQL as UID 70. It has no original-root mount. Never add the Docker socket or privileged mode to any service.
 
+Outbound network denial applies to web, processing, and database roles on internal networks. Gateway joins external `edge` for host ingress and can make outbound connections while holding read-only original mounts; the optional public TLS front also requires ACME egress. Phase 1 does not provide strict outbound isolation for gateway. That stronger guarantee would require a supported front-proxy or host-firewall design and its own validation. Future optional frontier connectivity remains separate from processing roles.
+
 Use a distinct Compose project for each installation. The commands below use `aegis-local`, not the default project name and not the reserved test project. Before the first start, inspect existing resources and select an unused project name; never point a fresh installation at an existing database volume accidentally.
 
 Create `.env` from [.env.example](../../.env.example) and set a release identity to the exact source commit/build being deployed. Set UID/GID to the host account, not the example defaults. In the same shell used for preflight and Compose:

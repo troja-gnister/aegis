@@ -500,7 +500,9 @@ Application containers run as configured unprivileged UIDs with read-only applic
 
 External tools are invoked with argument arrays, never shell interpolation. Processor input is treated as hostile. Malformed files, decompression bombs, huge dimensions, recursive documents, and excessive CSV fields are rejected or quarantined by policy.
 
-Application roles attach only to Docker internal networks with no internet route. The gateway is the sole core ingress, and PostgreSQL is never published. A dedicated frontier connector is the only egress-capable application role: it has no original-root, staging, derivative, model, or quarantine mount; it can read only a single approved outbox payload and write its response through a narrow database interface. Outbound TLS is restricted to the configured provider allowlist. The local AI worker itself has no internet route, so enabling cloud access cannot silently expand the trust boundary of a process that can read originals.
+Web, operations, indexer, media, PostgreSQL, and future local AI roles attach only to Docker internal networks with no internet route. The gateway is the sole core ingress, and PostgreSQL is never published. The accepted Phase 1 topology also attaches gateway to the external `edge` network for working host ingress: gateway can reach outbound networks while holding read-only original mounts. Optional public TLS termination similarly requires external connectivity for ACME. Neither gateway nor the TLS front is covered by the processing-role no-egress guarantee. Strict outbound isolation for gateway would require an additional supported front-proxy or host-firewall design and validation; Phase 1 makes no such guarantee.
+
+Future frontier-model traffic uses a separately enabled connector with no original-root, staging, derivative, model, or quarantine mount; it can read only a single approved outbox payload and write its response through a narrow database interface. Its outbound TLS is restricted to the configured provider allowlist. This optional egress remains isolated from the processing roles: the local AI worker itself has no internet route. The existing edge-gateway exception does not authorize a processor to send original content to external providers.
 
 Database access also follows role boundaries. A migration principal owns schema changes and is absent during normal operation. Web, operations, indexer, media, local AI, and frontier connector use distinct credentials with table/operation privileges limited to their duties. Processor roles cannot create or alter immutable web-created operation intents or grants; they can claim eligible jobs and update only fenced status/result fields. Gateway has no database credential.
 
@@ -679,6 +681,8 @@ The target production Compose topology includes the following services. Phase 1 
 Every original-root mount is read-only in gateway, operations, indexer, media, and AI, including slots whose compatibility declaration is `read_write`. The web role receives no original-root mount. Runtime attestation rejects any original root that is writable in any application container.
 
 Optional profiles add `tls` for Caddy, `ai-cpu` or `ai-gpu`, and the separately authorized `ai-frontier` connector. The GPU profile documents the required host runtime and fails clearly when unavailable. CPU/GPU local AI remains on an internal no-egress network.
+
+Gateway's external `edge` attachment and the public TLS front are the ingress exceptions described in §11.5. Container-boundary evidence must report outbound denial for the internal web, processing, and database roles separately from those exceptions.
 
 Images are pinned by version or digest for releases. Startup applies explicit, reversible-aware Django migrations. Workers remain unready and do not claim jobs until the database schema version matches the application.
 
