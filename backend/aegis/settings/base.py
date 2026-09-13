@@ -42,7 +42,7 @@ DEBUG = False
 ALLOWED_HOSTS = list(RUNTIME_CONFIG.allowed_hosts)
 
 INSTALLED_APPS = [
-    "django.contrib.admin",
+    "aegis.admin.AegisAdminConfig",
     "django.contrib.auth",
     "django.contrib.contenttypes",
     "django.contrib.sessions",
@@ -74,7 +74,7 @@ ROOT_URLCONF = "aegis.urls"
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [],
+        "DIRS": [BASE_DIR / "aegis" / "templates"],
         "APP_DIRS": True,
         "OPTIONS": {
             "context_processors": [

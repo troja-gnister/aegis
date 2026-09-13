@@ -187,7 +187,9 @@ def test_invalid_login_shape_is_bounded_before_authentication(
     def authentication_must_not_run(**_kwargs: object) -> None:
         raise AssertionError("authentication ran for an invalid request")
 
-    monkeypatch.setattr("aegis_apps.identity.api.authenticate", authentication_must_not_run)
+    monkeypatch.setattr(
+        "aegis_apps.identity.auth_services.authenticate", authentication_must_not_run
+    )
 
     response = client.post(
         "/api/v1/auth/login",
@@ -214,7 +216,9 @@ def test_lone_surrogate_is_rejected_before_authentication(
     def authentication_must_not_run(**_kwargs: object) -> None:
         raise AssertionError("authentication ran for a non-encodable credential")
 
-    monkeypatch.setattr("aegis_apps.identity.api.authenticate", authentication_must_not_run)
+    monkeypatch.setattr(
+        "aegis_apps.identity.auth_services.authenticate", authentication_must_not_run
+    )
     response = client.post(
         "/api/v1/auth/login",
         {"username": "alice", "password": "\ud800"},
@@ -239,7 +243,9 @@ def test_oversized_login_body_returns_safe_json_before_authentication(
     def authentication_must_not_run(**_kwargs: object) -> None:
         raise AssertionError("authentication ran for an oversized request")
 
-    monkeypatch.setattr("aegis_apps.identity.api.authenticate", authentication_must_not_run)
+    monkeypatch.setattr(
+        "aegis_apps.identity.auth_services.authenticate", authentication_must_not_run
+    )
     response = client.post(
         "/api/v1/auth/login",
         {"username": "alice", "password": "x" * 5000},
@@ -262,7 +268,9 @@ def test_malformed_login_json_returns_safe_problem_before_authentication(
     def authentication_must_not_run(**_kwargs: object) -> None:
         raise AssertionError("authentication ran for malformed JSON")
 
-    monkeypatch.setattr("aegis_apps.identity.api.authenticate", authentication_must_not_run)
+    monkeypatch.setattr(
+        "aegis_apps.identity.auth_services.authenticate", authentication_must_not_run
+    )
     response = client.post(
         "/api/v1/auth/login",
         b'{"username":"alice","password":',
@@ -368,7 +376,7 @@ def test_logout_flushes_session_when_audit_write_fails(
         attempted_events.append((event_type, getattr(actor, "pk", None)))
         raise RuntimeError("audit unavailable")
 
-    monkeypatch.setattr("aegis_apps.identity.api.record_event", unavailable_audit)
+    monkeypatch.setattr("aegis_apps.identity.auth_services.record_event", unavailable_audit)
     response = client.post(
         "/api/v1/auth/logout",
         headers={"X-CSRFToken": client.cookies["csrftoken"].value},
@@ -400,7 +408,7 @@ def test_account_throttle_returns_429_after_five_failures(
     def invalid_credentials(**_kwargs: object) -> None:
         return None
 
-    monkeypatch.setattr("aegis_apps.identity.api.authenticate", invalid_credentials)
+    monkeypatch.setattr("aegis_apps.identity.auth_services.authenticate", invalid_credentials)
     client = Client(enforce_csrf_checks=True)
     token = _csrf_token(client)
     for _ in range(5):
@@ -452,7 +460,7 @@ def test_concurrent_login_admission_allows_only_account_limit_authentications(
         all_old_code_calls_entered.wait(timeout=0.2)
         return None
 
-    monkeypatch.setattr("aegis_apps.identity.api.authenticate", invalid_credentials)
+    monkeypatch.setattr("aegis_apps.identity.auth_services.authenticate", invalid_credentials)
 
     def attempt(_index: int) -> int:
         close_old_connections()
@@ -493,7 +501,7 @@ def test_ip_throttle_uses_remote_addr_and_ignores_forwarding_headers(
     def invalid_credentials(**_kwargs: object) -> None:
         return None
 
-    monkeypatch.setattr("aegis_apps.identity.api.authenticate", invalid_credentials)
+    monkeypatch.setattr("aegis_apps.identity.auth_services.authenticate", invalid_credentials)
     client = Client(enforce_csrf_checks=True)
     token = _csrf_token(client)
     for index in range(20):
@@ -533,7 +541,9 @@ def test_missing_throttle_secret_fails_closed_before_authentication(
     def authentication_must_not_run(**_kwargs: object) -> None:
         raise AssertionError("authentication ran without throttling")
 
-    monkeypatch.setattr("aegis_apps.identity.api.authenticate", authentication_must_not_run)
+    monkeypatch.setattr(
+        "aegis_apps.identity.auth_services.authenticate", authentication_must_not_run
+    )
     client = Client(enforce_csrf_checks=True)
     token = _csrf_token(client)
 
