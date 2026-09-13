@@ -25,7 +25,7 @@
 - Root grants are additive across direct user and Django-group grants. There are no deny rules, and platform-superuser status never implies product data access.
 - The web service receives no original-root mount. Gateway, operations, indexer, media, and future AI roles receive every original root read-only. No application container may create, rename, move, overwrite, or unlink anything below an original root.
 - The legacy `read_write` slot value remains parseable as inert host-capability metadata, but it never grants a writable container mount or authorizes a write probe. Cleanup is limited to Aegis-owned generated artifacts outside original roots.
-- All containers run unprivileged, drop all capabilities, use read-only application filesystems, have no Docker socket, and receive only role-scoped secrets and volumes.
+- Application containers run unprivileged, drop all capabilities, use read-only application filesystems, have no Docker socket, and receive only role-scoped secrets and volumes. PostgreSQL alone starts a constrained UID-0 bootstrap to stage secrets and initialize its own storage, then runs the database as UID 70; it receives no original-root mounts.
 - PostgreSQL is the initial durable queue and coordination store. Do not add Redis.
 - Use UUIDs for externally visible application objects. Never return a host/container root path from an API.
 - Use real PostgreSQL for integration tests. SQLite is not an accepted substitute.
@@ -45,8 +45,8 @@ Updated September 13, 2026. This table is the current task ledger; the step list
 | 1–10 | Complete | Accepted backend, authentication, mount, authorization, queue, and observability checkpoints through `92b4895` |
 | 11 | Complete | Role isolation, immutable database boundaries, existing-cluster reconciliation, and independent review through `31d7cc6` |
 | 12 | Complete | Mobile session/root shell and independently reviewed transition fencing through `6fd54cb`; 38 frontend tests, lint/types/build, and real mobile accessibility checks pass |
-| 13 | In progress | Eight Chromium/WebKit journeys and 525 backend tests pass; isolated verification and pinned CI being finalized |
-| 14 | Pending | Tested development/operation runbooks, clean verification, acceptance evidence, and final roadmap status |
+| 13 | In review | Chromium/WebKit and frontend Linux CI pass; clean-runner deployment fixtures and credential-safe failure diagnostics are being corrected before re-verification |
+| 14 | In progress | Development/operation runbooks drafted; final review, clean verification, acceptance evidence, and roadmap status remain |
 
 The complete Phase 1 gate remains open until Tasks 13–14 pass. Phase 2+ features, including file enumeration and document viewers/editors, remain planned.
 
@@ -2886,37 +2886,26 @@ git push
 Use `superpowers:requesting-code-review` against the Phase 1 base/head commits. Resolve Critical/Important findings with focused red-green commits, rerun affected checks, and push each correction. Record the final reviewed commit in the evidence report; do not mark the phase Verified while an applicable finding remains open.
 
 ```bash
-git merge-base main HEAD
+git rev-parse bb8bd80a4635265b3ba3a58b1803d07dc027cd8c
 git rev-parse HEAD
 git status --short
 ```
 
-Pass the first two SHAs and the Phase 1 plan/spec paths to the review skill; the third command must be empty before review starts.
+Pass the first two SHAs and the Phase 1 plan/spec paths to the review skill; the third command must be empty before review starts. The fixed base is the pre-implementation checkpoint: because implementation now proceeds directly on `main`, `git merge-base main HEAD` would return HEAD and incorrectly omit the implementation from review.
 
 - [ ] **Step 4: Run clean-clone-equivalent verification before writing evidence**
 
 From a fresh isolated worktree with no untracked files, run:
 
 ```bash
-uv sync --locked --group dev
-uv lock --check
-uv run ruff check backend tests
-uv run mypy backend
-uv run pytest backend/tests/unit -q
-uv run pytest backend/tests/integration tests/deployment -q
-npm --prefix frontend ci
-npm --prefix frontend run lint
-npm --prefix frontend run typecheck
-npm --prefix frontend test
-npm --prefix frontend run build
-docker compose -f compose.yaml -f compose.test.yaml config --quiet
-docker compose -f compose.yaml -f compose.test.yaml build
+make verify
+make verify-compose
 make test-e2e
 git diff --check
 git status --short
 ```
 
-Expected: every command exits 0, both mobile browser projects pass, and Git status is empty. Follow `superpowers:verification-before-completion`; do not infer success from an earlier or partial run.
+These canonical targets install from the committed locks and provision private disposable database/Compose inputs; direct pytest and test-profile Compose commands otherwise require separately provisioned inputs. Install the locked Chromium/WebKit binaries as described in the development guide first. Expected: every command exits 0, both mobile browser projects pass, and Git status is empty. Follow `superpowers:verification-before-completion`; do not infer success from an earlier or partial run.
 
 - [ ] **Step 5: Record reproducible acceptance evidence**
 

@@ -112,7 +112,7 @@ Every feature pull request must update its row. Implemented and Verified rows li
 
 The current focus is **[Phase 1 — Secure foundation](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md)**. Implementation is in progress. A phase is complete only when its acceptance gate passes; landing some listed features is not enough.
 
-As of September 13, 2026, Tasks 1–12 are complete, including the reviewed authenticated mobile shell. Task 13's eight Chromium/WebKit journeys and 525 backend tests pass; reproducible verification and CI are being finalized. Task 14 covers operator runbooks and clean-install acceptance evidence. File indexing, large-folder browsing, media viewers, and document editing belong to later phases.
+As of September 13, 2026, Tasks 1–12 are complete, including the reviewed authenticated mobile shell. Task 13's frontend and eight Chromium/WebKit journeys pass in Linux CI; deployment-test isolation and credential-safe failure diagnostics are being finalized. Task 14's operator runbooks are drafted, with final review and clean-install acceptance evidence still pending. File indexing, large-folder browsing, media viewers, and document editing belong to later phases.
 
 | Phase | Deliverable | Acceptance gate | Status |
 | --- | --- | --- | --- |
@@ -150,7 +150,7 @@ Directory APIs use bounded page sizes, compact list records, compound indexes, a
 - Active or unknown content is downloaded as an attachment; browser-rendered text is escaped.
 - Originals and APIs are not stored in browser caches; authenticated thumbnails must revalidate against the current session and authorization epoch.
 - Secrets are injected through Docker secrets or protected configuration and are redacted from logs.
-- Containers run unprivileged with minimal mounts and capabilities; every application role receives originals read-only, and the web role receives no originals mount.
+- Application containers run unprivileged with minimal mounts and capabilities; every mounted original is read-only, and web receives no originals. PostgreSQL's constrained storage/secret bootstrap drops to its database UID before serving clients and has no original-root mounts.
 - Future uploads, copies, and edits create immutable versions in a separate managed append-only store. No API or job permanently deletes original or versioned content; cleanup is limited to regenerable derivatives and unpublished Aegis-owned temporary artifacts outside original roots.
 - Duplicate detection only labels candidates for human review. Accepting or dismissing a duplicate never deletes, moves, renames, or overwrites either file.
 - Cloud model use is disabled by default, explicitly selected per capability, and recorded in the audit trail.

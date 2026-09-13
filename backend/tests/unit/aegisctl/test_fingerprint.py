@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import secrets
 import subprocess
 import sys
 from dataclasses import replace
@@ -253,40 +252,6 @@ def test_observer_rejects_unconfirmed_cleanup(
 
     assert inspected == ["ps", "network", "volume"]
     assert str(slots[0].source) not in str(caught.value)
-
-
-def test_real_observer_leaves_no_unique_project_resources(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    slots = _observer_slots(tmp_path)
-    project_token = hashlib.sha256(str(tmp_path).encode("utf-8")).hexdigest()[:16]
-    real_token_hex = secrets.token_hex
-
-    def fixed_project_token(length: int) -> str:
-        if length == 8:
-            return project_token
-        return real_token_hex(length)
-
-    monkeypatch.setattr("aegisctl.mounts.secrets.token_hex", fixed_project_token)
-
-    observed = observe_mount_fingerprints(slots)
-
-    assert len(observed[0].mount_fingerprint) == 64
-    label = f"label=com.docker.compose.project=aegis-preflight-{project_token}"
-    for command in (
-        ["docker", "ps", "--all", "--quiet", "--filter", label],
-        ["docker", "network", "ls", "--quiet", "--filter", label],
-        ["docker", "volume", "ls", "--quiet", "--filter", label],
-    ):
-        result = subprocess.run(
-            command,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        assert result.returncode == 0
-        assert result.stdout == ""
 
 
 def test_container_observer_never_captures_unbounded_subprocess_output(

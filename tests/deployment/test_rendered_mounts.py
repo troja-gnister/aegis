@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 import subprocess
 from pathlib import Path
 
@@ -91,6 +92,39 @@ def test_gateway_mount_attestation_is_noop_only_when_both_settings_are_unset(
     failure = json.loads(result.stderr)
     assert failure["message"] == "Gateway mount attestation failed"
     assert "private-canary" not in result.stderr
+
+
+def test_real_observer_leaves_no_unique_project_resources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "private-canary"
+    source.mkdir()
+    config = tmp_path / "mounts.toml"
+    config.write_text(
+        f'version = 1\n[[slots]]\nslot_id = "photos"\nsource = "{source}"\n'
+        'container_path = "/srv/aegis/roots/photos"\nmode = "read_only"\n'
+        f'expected_identity = "{local_identity(source)}"\n',
+        encoding="utf-8",
+    )
+    slots = preflight_slots(parse_config(config))
+    project_token = hashlib.sha256(str(tmp_path).encode("utf-8")).hexdigest()[:16]
+    real_token_hex = secrets.token_hex
+
+    def fixed_project_token(length: int) -> str:
+        return project_token if length == 8 else real_token_hex(length)
+
+    monkeypatch.setattr("aegisctl.mounts.secrets.token_hex", fixed_project_token)
+    observed = observe_mount_fingerprints(slots)
+    assert len(observed[0].mount_fingerprint) == 64
+    label = f"label=com.docker.compose.project=aegis-preflight-{project_token}"
+    for command in (
+        ["ps", "--all", "--quiet", "--filter", label],
+        ["network", "ls", "--quiet", "--filter", label],
+        ["volume", "ls", "--quiet", "--filter", label],
+    ):
+        result = _docker(*command)
+        assert result.returncode == 0
+        assert result.stdout == ""
 
 
 def test_gateway_shell_attests_real_ro_bind_by_fingerprint(tmp_path: Path) -> None:
@@ -360,15 +394,29 @@ expected_identity = "{local_identity(source)}"
     project = "aegis-dollar-" + hashlib.sha256(
         str(tmp_path).encode("utf-8")
     ).hexdigest()[:12]
+    # Even an attestation-only one-off container needs its declared secret binds.
+    # Give every declaration private synthetic input, never operator/dev files.
+    secret_sources = {}
+    for name in yaml.safe_load((REPOSITORY / "compose.yaml").read_text())["secrets"]:
+        secret = tmp_path / name
+        secret.write_text(secrets.token_hex(32) + "\n", encoding="ascii")
+        secret.chmod(0o600)
+        secret_sources[name] = {"file": str(secret).replace("$", "$$")}
+    secret_override = tmp_path / "compose.secrets.yaml"
+    secret_override.write_text(yaml.safe_dump({"secrets": secret_sources}), encoding="utf-8")
     compose_command = [
         "docker",
         "compose",
+        "--env-file",
+        "/dev/null",
         "--project-name",
         project,
         "-f",
         str(REPOSITORY / "compose.yaml"),
         "-f",
         str(output),
+        "-f",
+        str(secret_override),
     ]
     try:
         runtime = subprocess.run(

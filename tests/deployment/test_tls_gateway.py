@@ -684,7 +684,7 @@ def test_gateway_ip_drift_fails_closed_until_web_restarts(
     occupant = f"{tls_stack.project}-old-gateway-address"
 
     run_command(["docker", "rm", "--force", original_gateway])
-    run_command(
+    occupied = run_command(
         [
             "docker",
             "run",
@@ -705,11 +705,13 @@ def test_gateway_ip_drift_fails_closed_until_web_restarts(
             PYTHON_IMAGE,
             "sleep",
             "120",
-        ]
+        ],
+        check=False,
     )
     tls_stack.client_names.append(occupant)
 
     try:
+        assert occupied.returncode == 0, bounded_tail(occupied.stderr)
         recreated = tls_stack.compose(
             ["up", "--detach", "--no-deps", "gateway"], check=False
         )
@@ -751,6 +753,7 @@ def test_gateway_ip_drift_fails_closed_until_web_restarts(
             public_status = None
         assert public_status != 200
     finally:
+        tls_stack.compose(["up", "--detach", "--no-deps", "gateway"])
         tls_stack.compose(["restart", "web"])
         tls_stack.wait_until_ready(timeout_seconds=60)
 

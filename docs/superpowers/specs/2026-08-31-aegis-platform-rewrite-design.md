@@ -496,7 +496,7 @@ Django superuser status does not bypass product data checks. Grant changes revok
 
 ### 11.5 Container and processor safety
 
-Containers run as configured unprivileged UIDs with read-only application filesystems, dropped Linux capabilities, no privileged mode, and no Docker socket. Gateway, operations, indexer, media, and AI receive every original root read-only; web receives no original-root mount. Writable storage is role-scoped to Aegis-owned staging, managed-version, derivative, model, outbox, and scratch volumes. Media and AI tools receive CPU, memory, time, output-size, and concurrency limits.
+Application containers run as configured unprivileged UIDs with read-only application filesystems, dropped Linux capabilities, no privileged mode, and no Docker socket. Gateway, operations, indexer, media, and AI receive every original root read-only; web receives no original-root mount. PostgreSQL is the narrow bootstrap exception: its constrained entrypoint stages private secrets and initializes ownership in its own storage as UID 0, then runs PostgreSQL as UID 70, with no original-root mounts. Writable storage is role-scoped to Aegis-owned staging, managed-version, derivative, model, outbox, and scratch volumes. Media and AI tools receive CPU, memory, time, output-size, and concurrency limits.
 
 External tools are invoked with argument arrays, never shell interpolation. Processor input is treated as hostile. Malformed files, decompression bombs, huge dimensions, recursive documents, and excessive CSV fields are rejected or quarantined by policy.
 
