@@ -112,7 +112,7 @@ Every feature pull request must update its row. Implemented and Verified rows li
 
 The current focus is **[Phase 1 — Secure foundation](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md)**. Implementation is in progress. A phase is complete only when its acceptance gate passes; landing some listed features is not enough.
 
-As of September 13, 2026, Tasks 1–12 are complete, including the reviewed authenticated mobile shell. Task 13's frontend and eight Chromium/WebKit journeys pass in Linux CI; deployment-test isolation and credential-safe failure diagnostics are being finalized. Task 14's operator runbooks are drafted, with final review and clean-install acceptance evidence still pending. File indexing, large-folder browsing, media viewers, and document editing belong to later phases.
+As of September 13, 2026, Tasks 1–13 are complete. All four Linux CI jobs pass: 524 backend tests, 200 deployment tests, 38 frontend tests, and eight Chromium/WebKit journeys. Task 14's development and operation runbooks are committed; final whole-phase review and clean-install evidence remain. File indexing, large-folder browsing, media viewers, and document editing belong to later phases.
 
 | Phase | Deliverable | Acceptance gate | Status |
 | --- | --- | --- | --- |
@@ -157,8 +157,10 @@ Directory APIs use bounded page sizes, compact list records, compound indexes, a
 
 ## Development and documentation
 
-The Django backend, React shell, role-separated containers, and focused tests are implemented. The remaining Phase 1 work establishes the complete browser/CI gate and tested setup/runbooks. Subsequent phases receive their own bounded plans so scale, security, and recovery gates stay visible.
+The Django backend, React shell, role-separated containers, and browser/CI gates are implemented. Final Phase 1 review and clean-install evidence remain. Subsequent phases receive their own bounded plans so scale, security, and recovery gates stay visible.
 
+- [Development and verification](docs/development.md)
+- [Deployment and operation](docs/operations/phase-1-deployment.md)
 - [Approved platform design](docs/superpowers/specs/2026-08-31-aegis-platform-rewrite-design.md)
 - [Approved Phase 1 implementation plan](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md)
 - License: [MIT](LICENSE)

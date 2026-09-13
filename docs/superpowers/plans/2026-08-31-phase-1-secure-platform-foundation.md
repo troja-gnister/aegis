@@ -45,10 +45,10 @@ Updated September 13, 2026. This table is the current task ledger; the step list
 | 1–10 | Complete | Accepted backend, authentication, mount, authorization, queue, and observability checkpoints through `92b4895` |
 | 11 | Complete | Role isolation, immutable database boundaries, existing-cluster reconciliation, and independent review through `31d7cc6` |
 | 12 | Complete | Mobile session/root shell and independently reviewed transition fencing through `6fd54cb`; 38 frontend tests, lint/types/build, and real mobile accessibility checks pass |
-| 13 | In review | Chromium/WebKit and frontend Linux CI pass; clean-runner deployment fixtures and credential-safe failure diagnostics are being corrected before re-verification |
-| 14 | In progress | Development/operation runbooks drafted; final review, clean verification, acceptance evidence, and roadmap status remain |
+| 13 | Complete | Reviewed CI/browser harness through `c6211d9`; [all four Linux jobs pass](https://github.com/troja-gnister/aegis/actions/runs/34764018346): 524 backend, 200 deployment, 38 frontend tests and eight Chromium/WebKit journeys |
+| 14 | In progress | Runbooks committed through `5978d3b`; final whole-phase review, clean verification, acceptance evidence, and roadmap status remain |
 
-The complete Phase 1 gate remains open until Tasks 13–14 pass. Phase 2+ features, including file enumeration and document viewers/editors, remain planned.
+The complete Phase 1 gate remains open until Task 14 passes. Phase 2+ features, including file enumeration and document viewers/editors, remain planned.
 
 ## Phase 1 Acceptance Gate
 
