@@ -215,6 +215,8 @@ A platform administrator can activate a logical root only by selecting a predecl
 
 The host-side preflight canonicalizes sources and compares real paths, filesystem/mount identity, root inode, readability, and ancestor relationships. It rejects identical, nested, or otherwise detectable physical aliases so one subtree cannot acquire two authorization identities. For network mounts whose aliases cannot be proven distinct, the operator must supply a stable remote/share identity; ambiguous duplicates fail closed rather than relying on display names. The expected identity is rechecked before scan finalization and every managed publication that reads an original. Preflight never creates, renames, or removes anything below an original root.
 
+Phase 1 rejects original roots containing descendant filesystem mounts, even if a descendant is read-only or separately declared. Operators must select non-overlapping leaf roots, excluding any containing root. Ordinary subdirectories are allowed. Host preflight and artifact-output guards check bounded mount metadata before creating generated files, and observer/runtime attestation rejects descendant mounts before admitting a root. Incomplete or ambiguous required topology fails closed; no content enumeration is used to prove this boundary. Operators keep topology stable during setup and recreate/revalidate after changing mounts. Full nested-mount support requires later design and verification.
+
 Role-scoped Aegis volumes prevent an untrusted processor from reading unrelated state:
 
 | Volume | Writers | Readers | Contents |
