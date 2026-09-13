@@ -4,7 +4,7 @@ import {defineConfig} from "vitest/config";
 export default defineConfig({
   plugins: [react()],
   test: {
-    include: ["src/**/*.test.{ts,tsx}"],
+    include: ["src/**/*.test.{ts,tsx}", "e2e/safe-reporter.unit.ts"],
     css: true,
     environment: "jsdom",
     environmentOptions: {

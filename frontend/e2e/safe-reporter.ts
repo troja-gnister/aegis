@@ -3,7 +3,8 @@ import {basename, isAbsolute, relative, resolve} from "node:path";
 import type {FullConfig, FullResult, Reporter, Suite, TestCase, TestResult}
   from "@playwright/test/reporter";
 
-const statuses = new Set(["passed", "failed", "timedOut", "skipped", "interrupted"]);
+const testStatuses = new Set(["passed", "failed", "timedOut", "skipped", "interrupted"]);
+const runStatuses = new Set(["passed", "failed", "timedout", "interrupted"]);
 
 export default class SafeReporter implements Reporter {
   private cases = new Map<string, number>();
@@ -21,7 +22,7 @@ export default class SafeReporter implements Reporter {
   onTestEnd(test: TestCase, result: TestResult) {
     const name = test.parent.project()?.name;
     const project = name === "mobile-chromium" || name === "mobile-webkit" ? name : "unknown";
-    const status = statuses.has(result.status) ? result.status : "unknown";
+    const status = testStatuses.has(result.status) ? result.status : "unknown";
     const line = Number.isInteger(test.location.line) ? test.location.line : 0;
     console.log(`AEGIS_E2E project=${project} case=${this.cases.get(test.id) ?? 0} line=${line} status=${status}`);
     // The safe fixture already removed free-text error details before capture.
@@ -52,7 +53,7 @@ export default class SafeReporter implements Reporter {
   onStdErr() { /* Free-text output deliberately withheld. */ }
 
   onEnd(result: FullResult) {
-    const status = statuses.has(result.status) ? result.status : "unknown";
+    const status = runStatuses.has(result.status) ? result.status : "unknown";
     console.log(`AEGIS_E2E end status=${status}`);
     // No returned status override: an intentionally failed test remains failed.
   }
