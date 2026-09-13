@@ -3,6 +3,7 @@ from __future__ import annotations
 import http.cookiejar
 import json
 import os
+import secrets
 import socket
 import ssl
 import subprocess
@@ -16,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 PYTHON_IMAGE = (
@@ -91,6 +93,8 @@ class TlsStack:
     def compose_arguments(self) -> list[str]:
         return [
             "compose",
+            "--env-file",
+            "/dev/null",
             "--project-name",
             self.project,
             "--project-directory",
@@ -109,10 +113,14 @@ class TlsStack:
         return run_command(
             ["docker", *self.compose_arguments, *arguments],
             cwd=REPOSITORY,
-            env=os.environ
+            env={key: value for key, value in os.environ.items()
+                 if not key.startswith(("AEGIS_", "COMPOSE_", "DJANGO_"))}
             | {
-                "AEGIS_HTTP_PORT": str(self.http_port),
-                "AEGIS_LOCAL_HTTPS_PORT": str(self.https_port),
+                "AEGIS_RELEASE_ID": "phase1-tls-test",
+                "AEGIS_UID": str(os.geteuid()),
+                "AEGIS_GID": str(os.getegid()),
+                "AEGIS_HTTP_PORT": f"127.0.0.1:{self.http_port}",
+                "AEGIS_LOCAL_HTTPS_PORT": f"127.0.0.1:{self.https_port}",
             },
             check=check,
             timeout=COMPOSE_TIMEOUT_SECONDS,
@@ -448,6 +456,18 @@ secrets:
         encoding="utf-8",
     )
     stack = TlsStack(project, override, http_port, https_port, [])
+
+    # Use only per-test inputs; never depend on or read operator/dev credentials.
+    configuration = yaml.safe_load(override.read_text())
+    base = yaml.safe_load((REPOSITORY / "compose.yaml").read_text())
+    for name in base["secrets"]:
+        if name in configuration["secrets"]:
+            continue
+        secret = root / name
+        secret.write_text(secrets.token_hex(32) + "\n", encoding="ascii")
+        secret.chmod(0o600)
+        configuration["secrets"][name] = {"file": str(secret)}
+    override.write_text(yaml.safe_dump(configuration), encoding="utf-8")
 
     try:
         started = stack.compose(

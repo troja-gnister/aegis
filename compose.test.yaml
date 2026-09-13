@@ -2,7 +2,43 @@ services:
   postgres:
     environment:
       POSTGRES_INITDB_ARGS: --encoding=UTF8 --locale=C
+    ports:
+      - "127.0.0.1:${AEGIS_TEST_DB_PORT:-55432}:5432"
   web:
     environment:
       AEGIS_ENV: test
       DJANGO_SETTINGS_MODULE: aegis.settings.test
+      E2E_ALICE_PASSWORD_FILE: /run/secrets/e2e_alice_password
+      E2E_BOB_PASSWORD_FILE: /run/secrets/e2e_bob_password
+      E2E_ADMIN_PASSWORD_FILE: /run/secrets/e2e_admin_password
+    secrets:
+      - source: e2e-alice-password
+        target: e2e_alice_password
+      - source: e2e-bob-password
+        target: e2e_bob_password
+      - source: e2e-admin-password
+        target: e2e_admin_password
+
+secrets:
+  postgres-superuser-password:
+    file: "${AEGIS_TEST_SECRET_DIR:?AEGIS_TEST_SECRET_DIR is required}/postgres-superuser-password"
+  db-migrator-password:
+    file: "${AEGIS_TEST_SECRET_DIR:?AEGIS_TEST_SECRET_DIR is required}/db-migrator-password"
+  db-web-password:
+    file: "${AEGIS_TEST_SECRET_DIR:?AEGIS_TEST_SECRET_DIR is required}/db-web-password"
+  db-operations-password:
+    file: "${AEGIS_TEST_SECRET_DIR:?AEGIS_TEST_SECRET_DIR is required}/db-operations-password"
+  db-indexer-password:
+    file: "${AEGIS_TEST_SECRET_DIR:?AEGIS_TEST_SECRET_DIR is required}/db-indexer-password"
+  db-media-password:
+    file: "${AEGIS_TEST_SECRET_DIR:?AEGIS_TEST_SECRET_DIR is required}/db-media-password"
+  django-secret-key:
+    file: "${AEGIS_TEST_SECRET_DIR:?AEGIS_TEST_SECRET_DIR is required}/django-secret-key"
+  auth-throttle-hmac-key:
+    file: "${AEGIS_TEST_SECRET_DIR:?AEGIS_TEST_SECRET_DIR is required}/auth-throttle-hmac-key"
+  e2e-alice-password:
+    file: "${AEGIS_TEST_SECRET_DIR:?AEGIS_TEST_SECRET_DIR is required}/e2e-alice-password"
+  e2e-bob-password:
+    file: "${AEGIS_TEST_SECRET_DIR:?AEGIS_TEST_SECRET_DIR is required}/e2e-bob-password"
+  e2e-admin-password:
+    file: "${AEGIS_TEST_SECRET_DIR:?AEGIS_TEST_SECRET_DIR is required}/e2e-admin-password"

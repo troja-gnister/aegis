@@ -26,12 +26,15 @@ __pycache__/
 .ruff_cache/
 /backend/staticfiles/
 /deploy/mounts.manifest.json
+/deploy/mounts.local.toml
 /deploy/mounts.gateway.attestation
 /compose.mounts.generated.yaml
 
 # Frontend dependencies and build output
 /frontend/node_modules/
 /frontend/dist/
+/frontend/playwright-report/
+/frontend/test-results/
 
 # OS
 .DS_Store
