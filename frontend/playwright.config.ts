@@ -1,4 +1,5 @@
 import {defineConfig} from "@playwright/test";
+import {fileURLToPath} from "node:url";
 
 const baseURL = process.env.E2E_BASE_URL ?? "http://127.0.0.1:18080";
 
@@ -9,7 +10,7 @@ export default defineConfig({
   forbidOnly: Boolean(process.env.CI),
   retries: 0,
   workers: 1,
-  reporter: "line",
+  reporter: [[fileURLToPath(new URL("./e2e/safe-reporter.ts", import.meta.url))]],
   use: {
     baseURL,
     browserName: "chromium",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import http.cookiejar
+import ipaddress
 import json
 import os
 import secrets
@@ -270,7 +271,7 @@ class TlsStack:
         while time.monotonic() < deadline:
             try:
                 status, _, _ = self.request(
-                    "/admin/login/", tls=True, follow_redirects=False
+                    "/api/v1/auth/csrf", tls=True, follow_redirects=False
                 )
                 if status == 200:
                     return
@@ -385,6 +386,25 @@ def test_tls_readiness_timeout_has_bounded_process_and_log_diagnostics(
     assert len(rendered) < 20_000
 
 
+def test_tls_readiness_does_not_consume_admin_login_rate_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stack = TlsStack("readiness-budget", tmp_path / "override.yaml", 1, 2, [])
+    budget = 1
+
+    def request(path: str, **_kwargs: object) -> tuple[int, Mapping[str, str], bytes]:
+        nonlocal budget
+        if path == "/admin/login/":
+            budget -= 1
+            return (200 if budget >= 0 else 503), {}, b""
+        return 200, {}, b""
+
+    monkeypatch.setattr(stack, "request", request)
+    stack.wait_until_ready(timeout_seconds=1)
+    status, _, _ = stack.request("/admin/login/", tls=True)
+    assert status == 200, "Readiness polling must not spend the next admin request's budget"
+
+
 def test_client_rate_probe_dials_local_caddy_with_localhost_sni(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -410,6 +430,35 @@ def test_client_rate_probe_dials_local_caddy_with_localhost_sni(
     assert "('caddy-local',8443)" in captured["script"]
     assert "server_hostname='localhost'" in captured["script"]
     assert "198.51.100.42" in captured["script"]
+
+
+def isolated_backend_subnet(existing: Sequence[str], *, start: int) -> str:
+    networks = [ipaddress.ip_network(value) for value in existing]
+    for offset in range(256):
+        candidate = ipaddress.ip_network(f"10.253.{(start + offset) % 256}.0/24")
+        if not any(candidate.overlaps(network) for network in networks if network.version == 4):
+            return str(candidate)
+    raise AssertionError("No non-overlapping isolated TLS test subnet is available")
+
+
+def configured_subnets(networks: Sequence[dict]) -> list[str]:
+    return [entry["Subnet"] for network in networks
+            for entry in ((network.get("IPAM") or {}).get("Config") or [])
+            if entry.get("Subnet")]
+
+
+def test_tls_network_inventory_handles_null_default_network_ipam() -> None:
+    assert configured_subnets([
+        {"IPAM": {"Config": None}}, {"IPAM": None}, {"IPAM": {}},
+        {"IPAM": {"Config": [{"Subnet": "172.17.0.0/16"}, {}, {"Subnet": None}]}},
+    ]) == ["172.17.0.0/16"]
+
+
+def test_isolated_tls_subnet_avoids_existing_networks_and_fails_closed() -> None:
+    assert isolated_backend_subnet(["10.253.0.0/24", "fd00::/64"], start=0) == "10.253.1.0/24"
+    assert isolated_backend_subnet(["10.253.255.0/24"], start=255) == "10.253.0.0/24"
+    with pytest.raises(AssertionError, match="non-overlapping"):
+        isolated_backend_subnet(["10.253.0.0/16"], start=0)
 
 
 @pytest.fixture(scope="module")
@@ -459,6 +508,12 @@ secrets:
 
     # Use only per-test inputs; never depend on or read operator/dev credentials.
     configuration = yaml.safe_load(override.read_text())
+    network_ids = run_command(["docker", "network", "ls", "--quiet"]).stdout.split()
+    network_info = json.loads(run_command(["docker", "network", "inspect", *network_ids]).stdout)
+    configuration["networks"] = {"backend": {"ipam": {"config": [{
+        "subnet": isolated_backend_subnet(configured_subnets(network_info),
+                                         start=secrets.randbelow(256)),
+    }]}}}
     base = yaml.safe_load((REPOSITORY / "compose.yaml").read_text())
     for name in base["secrets"]:
         if name in configuration["secrets"]:

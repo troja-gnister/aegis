@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export UV_LOCKED=1
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repository_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
@@ -22,6 +23,10 @@ if [[ -n "$existing" ]]; then
     printf '%s\n' "The reserved E2E project has stopped containers; refusing to reuse them." >&2
     exit 64
 fi
+
+# Uses the same locked browser package/config as acceptance. Its intentionally
+# failing subprocess must never disclose a synthetic credential in diagnostics.
+node frontend/e2e/verify-diagnostics.mjs
 
 umask 077
 work_dir=$(mktemp -d /tmp/aegis-phase1-e2e.XXXXXXXX)

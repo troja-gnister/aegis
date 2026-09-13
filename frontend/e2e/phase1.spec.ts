@@ -1,4 +1,5 @@
-import {expect, test, type Page} from "@playwright/test";
+import {expect, type Page} from "@playwright/test";
+import {test} from "./safe-test";
 
 function requiredSecret(name: string): string {
   const value = process.env[name];
@@ -18,20 +19,6 @@ async function signIn(page: Page, username: string, password: string) {
   expect((await login).status(), "Credential endpoint status").toBe(200);
   await expect(page).toHaveURL(/\/roots$/);
 }
-
-test.afterEach(async ({page}, testInfo) => {
-  // Playwright generates an accessibility snapshot even with traces disabled.
-  // Clear fields before its teardown so failure context cannot retain secrets.
-  if (!page.isClosed()) await page.locator("input, textarea").evaluateAll((fields) => {
-    for (const field of fields) (field as HTMLInputElement).value = "";
-  });
-  if (testInfo.status === testInfo.expectedStatus || page.isClosed()) return;
-  await page.screenshot({
-    path: testInfo.outputPath("sanitized.png"),
-    mask: [page.locator("input, textarea")],
-    fullPage: false,
-  });
-});
 
 test("Alice isolation, refresh, phone accessibility, and revoked restoration", async ({page}) => {
   await signIn(page, "alice", requiredSecret("E2E_ALICE_PASSWORD"));
