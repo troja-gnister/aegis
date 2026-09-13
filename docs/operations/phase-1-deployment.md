@@ -1,5 +1,7 @@
 # Phase 1 deployment and operation
 
+**Acceptance warning:** the [verification checkpoint](../verification/phase-1.md#remaining-safety-gate) identifies an unresolved nested-mount boundary in host preflight/render. Do not use original roots containing nested mounts until it is resolved. Read-only container mounts do not protect against an operator-run host artifact writer choosing an aliased destination.
+
 This is a foundation deployment, not yet a replacement for a working drive or photo library. Login, root visibility, administration, audit, jobs, and isolation are implemented; file indexing, viewers, transfers, and document editing are later roadmap work. See [development verification](../development.md) before deploying a changed build.
 
 ## Prerequisites

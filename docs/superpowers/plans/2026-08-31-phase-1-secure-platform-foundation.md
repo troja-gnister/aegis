@@ -47,9 +47,11 @@ Updated September 13, 2026. This table is the current task ledger; the step list
 | 11 | Complete | Role isolation, immutable database boundaries, existing-cluster reconciliation, and independent review through `31d7cc6` |
 | 12 | Complete | Mobile session/root shell and independently reviewed transition fencing through `6fd54cb`; 38 frontend tests, lint/types/build, and real mobile accessibility checks pass |
 | 13 | Complete | Reviewed CI/browser harness through `c6211d9`; [all four Linux jobs pass](https://github.com/troja-gnister/aegis/actions/runs/34764018346): 524 backend, 200 deployment, 38 frontend tests and eight Chromium/WebKit journeys |
-| 14 | In progress | Runbooks committed through `5978d3b`; final whole-phase review, clean verification, acceptance evidence, and roadmap status remain |
+| 14 | In progress | Runbooks, whole-phase review and scoped re-review, and all three fresh-checkout suites recorded at `bff72f4`; [verification checkpoint](../../verification/phase-1.md). One Important nested-mount original-output/root-alias boundary remains; no Verified status is claimed |
 
-The complete Phase 1 gate remains open until Task 14 passes. Phase 2+ features, including file enumeration and document viewers/editors, remain planned.
+There are **13 completed tasks and one remaining Phase 1 task**. The complete phase gate remains open until Task 14's residual safety issue is resolved: descendant mounts can make an external artifact destination or separately declared root share physical content with an original. Rejecting nested-mount roots pending fuller topology support is the proposed bounded remedy, not an implemented restriction. The alternative is to include descendant mount identities in the protected boundary now. Preserve the no-modification requirement in either case; a documentation exception is not sufficient.
+
+At `bff72f4`, the [Linux run](https://github.com/troja-gnister/aegis/actions/runs/34767752653) passes 575 backend, 214 deployment, 43 frontend tests and eight browser cases. The fresh local checkout also passes all canonical suites, with eight precisely qualified Docker Desktop host-bind skips covered by Linux. These results do not cover the remaining nested topology identified by review. Phase 2+ features, including file enumeration and document viewers/editors, remain planned.
 
 ## Phase 1 Acceptance Gate
 

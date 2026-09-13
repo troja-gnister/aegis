@@ -6,6 +6,8 @@ Aegis is a planned self-hosted, mobile-first file drive and media library. It wi
 
 The [platform design](docs/superpowers/specs/2026-08-31-aegis-platform-rewrite-design.md) defines the product boundaries. The [Phase 1 implementation plan](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md#implementation-status) tracks delivery and verification.
 
+The [latest verification checkpoint](docs/verification/phase-1.md) records passing local and Linux suites, but Phase 1 acceptance remains open for a nested-mount safety issue. Do not use host preflight/render with originals containing nested mounts until the [remaining boundary](docs/verification/phase-1.md#remaining-safety-gate) is resolved.
+
 ## Product charter
 
 Aegis will provide a secure browser interface for files mounted into its Docker deployment. It is designed first for phones and tablets, while remaining efficient on desktop browsers.
@@ -112,7 +114,7 @@ Every feature pull request must update its row. Implemented and Verified rows li
 
 The current focus is **[Phase 1 — Secure foundation](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md)**. Implementation is in progress. A phase is complete only when its acceptance gate passes; landing some listed features is not enough.
 
-As of September 13, 2026, Tasks 1–13 are complete. All four Linux CI jobs pass: 524 backend tests, 200 deployment tests, 38 frontend tests, and eight Chromium/WebKit journeys. Task 14's development and operation runbooks are committed; final whole-phase review and clean-install evidence remain. File indexing, large-folder browsing, media viewers, and document editing belong to later phases.
+As of September 13, 2026, **13 of 14 Phase 1 tasks are complete**. All four Linux CI jobs pass: 575 backend tests, 214 deployment tests, 43 frontend tests, and eight Chromium/WebKit journeys. Runbooks, final review, and fresh-checkout verification are recorded in the [checkpoint report](docs/verification/phase-1.md). Task 14 remains open for one shared original-output/root-alias safety issue involving nested mounts; passing tests do not close that gate. The five later implementation phases remain planned, including file indexing, large-folder browsing, media viewers, and document editing.
 
 | Phase | Deliverable | Acceptance gate | Status |
 | --- | --- | --- | --- |
@@ -151,16 +153,18 @@ Directory APIs use bounded page sizes, compact list records, compound indexes, a
 - Originals and APIs are not stored in browser caches; authenticated thumbnails must revalidate against the current session and authorization epoch.
 - Secrets are injected through Docker secrets or protected configuration and are redacted from logs.
 - Application containers run unprivileged with minimal mounts and capabilities; every mounted original is read-only, and web receives no originals. PostgreSQL's constrained storage/secret bootstrap drops to its database UID before serving clients and has no original-root mounts.
+- Web, processing, and database roles are outbound-isolated. The ingress gateway and optional public TLS front are documented exceptions; gateway outbound blocking is not currently guaranteed.
 - Future uploads, copies, and edits create immutable versions in a separate managed append-only store. No API or job permanently deletes original or versioned content; cleanup is limited to regenerable derivatives and unpublished Aegis-owned temporary artifacts outside original roots.
 - Duplicate detection only labels candidates for human review. Accepting or dismissing a duplicate never deletes, moves, renames, or overwrites either file.
 - Cloud model use is disabled by default, explicitly selected per capability, and recorded in the audit trail.
 
 ## Development and documentation
 
-The Django backend, React shell, role-separated containers, and browser/CI gates are implemented. Final Phase 1 review and clean-install evidence remain. Subsequent phases receive their own bounded plans so scale, security, and recovery gates stay visible.
+The Django backend, React shell, role-separated containers, and browser/CI gates are implemented. Final Phase 1 review and clean-install evidence are recorded, with the nested-mount safety gate still open. Subsequent phases receive their own bounded plans so scale, security, and recovery gates stay visible.
 
 - [Development and verification](docs/development.md)
 - [Deployment and operation](docs/operations/phase-1-deployment.md)
+- [Phase 1 verification checkpoint and remaining safety gate](docs/verification/phase-1.md)
 - [Approved platform design](docs/superpowers/specs/2026-08-31-aegis-platform-rewrite-design.md)
 - [Approved Phase 1 implementation plan](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md)
 - License: [MIT](LICENSE)
