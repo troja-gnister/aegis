@@ -24,7 +24,21 @@ export AEGIS_RELEASE_ID="$(git rev-parse HEAD)"
 
 For local-only operation set `AEGIS_HTTP_PORT=127.0.0.1:8080`, `AEGIS_PUBLIC_URL=http://localhost:8080`, `AEGIS_ENV=development`, and `DJANGO_SETTINGS_MODULE=aegis.settings.development`. Keep the published database port absent. Do not include `compose.test.yaml` in a real deployment.
 
-For public or cross-device operation configure a real hostname, trusted HTTPS, `AEGIS_ENV=production`, `DJANGO_SETTINGS_MODULE=aegis.settings.production`, exact `AEGIS_PUBLIC_URL`, and `AEGIS_ALLOWED_HOSTS`. The `tls` profile supplies Caddy; set `AEGIS_TLS_HOST` to that hostname and use the profile consistently for lifecycle commands. Keep the gateway's plain HTTP publication on loopback; Caddy uses the dedicated internal TLS hop. Do not expose its internal listener or trust arbitrary forwarding headers. The `tls-local` profile uses a separate local certificate authority for testing, not publicly trusted certificates. Public certificate issuance requires working DNS and reachable HTTPS and is not part of the offline acceptance test.
+In that same shell, explicitly disable TLS profiles for local HTTP (an empty exported value also overrides any profile selection in `.env`):
+
+```bash
+export COMPOSE_PROFILES=""
+```
+
+For public or cross-device operation configure a real hostname, trusted HTTPS, `AEGIS_ENV=production`, `DJANGO_SETTINGS_MODULE=aegis.settings.production`, exact `AEGIS_PUBLIC_URL`, and `AEGIS_ALLOWED_HOSTS`. Set `AEGIS_TLS_HOST` to that hostname and select the `tls` profile instead:
+
+```bash
+export COMPOSE_PROFILES=tls
+```
+
+Keep the chosen `COMPOSE_PROFILES` value in the shell for every subsequent Compose command, including recreation, status, logs, upgrades, and shutdown; restore it before operating from a new shell. The public choice starts Caddy with the stack. Keep the gateway's plain HTTP publication on loopback; Caddy uses the dedicated internal TLS hop. Do not expose its internal listener or trust arbitrary forwarding headers.
+
+The `tls-local` profile is a separate local-certificate-authority test deployment, not publicly trusted HTTPS. For that test choice only, export `COMPOSE_PROFILES=tls-local` instead; do not enable both TLS profiles. Public certificate issuance requires working DNS and reachable HTTPS and is not part of the offline acceptance test.
 
 ## Secrets
 
