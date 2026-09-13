@@ -48,11 +48,11 @@ Updated September 13, 2026. This table is the current task ledger; the step list
 | 11 | Complete | Role isolation, immutable database boundaries, existing-cluster reconciliation, and independent review through `31d7cc6` |
 | 12 | Complete | Mobile session/root shell and independently reviewed transition fencing through `6fd54cb`; 38 frontend tests, lint/types/build, and real mobile accessibility checks pass |
 | 13 | Complete | Reviewed CI/browser harness through `c6211d9`; [all four Linux jobs pass](https://github.com/troja-gnister/aegis/actions/runs/34764018346): 524 backend, 200 deployment, 38 frontend tests and eight Chromium/WebKit journeys |
-| 14 | In progress | Runbooks, whole-phase review and scoped re-review, and all three fresh-checkout suites recorded at `bff72f4`; [verification checkpoint](../../verification/phase-1.md). One Important nested-mount original-output/root-alias boundary remains; no Verified status is claimed |
+| 14 | Complete | Runbooks, whole-phase review and scoped follow-ups, all three fresh-checkout suites, and exact-head Linux CI recorded at `6b37148`; [acceptance evidence](../../verification/phase-1.md). Independent review accepted the approved leaf-root restriction with no remaining findings |
 
-There are **13 completed tasks and one remaining Phase 1 task**. The complete phase gate remains open until Task 14's residual safety issue is resolved: descendant mounts can make an external artifact destination or separately declared root share physical content with an original. The approved remedy is to reject roots containing descendant mounts and require non-overlapping leaf roots; implementation and regression verification are in progress. Full nested-mount support is deferred. Preserve the no-modification requirement; a documentation exception is not sufficient.
+There are **14 completed tasks and no remaining Phase 1 tasks**. All ten acceptance gates passed. The original-output/root-alias safety issue identified in the earlier checkpoint is resolved by the approved restriction: host preflight and artifact guards, the container observer, and backend/gateway attestation reject roots containing descendant mounts. Non-overlapping leaf roots are supported; full nested-mount support is deferred. Original files remain read-only and unchanged.
 
-At `bff72f4`, the [Linux run](https://github.com/troja-gnister/aegis/actions/runs/34767752653) passes 575 backend, 214 deployment, 43 frontend tests and eight browser cases. The fresh local checkout also passes all canonical suites, with eight precisely qualified Docker Desktop host-bind skips covered by Linux. These results do not cover the remaining nested topology identified by review. Phase 2+ features, including file enumeration and document viewers/editors, remain planned.
+At `6b37148`, the [Linux run](https://github.com/troja-gnister/aegis/actions/runs/34771701746) passes 620 backend, 235 deployment, 43 frontend tests and eight browser cases. The fresh local checkout also passes all canonical suites, with eight precisely qualified Docker Desktop host-bind skips covered by Linux; all new nested-mount cases run on both. Current focus is Phase 2 planning. The five later implementation phases, including file enumeration and document viewers/editors, remain planned and do not yet have a final task count. Foundation acceptance is not a million-entry performance or production-release certification.
 
 ## Phase 1 Acceptance Gate
 
@@ -63,7 +63,7 @@ The phase is complete only when all of the following are demonstrated through th
 3. direct and group grants expose only the authorized active root shells;
 4. a platform administrator with no root grant sees no product roots;
 5. unauthenticated, cross-root, stale-epoch, and direct protected-location requests fail;
-6. root mount slots are deployment-declared, alias-checked, and consistent across mounted roles;
+6. root mount slots are deployment-declared, alias-checked, free of descendant mounts, and consistent across mounted roles;
 7. workers publish heartbeats but cannot mutate immutable operation intents or use another role's database privileges;
 8. login, logout, failed login, administration, and grant changes create append-only audit records;
 9. the dark mobile shell works at the defined phone viewport and clears authenticated state on logout/back navigation;
@@ -2860,7 +2860,7 @@ git push
 - Produces: truthful README feature/roadmap statuses with links to evidence.
 - Consumes: clean locked verification output, image digests, schema/release IDs, and reviewer findings from the completed implementation.
 
-- [ ] **Step 1: Write deployment and development runbooks from tested commands**
+- [x] **Step 1: Write deployment and development runbooks from tested commands**
 
 `docs/development.md` documents prerequisites, locked setup, isolated worktree, test categories, formatting/type commands, test secret generation, mount fixtures, Compose lifecycle, and how to avoid committing generated or secret files.
 
@@ -2874,7 +2874,7 @@ Compose recreate -> readiness -> administrator bootstrap -> root activation -> g
 session revocation -> audit/status -> upgrade checkpoint -> safe shutdown
 ```
 
-- [ ] **Step 2: Verify, commit, and push the runbooks**
+- [x] **Step 2: Verify, commit, and push the runbooks**
 
 Run each copied command's non-destructive form once more, open every relative link target named by the two runbooks, then commit the runbooks before the clean verification worktree is created:
 
@@ -2885,7 +2885,7 @@ git commit -m "docs: add Phase 1 operation runbooks"
 git push
 ```
 
-- [ ] **Step 3: Request and resolve implementation review**
+- [x] **Step 3: Request and resolve implementation review**
 
 Use `superpowers:requesting-code-review` against the Phase 1 base/head commits. Resolve Critical/Important findings with focused red-green commits, rerun affected checks, and push each correction. Record the final reviewed commit in the evidence report; do not mark the phase Verified while an applicable finding remains open.
 
@@ -2897,7 +2897,7 @@ git status --short
 
 Pass the first two SHAs and the Phase 1 plan/spec paths to the review skill; the third command must be empty before review starts. The fixed base is the pre-implementation checkpoint: because implementation now proceeds directly on `main`, `git merge-base main HEAD` would return HEAD and incorrectly omit the implementation from review.
 
-- [ ] **Step 4: Run clean-clone-equivalent verification before writing evidence**
+- [x] **Step 4: Run clean-clone-equivalent verification before writing evidence**
 
 From a fresh isolated worktree with no untracked files, run:
 
@@ -2911,7 +2911,7 @@ git status --short
 
 These canonical targets install from the committed locks and provision private disposable database/Compose inputs; direct pytest and test-profile Compose commands otherwise require separately provisioned inputs. Install the locked Chromium/WebKit binaries as described in the development guide first. Expected: every command exits 0, both mobile browser projects pass, and Git status is empty. Follow `superpowers:verification-before-completion`; do not infer success from an earlier or partial run.
 
-- [ ] **Step 5: Record reproducible acceptance evidence**
+- [x] **Step 5: Record reproducible acceptance evidence**
 
 `docs/verification/phase-1.md` records UTC timestamp, commit SHA, host/OS, Docker/Compose versions, Python/Node/PostgreSQL versions, image digests, schema/release ID, exact commands, test counts/durations, browser projects, and the ten Phase 1 gate results. Redact usernames other than synthetic fixtures, host paths, addresses, resource names, and secrets. Link sanitized CI runs when available.
 
@@ -2940,7 +2940,7 @@ These canonical targets install from the committed locks and provision private d
 
 Replace each “output of” instruction with its captured value before staging; the repository hygiene scan rejects those instruction phrases in the completed evidence file.
 
-- [ ] **Step 6: Advance only statuses supported by the evidence**
+- [x] **Step 6: Advance only statuses supported by the evidence**
 
 When and only when Step 4 passes, update README feature rows PLAT-001, PLAT-002, OPS-002, AUTH-001, AUTH-002, AUTH-003, FILE-002, UX-001, SEC-001, and SEC-002 to **Verified**, linking `docs/verification/phase-1.md`. Set Phase 1 to **Verified** and current focus to Phase 2 planning. Leave every Phase 2+ feature Planned/Deferred; the root cards are not evidence of file browsing.
 
@@ -2952,7 +2952,7 @@ Unchanged rows: every Phase 2–6 and Later feature
 Roadmap: Phase 1 = Verified; Phase 2 = Planned; current focus = Phase 2 planning
 ```
 
-- [ ] **Step 7: Verify documentation and repository hygiene**
+- [x] **Step 7: Verify documentation and repository hygiene**
 
 Run:
 
@@ -2964,7 +2964,7 @@ git status --short
 
 Expected: no unfinished production instruction or sample secret appears; intended documentation changes are the only changes.
 
-- [ ] **Step 8: Commit and push the verified Phase 1 checkpoint**
+- [x] **Step 8: Commit and push the verified Phase 1 checkpoint**
 
 ```bash
 git add README.md docs/verification/phase-1.md docs/superpowers/specs/2026-08-31-aegis-platform-rewrite-design.md

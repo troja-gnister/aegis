@@ -1,6 +1,6 @@
 # Phase 1 deployment and operation
 
-**Acceptance warning:** the [verification checkpoint](../verification/phase-1.md#remaining-safety-gate) identifies an unresolved nested-mount boundary in host preflight/render. Do not use original roots containing nested mounts until it is resolved. Read-only container mounts do not protect against an operator-run host artifact writer choosing an aliased destination.
+The [Phase 1 acceptance report](../verification/phase-1.md) records the verified foundation and its limitations. **Supported original roots must contain no nested filesystem mounts.** Host preflight/artifact guards and runtime attestation enforce this restriction; use the separate-root layout below. Do not bypass a rejection or enable writes to originals.
 
 This is a foundation deployment, not yet a replacement for a working drive or photo library. Login, root visibility, administration, audit, jobs, and isolation are implemented; file indexing, viewers, transfers, and document editing are later roadmap work. See [development verification](../development.md) before deploying a changed build.
 
@@ -88,9 +88,9 @@ uv run --locked aegisctl mounts validate --config deploy/mounts.local.toml
 uv run --locked aegisctl mounts preflight --config deploy/mounts.local.toml --manifest deploy/mounts.manifest.json
 ```
 
-Preflight checks identities, aliasing, and effective read access without writing under any original. It observes a mount fingerprint in a constrained disposable container; this supports Docker Desktop, where host/container inode numbers differ. Missing or changed storage fails closed. A manifest is not permission to create the missing source directory.
+Preflight checks identities, aliasing, nested mounts, and effective read access without writing under any original. Linux and macOS host checks use bounded filesystem metadata; unavailable or unsupported topology fails closed. It observes a mount fingerprint in a constrained disposable container; this supports Docker Desktop, where host/container inode numbers differ. Missing or changed storage fails closed. A manifest is not permission to create the missing source directory.
 
-Keep the manifest, Compose override, gateway attestation, and configured temporary directory outside every original root. Preflight/render reject destinations inside originals, including symlink aliases and detectable Linux bind aliases, before creating generated artifacts. Runtime attestation checks read/traverse access under each role's effective identity; it does not enumerate or promise access to every descendant.
+Keep the manifest, Compose override, gateway attestation, and configured temporary directory outside every original root. Preflight/render reject destinations inside originals, including symlink aliases, detectable Linux bind aliases, and native macOS Data-volume path aliases, before creating generated artifacts. The independent output guard also rejects roots with nested mounts. Runtime attestation rejects nested mounts and checks read/traverse access under each role's effective identity; it does not enumerate or promise access to every descendant.
 
 ## Render the override
 
