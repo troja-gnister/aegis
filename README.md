@@ -4,7 +4,7 @@ Aegis is a planned self-hosted, mobile-first file drive and media library. It wi
 
 > **Project status: Phase 1 secure-platform foundation in progress.** The legacy Arch Linux hardening CLI remains recoverable as `legacy-hardening-cli-v0.1.0` at commit `1cb4277`. The active tree is now being replaced according to the [approved Phase 1 plan](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md).
 
-The canonical platform design is [docs/superpowers/specs/2026-08-31-aegis-platform-rewrite-design.md](docs/superpowers/specs/2026-08-31-aegis-platform-rewrite-design.md). Its first bounded delivery plan is [docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md).
+The [platform design](docs/superpowers/specs/2026-08-31-aegis-platform-rewrite-design.md) defines the product boundaries. The [Phase 1 implementation plan](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md#implementation-status) tracks delivery and verification.
 
 ## Product charter
 
@@ -112,6 +112,8 @@ Every feature pull request must update its row. Implemented and Verified rows li
 
 The current focus is **[Phase 1 — Secure foundation](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md)**. Implementation is in progress. A phase is complete only when its acceptance gate passes; landing some listed features is not enough.
 
+As of September 13, 2026, Tasks 1–11 are complete. Task 12's authenticated mobile shell is implemented and passes its frontend checks, with final review underway. Tasks 13–14 remain: production-stack mobile browser/CI coverage, then operator runbooks and the final evidence report. File indexing, large-folder browsing, media viewers, and document editing belong to later phases.
+
 | Phase | Deliverable | Acceptance gate | Status |
 | --- | --- | --- | --- |
 | 0 — Design and checkpoint | Canonical README/specification, legacy release tag, and first bounded implementation plan | Design reviewed, legacy state recoverable by name, and clean documentation checkpoint | Verified |
@@ -150,14 +152,15 @@ Directory APIs use bounded page sizes, compact list records, compound indexes, a
 - Secrets are injected through Docker secrets or protected configuration and are redacted from logs.
 - Containers run unprivileged with minimal mounts and capabilities; every application role receives originals read-only, and the web role receives no originals mount.
 - Future uploads, copies, and edits create immutable versions in a separate managed append-only store. No API or job permanently deletes original or versioned content; cleanup is limited to regenerable derivatives and unpublished Aegis-owned temporary artifacts outside original roots.
+- Duplicate detection only labels candidates for human review. Accepting or dismissing a duplicate never deletes, moves, renames, or overwrites either file.
 - Cloud model use is disabled by default, explicitly selected per capability, and recorded in the audit trail.
 
 ## Development and documentation
 
-The web rewrite does not have runnable development commands yet. The approved Phase 1 plan establishes them without pulling later drive, media, document, or AI work forward. Subsequent phases receive their own bounded plans so scale, security, and recovery gates stay visible.
+The Django backend, React shell, role-separated containers, and focused tests are implemented. The remaining Phase 1 work establishes the complete browser/CI gate and tested setup/runbooks. Subsequent phases receive their own bounded plans so scale, security, and recovery gates stay visible.
 
 - [Approved platform design](docs/superpowers/specs/2026-08-31-aegis-platform-rewrite-design.md)
 - [Approved Phase 1 implementation plan](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md)
 - License: [MIT](LICENSE)
 
-When implementation starts, changes must include tests appropriate to their risk, preserve the stable feature IDs above, and update both the feature matrix and current roadmap status in the same pull request.
+Implementation changes include tests appropriate to their risk, preserve the stable feature IDs above, and update the feature matrix and roadmap when a verification gate advances.

@@ -665,7 +665,7 @@ Regression thresholds run in CI where practical and in a repeatable release benc
 
 ### 16.1 Compose services
 
-The production Compose definition includes:
+The target production Compose topology includes the following services. Phase 1 implements the service boundaries and foundation probes; file and media processing arrive in later phases:
 
 - `gateway`: unprivileged Nginx, the only core published HTTP service;
 - `web`: Django ASGI/WSGI application with bounded worker count;
@@ -673,7 +673,7 @@ The production Compose definition includes:
 - `indexer`: read-only catalog reconciliation worker;
 - `media`: read-only media/document processor;
 - `postgres`: pinned PostgreSQL image and durable volume;
-- separate named staging, managed-version, derivative, model, quarantine, and frontier-outbox volumes;
+- separate named staging, derivative, model, quarantine, and frontier-outbox volumes, with an append-only managed-version volume added in Phase 2 before managed publication is enabled;
 - one explicit bind/volume mount per configured root.
 
 Every original-root mount is read-only in gateway, operations, indexer, media, and AI, including slots whose compatibility declaration is `read_write`. The web role receives no original-root mount. Runtime attestation rejects any original root that is writable in any application container.
