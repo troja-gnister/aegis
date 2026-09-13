@@ -1,0 +1,179 @@
+name: CI
+
+"on":
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_LOCKED: "1"
+
+jobs:
+  backend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Enforce immutable action references
+        uses: zgosalvez/github-actions-ensure-sha-pinned-actions@60e3a74c7b74a319e8e53e46bc455205f7173e1a # v5.0.8
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.12.8"
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Check and install frozen Python dependencies
+        run: |
+          uv lock --check
+          uv sync --locked --group dev
+      - name: Ruff and mypy
+        run: |
+          uv run --locked ruff check backend tests scripts
+          uv run --locked mypy backend
+      - name: Django checks, migration drift, and backend tests on disposable PostgreSQL 18
+        run: uv run --locked python scripts/verify.py backend
+      - name: Check whitespace and generated-output drift
+        id: hygiene
+        if: always()
+        run: |
+          git diff --check
+          dirty=$(git status --porcelain --untracked-files=all --ignored=matching -- \
+            uv.lock frontend/package-lock.json ':(glob)backend/aegis_apps/*/migrations/**' \
+            deploy/mounts.manifest.json deploy/mounts.gateway.attestation compose.mounts.generated.yaml)
+          if [[ -n "$dirty" ]]; then
+            printf '%s\n' "Locks, migrations, or generated mount outputs are dirty:" "$dirty" >&2
+            exit 1
+          fi
+
+  frontend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Enforce immutable action references
+        uses: zgosalvez/github-actions-ensure-sha-pinned-actions@60e3a74c7b74a319e8e53e46bc455205f7173e1a # v5.0.8
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.20.0"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frozen npm dependencies
+        run: npm --prefix frontend ci
+      - name: ESLint, TypeScript, Vitest, and production build
+        run: |
+          npm --prefix frontend run lint
+          npm --prefix frontend run typecheck
+          npm --prefix frontend run test
+          npm --prefix frontend run build
+      - name: Check whitespace and generated-output drift
+        id: hygiene
+        if: always()
+        run: |
+          git diff --check
+          dirty=$(git status --porcelain --untracked-files=all --ignored=matching -- \
+            uv.lock frontend/package-lock.json ':(glob)backend/aegis_apps/*/migrations/**' \
+            deploy/mounts.manifest.json deploy/mounts.gateway.attestation compose.mounts.generated.yaml)
+          if [[ -n "$dirty" ]]; then
+            printf '%s\n' "Locks, migrations, or generated mount outputs are dirty:" "$dirty" >&2
+            exit 1
+          fi
+
+  deployment:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Enforce immutable action references
+        uses: zgosalvez/github-actions-ensure-sha-pinned-actions@60e3a74c7b74a319e8e53e46bc455205f7173e1a # v5.0.8
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.12.8"
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Check and install frozen Python dependencies
+        run: |
+          uv lock --check
+          uv sync --locked --group dev
+      - name: Render hermetic Compose and build digest-pinned runtime images
+        run: uv run --locked python scripts/verify.py compose
+      - name: Deployment and real database-role tests on disposable PostgreSQL 18
+        run: uv run --locked python scripts/verify.py deployment
+      - name: Check whitespace and generated-output drift
+        id: hygiene
+        if: always()
+        run: |
+          git diff --check
+          dirty=$(git status --porcelain --untracked-files=all --ignored=matching -- \
+            uv.lock frontend/package-lock.json ':(glob)backend/aegis_apps/*/migrations/**' \
+            deploy/mounts.manifest.json deploy/mounts.gateway.attestation compose.mounts.generated.yaml)
+          if [[ -n "$dirty" ]]; then
+            printf '%s\n' "Locks, migrations, or generated mount outputs are dirty:" "$dirty" >&2
+            exit 1
+          fi
+
+  e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Enforce immutable action references
+        uses: zgosalvez/github-actions-ensure-sha-pinned-actions@60e3a74c7b74a319e8e53e46bc455205f7173e1a # v5.0.8
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.12.8"
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.20.0"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Check and install frozen dependencies
+        run: |
+          uv lock --check
+          uv sync --locked --group dev
+          npm --prefix frontend ci
+      - name: Install locked mobile Chromium and WebKit with OS dependencies
+        working-directory: frontend
+        run: npm exec -- playwright install --with-deps chromium webkit
+      - name: Phase 1 mobile acceptance through the gateway
+        run: bash scripts/test-e2e.sh
+      # Never upload traces, reports, cookies, credential bodies, or HTML error context.
+      - name: Retain only masked synthetic failure screenshots
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: phase1-masked-mobile-failures
+          path: frontend/test-results/**/sanitized.png
+          if-no-files-found: ignore
+          include-hidden-files: false
+          retention-days: 3
+      - name: Check whitespace and generated-output drift
+        id: hygiene
+        if: always()
+        run: |
+          git diff --check
+          dirty=$(git status --porcelain --untracked-files=all --ignored=matching -- \
+            uv.lock frontend/package-lock.json ':(glob)backend/aegis_apps/*/migrations/**' \
+            deploy/mounts.manifest.json deploy/mounts.gateway.attestation compose.mounts.generated.yaml)
+          if [[ -n "$dirty" ]]; then
+            printf '%s\n' "Locks, migrations, or generated mount outputs are dirty:" "$dirty" >&2
+            exit 1
+          fi
