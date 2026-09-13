@@ -344,6 +344,7 @@ def write_manifest(
         raise ConfigError("manifest identity must match invoking identity")
     if any(not re.fullmatch(r"[0-9a-f]{64}", slot.mount_fingerprint) for slot in slots):
         raise ConfigError("mount fingerprint is missing or invalid")
+    ensure_outputs_outside_originals((path,), tuple(slot.source for slot in slots))
     payload = {
         "version": 1,
         "generatedAt": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
@@ -383,6 +384,20 @@ def _ensure_distinct_artifacts(paths: tuple[Path, ...]) -> None:
                 raise ConfigError("generated artifact alias is forbidden")
 
 
+def ensure_outputs_outside_originals(paths: tuple[Path, ...], roots: tuple[Path, ...]) -> None:
+    """Reject destinations before mkdir, replacement, or temporary-file creation."""
+    try:
+        boundaries = {root.resolve(strict=True) for root in roots}
+        boundaries.update(Path(os.path.abspath(root)) for root in roots)
+        for path in paths:
+            candidates = (Path(os.path.abspath(path)), path.resolve(strict=False))
+            if any(candidate == root or root in candidate.parents
+                   for candidate in candidates for root in boundaries):
+                raise ConfigError("generated artifacts must be outside original roots")
+    except OSError as exc:
+        raise ConfigError("original output boundary cannot be checked") from exc
+
+
 def _bind(source: Path | str, target: str, *, read_only: bool) -> dict[str, object]:
     return {
         "type": "bind",
@@ -410,6 +425,9 @@ def render_artifacts(
         (config_path, manifest_path, output_path, gateway_attestation_path)
     )
     specs = parse_config(config_path)
+    ensure_outputs_outside_originals(
+        (output_path, gateway_attestation_path), tuple(spec.source for spec in specs)
+    )
     manifest_raw = _read_bounded_regular(
         manifest_path, MAX_MANIFEST_BYTES, "mount manifest"
     )
@@ -776,7 +794,14 @@ def observe_mount_fingerprints(
         ],
     }
     try:
-        with tempfile.TemporaryDirectory(prefix="aegis-mount-preflight-") as temp:
+        # gettempdir() may itself create a write probe. Select and validate the
+        # configured location before asking tempfile to create anything.
+        temp_parent = Path(tempfile.tempdir or next(
+            (os.environ[name] for name in ("TMPDIR", "TEMP", "TMP") if os.environ.get(name)),
+            "/tmp",
+        ))
+        ensure_outputs_outside_originals((temp_parent,), tuple(slot.source for slot in slots))
+        with tempfile.TemporaryDirectory(prefix="aegis-mount-preflight-", dir=temp_parent) as temp:
             compose_path = Path(temp) / "compose.yaml"
             output_path = Path(temp) / "mountinfo.out"
             compose_raw = yaml.safe_dump(
