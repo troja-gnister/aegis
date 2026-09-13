@@ -72,6 +72,10 @@ uv run --locked aegisctl mounts inspect --source /mnt/storage/photos
 
 Create a private deployment config outside original roots, using [deploy/mounts.example.toml](../../deploy/mounts.example.toml) as the schema. Set the real absolute source, the inspected identity, a stable slot ID, `/srv/aegis/roots/<slot-id>` as its target, and `mode = "read_only"`. Do not copy the example's identity as if it described your storage. Slot IDs are deployment bindings; user-visible names are separate database records. Root sources must not overlap or alias one another.
 
+Phase 1's approved policy requires roots without descendant filesystem mounts. Ordinary subdirectories are allowed, and the selected root may itself be a mountpoint. If `/library/photos` is a separate mount inside `/library`, do not declare `/library`: select `/library/photos` and other non-overlapping roots such as `/library/documents` instead. Declaring both the containing root and its nested mount is not a workaround. Read-only descendants are subject to the same restriction; full nested-mount support is deferred.
+
+Keep host mount topology stable while preflight/render runs. After any mount change, rerun the workflow and recreate affected containers before activating roots. Read-only original permissions must remain intact; a setup error never calls for writable originals or extra container capabilities.
+
 The following commands assume that edited config is `deploy/mounts.local.toml`. Keep it out of version control: it contains host paths. Schema validation does not prove host access or identity:
 
 ```bash
