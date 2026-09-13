@@ -1,0 +1,78 @@
+# Development
+
+Phase 1 provides credential login, authorized root cards, administration, durable job primitives, and the deployment boundary. It does not enumerate files, generate previews, or edit documents. Follow the [roadmap](../README.md#roadmap) for those later slices.
+
+## Prerequisites
+
+Use Python 3.13, uv 0.12.8, Node.js 24 LTS, npm, Git, and Docker with Compose v2 or newer. Docker must be running. Development uses Docker Desktop/macOS; CI targets Ubuntu 24.04. Run host commands as a non-root user. Dependencies and browser binaries require network access during installation; application workers do not get internet access.
+
+Work on `main` for the current implementation workflow. For independent verification, create a separate detached Git worktree at the exact committed revision being tested. Start with an empty Git status, install from its tracked locks, and do not copy `.env`, secrets, or generated mount files from another checkout. Generated inputs must not conceal missing tracked files. Never share a production database with tests.
+
+```bash
+uv sync --locked --group dev
+uv lock --check
+npm --prefix frontend ci
+```
+
+Install the browser versions selected by the committed npm lock from `frontend/`:
+
+```bash
+npm exec -- playwright install chromium webkit
+```
+
+On the Ubuntu CI runner, use `install --with-deps chromium webkit` to install the required OS libraries too. That operation needs host package-install privileges. Do not install a different global Playwright version.
+
+## Canonical verification
+
+From the repository root, run these sequentially:
+
+```bash
+make verify
+make verify-compose
+make test-e2e
+git diff --check
+git status --short
+```
+
+| Command | Checks and resources |
+| --- | --- |
+| `make verify` | Frozen locks, Ruff, strict mypy, Django/migration checks, backend tests on temporary PostgreSQL 18, then npm install, lint, types, Vitest, and production build |
+| `make verify-compose` | Generated test secrets, Compose validation, pinned image builds, and deployment/TLS/actual-database-role tests |
+| `make test-e2e` | A complete disposable gateway/web/worker/PostgreSQL deployment, administrator bootstrap, idempotent Alice/Bob fixtures, mobile Chromium and WebKit |
+
+The verification runner ignores inherited application/database configuration, generates a private password file, and uses a uniquely named PostgreSQL container with memory-only data on an automatically assigned loopback port. It removes that exact container and password file on exit. It never connects to an operator database. Deployment fixtures likewise create their own secrets and resources.
+
+The browser runner reserves the Compose project `aegis-phase1-e2e` and loopback ports `18080` and `55432`. It refuses pre-existing project resources. Do not run it concurrently with itself or use that project name for anything else. Its explicit teardown removes its disposable containers, networks, and four test volumes, including the synthetic database. No test data is retained for recovery. Development/production volumes are not cleanup targets.
+
+Only the two tracked empty directories under [tests/fixtures/roots](../tests/fixtures/roots) are original-root fixtures. Host preflight examines their identities and access; it never enumerates user libraries or writes inside originals. Test-only identities cannot be seeded with production settings. The browser checks include direct/group grant isolation, an ungranted administrator, refresh/logout/history, protected URLs, 320/390-pixel layouts, keyboard activation, and reduced motion.
+
+## Focused checks
+
+Ruff and ESLint are the committed style gates; mypy and TypeScript check types. Run the checks before committing formatting or dependency changes.
+
+```bash
+uv run --locked ruff check backend tests scripts
+uv run --locked mypy backend
+uv run --locked python scripts/verify.py backend
+uv run --locked python scripts/verify.py deployment
+npm --prefix frontend test
+npm --prefix frontend run lint
+npm --prefix frontend run typecheck
+npm --prefix frontend run build
+```
+
+The `backend` and `deployment` runner modes include their own isolated database. A direct `pytest` invocation does not provision PostgreSQL; use it only with a deliberately configured disposable instance, never inherited production credentials. `make test` is the low-level pytest alias, not the self-contained acceptance command.
+
+## Interactive deployment
+
+Use the [deployment runbook](operations/phase-1-deployment.md). It establishes secret ownership, an explicit project name, mount preflight/rendering, migrations, readiness, bootstrap, and grants in the required order. The React production build is served through the gateway on the same origin as Django. `npm run dev` by itself is not an authenticated full-stack deployment.
+
+For local-only HTTP, keep the published port on loopback and use development settings. Do not expose that configuration to other devices or the internet. For a phone on another device, configure trusted HTTPS as described in the runbook.
+
+## Repository hygiene
+
+Never commit `.env`, credential files, generated manifests/attestations, mount overrides, browser artifacts, virtual environments, or build caches. Frozen dependency changes must include the corresponding lockfile. Migrations are reviewed source and must be committed with model changes.
+
+Playwright traces and video are disabled because they can retain credentials and session cookies. Failure screenshots mask inputs; form values are cleared before teardown snapshots. CI retains only masked synthetic screenshots for three days, not raw traces, reports, or error-context files. Service failure diagnostics are bounded and strip free-text messages. Never attach raw container logs or browser storage to an issue.
+
+No cleanup command may target originals, a broad workspace path, or an existing application database volume. In particular, do not use a volume-deleting Compose command for a real deployment. See [safe shutdown](operations/phase-1-deployment.md#safe-shutdown).
