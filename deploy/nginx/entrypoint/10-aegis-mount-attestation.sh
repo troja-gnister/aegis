@@ -152,6 +152,7 @@ while IFS='|' read -r slot_id target host_device host_inode declared_mode finger
     record="$(awk -v target="$target" '
         length($0) > 16384 { exit 2 }
         NR > 8192 { exit 2 }
+        index($5, target "/") == 1 { exit 2 }
         $5 == target {
             count++
             separator = 0

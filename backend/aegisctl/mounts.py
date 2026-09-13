@@ -21,6 +21,8 @@ from typing import TYPE_CHECKING, Literal, cast
 
 import yaml
 
+from aegisctl.host_mounts import HostTopologyError, darwin_mountpoints, darwin_path_forms
+
 if TYPE_CHECKING:
     from aegis_apps.roots.manifest import MountManifest
 
@@ -224,6 +226,7 @@ def preflight_slots(slots: list[SlotSpec] | tuple[SlotSpec, ...]) -> tuple[Valid
     seen_stat: set[tuple[int, int]] = set()
     seen_ids: set[str] = set()
     mount_records = _host_mountinfo()
+    mountpoints = _host_mountpoints(mount_records)
     physical_roots: list[tuple[tuple[str, str], PurePosixPath]] = []
     for spec in sorted(slots, key=lambda item: item.slot_id):
         # Validate callers constructing SlotSpec directly as strictly as parsed config.
@@ -249,17 +252,20 @@ def preflight_slots(slots: list[SlotSpec] | tuple[SlotSpec, ...]) -> tuple[Valid
         if not os.access(resolved, os.R_OK | os.X_OK, effective_ids=True):
             raise ConfigError(f"mount slot {checked.slot_id}: source is inaccessible")
         identity_pair = (info.st_dev, info.st_ino)
+        source_forms = _host_path_forms(resolved)
+        _reject_nested_mounts(source_forms, mountpoints)
         if resolved in seen_paths or identity_pair in seen_stat:
             raise ConfigError(f"mount slot {checked.slot_id}: duplicate source")
         for existing in seen_paths:
-            if resolved in existing.parents or existing in resolved.parents:
+            if any(candidate == existing or candidate in existing.parents
+                   or existing in candidate.parents for candidate in source_forms):
                 raise ConfigError(f"mount slot {checked.slot_id}: source overlap")
         if mount_records is not None:
             physical = _physical_location(resolved, mount_records)
             if any(_physical_overlap(physical, existing) for existing in physical_roots):
                 raise ConfigError(f"mount slot {checked.slot_id}: physical source overlap")
             physical_roots.append(physical)
-        seen_paths.add(resolved)
+        seen_paths.update(source_forms)
         seen_stat.add(identity_pair)
         observed_identity = f"local:{info.st_dev}:{info.st_ino}"
         if checked.expected_identity.startswith("local:") and not secrets.compare_digest(
@@ -400,10 +406,16 @@ def ensure_outputs_outside_originals(paths: tuple[Path, ...], roots: tuple[Path,
         boundaries = {root.resolve(strict=True) for root in roots}
         boundaries.update(Path(os.path.abspath(root)) for root in roots)
         records = _host_mountinfo()
+        mountpoints = _host_mountpoints(records)
+        for root in roots:
+            forms = _host_path_forms(root.resolve(strict=True))
+            _reject_nested_mounts(forms, mountpoints)
+            boundaries.update(forms)
         physical_roots = ([_physical_location(root, records) for root in boundaries]
                           if records is not None else [])
         for path in paths:
-            candidates = (Path(os.path.abspath(path)), path.resolve(strict=False))
+            candidates = {Path(os.path.abspath(path)), path.resolve(strict=False)}
+            candidates.update(_host_path_forms(path))
             if any(candidate == root or root in candidate.parents
                    for candidate in candidates for root in boundaries):
                 raise ConfigError("generated artifacts must be outside original roots")
@@ -698,15 +710,40 @@ def parse_mountinfo(raw: bytes) -> Mapping[str, MountInfoRecord]:
 
 
 def _host_mountinfo() -> tuple[MountInfoRecord, ...] | None:
-    # macOS host device identities differ from the Linux Docker VM. The
-    # observer supplies the physical-root check on that platform.
-    if sys.platform != "linux":
+    if sys.platform == "darwin":
         return None
+    if sys.platform != "linux":
+        raise ConfigError("host mount topology cannot be checked")
     try:
         with Path("/proc/self/mountinfo").open("rb") as handle:
             return _parse_mountinfo_records(handle.read(MAX_MOUNTINFO_BYTES + 1))
     except (OSError, MountAttestationError) as exc:
         raise ConfigError("host mount identity cannot be checked") from exc
+
+
+def _host_mountpoints(records: tuple[MountInfoRecord, ...] | None) -> tuple[Path, ...]:
+    if records is not None:
+        return tuple(Path(record.mountpoint) for record in records)
+    try:
+        return darwin_mountpoints()
+    except HostTopologyError as exc:
+        raise ConfigError("host mount topology cannot be checked") from exc
+
+
+def _host_path_forms(path: Path) -> frozenset[Path]:
+    if sys.platform != "darwin":
+        return frozenset({path.resolve(strict=False)})
+    try:
+        return darwin_path_forms(path)
+    except HostTopologyError as exc:
+        raise ConfigError("host mount topology cannot be checked") from exc
+
+
+def _reject_nested_mounts(roots: frozenset[Path], mountpoints: tuple[Path, ...]) -> None:
+    if any(root in mountpoint.parents for root in roots for mountpoint in mountpoints):
+        raise ConfigError(
+            "original root contains a nested mount; declare non-overlapping leaf roots"
+        )
 
 
 def _physical_location(
@@ -759,6 +796,7 @@ def attest_mounts(
         record = records.get(slot.container_path.as_posix())
         if (
             record is None
+            or any(slot.container_path in PurePosixPath(target).parents for target in records)
             or record.effective_mode != "read_only"
             or not _has_physical_root(record)
             or not secrets.compare_digest(
@@ -858,7 +896,9 @@ def observe_mount_fingerprints(
         raise ConfigError("mount slot observation requires slots")
     project_name = f"aegis-preflight-{secrets.token_hex(8)}"
     targets = [slot.container_path for slot in slots]
-    target_expression = " || ".join(f'$5 == "{target}"' for target in targets)
+    target_expression = " || ".join(
+        f'($5 == "{target}" || index($5, "{target}/") == 1)' for target in targets
+    )
     observer_script = (
         "awk '"
         "length($0) > 16384 { exit 65 } "
@@ -955,6 +995,9 @@ def observe_mount_fingerprints(
     fingerprints: set[str] = set()
     physical_roots: list[tuple[tuple[str, str], PurePosixPath]] = []
     for slot in slots:
+        _reject_nested_mounts(
+            frozenset({Path(slot.container_path)}), tuple(Path(target) for target in records),
+        )
         record = records.get(slot.container_path)
         if (record is None or record.effective_mode != "read_only"
                 or not _has_physical_root(record)):
