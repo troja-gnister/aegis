@@ -1,17 +1,20 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import subprocess
 import sys
 from dataclasses import replace
-from pathlib import Path
-from typing import Any
+from pathlib import Path, PurePosixPath
+from typing import Any, Literal
 
 import pytest
+from aegis_apps.roots.manifest import ManifestSlot, MountManifest
 from aegisctl.mounts import (
     ConfigError,
     MountAttestationError,
     SlotSpec,
+    attest_mounts,
     local_identity,
     observe_mount_fingerprints,
     parse_mountinfo,
@@ -130,7 +133,9 @@ def test_output_guard_rejects_original_through_physical_bind_parent(
 
 @pytest.mark.parametrize("ambiguous_target", ["unrelated", "source", "ancestor"])
 def test_host_lookup_only_rejects_ambiguity_on_the_selected_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ambiguous_target: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ambiguous_target: str,
 ) -> None:
     source = tmp_path / "source"
     source.mkdir()
@@ -162,3 +167,92 @@ def test_host_lookup_only_rejects_ambiguity_on_the_selected_path(
     # Runtime and constrained observer parsing remain globally strict.
     with pytest.raises(MountAttestationError, match="ambiguous mountpoint"):
         parse_mountinfo(records)
+
+
+@pytest.mark.parametrize("kernel_root", ["/..", "relative-root"])
+@pytest.mark.parametrize("opaque_target", ["unrelated", "source", "ancestor"])
+def test_host_preserves_opaque_mount_roots_and_checks_only_relevant_ancestry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kernel_root: str,
+    opaque_target: str,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    target = {
+        "unrelated": "/sys/fs/cgroup/freezer",
+        "source": str(source.resolve()),
+        "ancestor": str(source.resolve().parent),
+    }[opaque_target]
+    # cgroup_namespaces(7) documents /.. as an inherited cgroup mount root.
+    records = (
+        "1 0 8:1 / / rw - ext4 /dev/sda rw\n"
+        f"2 1 0:32 {kernel_root} {target} ro - cgroup cgroup rw\n"
+    ).encode()
+    real_open = Path.open
+
+    def fixture_mountinfo(path: Path, *args: Any, **kwargs: Any) -> Any:
+        if str(path) == "/proc/self/mountinfo":
+            return io.BytesIO(records)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(Path, "open", fixture_mountinfo)
+    if opaque_target == "unrelated":
+        validated = preflight_slots([_slot(source, "photos")])
+        assert validated[0].source == source.resolve()
+        # Runtime parsing must likewise preserve unrelated kernel records.
+        assert target in parse_mountinfo(records)
+    else:
+        with pytest.raises(ConfigError, match="host mount identity"):
+            preflight_slots([_slot(source, "photos")])
+
+
+@pytest.mark.parametrize("role", ["operations", "indexer", "media"])
+def test_runtime_rejects_opaque_selected_root_even_with_matching_fingerprint(
+    tmp_path: Path,
+    role: Literal["operations", "indexer", "media"],
+) -> None:
+    source = tmp_path.resolve() / "source"
+    source.mkdir()
+    raw = f"2 1 0:32 /.. {source} ro - cgroup cgroup rw\n".encode()
+    fingerprint = hashlib.sha256(
+        b"aegis.mount-fingerprint.v1\0" + b"0:32\0/..\0cgroup\0cgroup\0"
+    ).hexdigest()
+    manifest = MountManifest(
+        "a" * 64,
+        {
+            "photos": ManifestSlot(
+                "photos",
+                PurePosixPath(source),
+                "read_only",
+                "local:1:2",
+                1,
+                2,
+                fingerprint,
+            )
+        },
+    )
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_bytes(raw)
+    with pytest.raises(MountAttestationError, match="photos"):
+        attest_mounts(manifest, role, mountinfo_path=mountinfo)
+
+
+def test_observer_rejects_opaque_selected_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    slots = preflight_slots([_slot(source, "photos")])
+
+    def fixture_observer(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        if "run" in command:
+            kwargs["stdout"].write(b"2 1 0:32 /.. /srv/aegis/roots/photos ro - cgroup cgroup rw\n")
+            kwargs["stdout"].flush()
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr("aegisctl.mounts.subprocess.run", fixture_observer)
+    with pytest.raises(ConfigError, match="observation failed"):
+        observe_mount_fingerprints(slots)

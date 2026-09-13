@@ -663,8 +663,6 @@ def _parse_mountinfo_records(raw: bytes) -> tuple[MountInfoRecord, ...]:
             raise MountAttestationError("mountinfo is malformed")
         decoded_root = _decode_mountinfo_field(encoded_root)
         filesystem_root = PurePosixPath(decoded_root)
-        if not filesystem_root.is_absolute() or ".." in filesystem_root.parts:
-            raise MountAttestationError("mountinfo is malformed")
         _decode_mountinfo_field(filesystem_type)
         _decode_mountinfo_field(mount_source)
         per_mount = _option_mode(fields[5])
@@ -720,13 +718,20 @@ def _physical_location(
     # Host mount tables can contain legitimate stacks at unrelated paths. Keep
     # those records; never guess stack visibility from file order on our path.
     mountpoints = [record.mountpoint for record in candidates]
-    if not candidates or len(mountpoints) != len(set(mountpoints)):
+    if (not candidates or len(mountpoints) != len(set(mountpoints))
+            or any(not _has_physical_root(record) for record in candidates)):
         raise ConfigError("host mount identity cannot be checked")
     record = max(candidates, key=lambda item: len(PurePosixPath(item.mountpoint).parts))
     return (
         record.filesystem_identity,
         record.filesystem_root / target.relative_to(record.mountpoint),
     )
+
+
+def _has_physical_root(record: MountInfoRecord) -> bool:
+    # Kernel fields may be opaque (e.g. inherited cgroup roots reported as /..).
+    # Preserve them when parsing; require usable ancestry only for our paths.
+    return record.filesystem_root.is_absolute() and ".." not in record.filesystem_root.parts
 
 
 def _physical_overlap(
@@ -755,6 +760,7 @@ def attest_mounts(
         if (
             record is None
             or record.effective_mode != "read_only"
+            or not _has_physical_root(record)
             or not secrets.compare_digest(
                 record.mount_fingerprint, slot.mount_fingerprint
             )
@@ -950,7 +956,8 @@ def observe_mount_fingerprints(
     physical_roots: list[tuple[tuple[str, str], PurePosixPath]] = []
     for slot in slots:
         record = records.get(slot.container_path)
-        if record is None or record.effective_mode != "read_only":
+        if (record is None or record.effective_mode != "read_only"
+                or not _has_physical_root(record)):
             raise ConfigError(f"mount slot {slot.slot_id}: container observation failed")
         if record.mount_fingerprint in fingerprints:
             raise ConfigError(f"mount slot {slot.slot_id}: inconsistent mount fingerprint")
