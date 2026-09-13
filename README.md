@@ -112,7 +112,7 @@ Every feature pull request must update its row. Implemented and Verified rows li
 
 The current focus is **[Phase 1 — Secure foundation](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md)**. Implementation is in progress. A phase is complete only when its acceptance gate passes; landing some listed features is not enough.
 
-As of September 13, 2026, Tasks 1–11 are complete. Task 12's authenticated mobile shell is implemented and passes its frontend checks, with final review underway. Tasks 13–14 remain: production-stack mobile browser/CI coverage, then operator runbooks and the final evidence report. File indexing, large-folder browsing, media viewers, and document editing belong to later phases.
+As of September 13, 2026, Tasks 1–12 are complete, including the reviewed authenticated mobile shell. Task 13's eight Chromium/WebKit journeys and 525 backend tests pass; reproducible verification and CI are being finalized. Task 14 covers operator runbooks and clean-install acceptance evidence. File indexing, large-folder browsing, media viewers, and document editing belong to later phases.
 
 | Phase | Deliverable | Acceptance gate | Status |
 | --- | --- | --- | --- |

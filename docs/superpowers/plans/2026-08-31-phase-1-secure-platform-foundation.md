@@ -44,8 +44,8 @@ Updated September 13, 2026. This table is the current task ledger; the step list
 | --- | --- | --- |
 | 1–10 | Complete | Accepted backend, authentication, mount, authorization, queue, and observability checkpoints through `92b4895` |
 | 11 | Complete | Role isolation, immutable database boundaries, existing-cluster reconciliation, and independent review through `31d7cc6` |
-| 12 | Implemented; review underway | Mobile session/root shell through `562d56f`; frozen install, 28 frontend tests, lint/types/build and asset hygiene checks pass |
-| 13 | In progress | Test-only fixture command, hermetic Compose, mobile Chromium/WebKit acceptance, and pinned CI |
+| 12 | Complete | Mobile session/root shell and independently reviewed transition fencing through `6fd54cb`; 38 frontend tests, lint/types/build, and real mobile accessibility checks pass |
+| 13 | In progress | Eight Chromium/WebKit journeys and 525 backend tests pass; isolated verification and pinned CI being finalized |
 | 14 | Pending | Tested development/operation runbooks, clean verification, acceptance evidence, and final roadmap status |
 
 The complete Phase 1 gate remains open until Tasks 13–14 pass. Phase 2+ features, including file enumeration and document viewers/editors, remain planned.
