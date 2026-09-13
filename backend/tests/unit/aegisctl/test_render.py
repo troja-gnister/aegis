@@ -224,9 +224,7 @@ def test_mountinfo_decodes_only_defined_escapes_and_computes_effective_mode() ->
     assert records["/srv/aegis/roots/uploads"].effective_mode == "read_write"
 
     with pytest.raises(MountAttestationError):
-        parse_mountinfo(
-            b"36 25 0:32 / /srv/aegis/roots/photo\\141 ro - ext4 /dev/sda rw\n"
-        )
+        parse_mountinfo(b"36 25 0:32 / /srv/aegis/roots/photo\\141 ro - ext4 /dev/sda rw\n")
 
 
 def test_mountinfo_rejects_duplicate_exact_target_and_beyond_bound_input() -> None:
@@ -272,10 +270,24 @@ def test_backend_attestation_checks_identity_exact_mountpoint_and_role_mode(
     monkeypatch.setattr(os, "stat", container_stat)
     real_open, real_access = os.open, os.access
     roots = {"/srv/aegis/roots/photos": readonly, "/srv/aegis/roots/uploads": writable}
-    monkeypatch.setattr(os, "open", lambda path, *args, **kwargs:
-                        real_open(roots.get(str(path), path), *args, **kwargs))
-    monkeypatch.setattr(os, "access", lambda path, *args, **kwargs:
-                        real_access(roots.get(str(path), path), *args, **kwargs))
+
+    def mapped_path(path: os.PathLike[str] | str) -> os.PathLike[str] | str:
+        return roots.get(str(path), path)
+
+    monkeypatch.setattr(
+        os,
+        "open",
+        lambda path, *args, **kwargs: real_open(
+            mapped_path(path), *args, **kwargs
+        ),
+    )
+    monkeypatch.setattr(
+        os,
+        "access",
+        lambda path, *args, **kwargs: real_access(
+            mapped_path(path), *args, **kwargs
+        ),
+    )
 
     roles: tuple[Literal["operations", "indexer", "media"], ...] = (
         "operations",
