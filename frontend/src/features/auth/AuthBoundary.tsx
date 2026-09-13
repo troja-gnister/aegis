@@ -7,7 +7,7 @@ import {
 import {Navigate} from "react-router";
 import {fetchSession} from "./api";
 import {activateCacheNamespace, purgePrivateBrowserState} from "./cache";
-import {AuthSessionContext, SESSION_QUERY_KEY} from "./session";
+import {AuthSessionContext, SESSION_QUERY_KEY, useSessionAccess} from "./session";
 
 function PrivateContentSkeleton() {
   return (
@@ -19,12 +19,14 @@ function PrivateContentSkeleton() {
 
 export function AuthBoundary({children}: PropsWithChildren) {
   const queryClient = useQueryClient();
+  const sessionAccess = useSessionAccess();
   const sessionQuery = useQuery({
     queryKey: SESSION_QUERY_KEY,
     queryFn: fetchSession,
     retry: false,
     staleTime: 0,
     refetchOnMount: "always",
+    enabled: sessionAccess === "open",
   });
   const [readyNamespace, setReadyNamespace] = useState<string | null>(null);
   const [anonymous, setAnonymous] = useState(false);
@@ -77,7 +79,9 @@ export function AuthBoundary({children}: PropsWithChildren) {
     return () => window.removeEventListener("pageshow", revalidate);
   }, [queryClient, sessionQuery]);
 
-  if (anonymous) return <Navigate to="/login" replace state={{reason: "session"}} />;
+  if (anonymous || sessionAccess !== "open") {
+    return <Navigate to="/login" replace state={{reason: "session"}} />;
+  }
   if (
     sessionQuery.isPending ||
     !sessionQuery.isFetchedAfterMount ||

@@ -1,7 +1,7 @@
 import {QueryClient, QueryClientProvider} from "@tanstack/react-query";
 import {act, fireEvent, render, screen, waitFor} from "@testing-library/react";
 import {http, HttpResponse} from "msw";
-import {MemoryRouter, Route, Routes, useLocation} from "react-router";
+import {MemoryRouter, Route, Routes, useLocation, useNavigate} from "react-router";
 import {afterEach, describe, expect, it} from "vitest";
 import {server} from "../../test/server";
 import {AuthBoundary} from "./AuthBoundary";
@@ -17,7 +17,11 @@ const SESSION = {
 const clients = new Set<QueryClient>();
 
 function LocationProbe() {
-  return <output aria-label="Current route">{useLocation().pathname}</output>;
+  const navigate = useNavigate();
+  return <>
+    <output aria-label="Current route">{useLocation().pathname}</output>
+    <button onClick={() => navigate(-1)}>Back</button>
+  </>;
 }
 
 function renderBoundary({withLogout = false, cachedSession = false}: {
@@ -31,7 +35,7 @@ function renderBoundary({withLogout = false, cachedSession = false}: {
   clients.add(queryClient);
   render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter initialEntries={["/roots"]}>
+      <MemoryRouter initialEntries={["/roots?older", "/roots"]}>
         <LocationProbe />
         <Routes>
           <Route path="/login" element={<h1>Sign in</h1>} />
@@ -120,6 +124,11 @@ describe("AuthBoundary", () => {
     try {
       expect(screen.queryByText("Private family archive")).not.toBeInTheDocument();
       expect(client.getQueryData(["private", "root"])).toBeUndefined();
+      expect(screen.getByRole("heading", {name: "Sign in"})).toBeVisible();
+      // The server session remains alive during this pending request. History
+      // must not reopen private content by verifying that same session again.
+      fireEvent.click(screen.getByRole("button", {name: "Back"}));
+      expect(screen.queryByText("Private family archive")).not.toBeInTheDocument();
       expect(screen.getByRole("heading", {name: "Sign in"})).toBeVisible();
     } finally {
       release();

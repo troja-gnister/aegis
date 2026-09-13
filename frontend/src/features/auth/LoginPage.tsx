@@ -1,10 +1,10 @@
 import {useQueryClient} from "@tanstack/react-query";
 import {useState, type FormEvent} from "react";
-import {useLocation, useNavigate} from "react-router";
+import {useNavigate} from "react-router";
 import {ApiProblem} from "../../api/problem";
 import {fetchSession, loginWithCredentials} from "./api";
 import {activateCacheNamespace, purgePrivateBrowserState} from "./cache";
-import {SESSION_QUERY_KEY} from "./session";
+import {openSessionAfterLogin, SESSION_QUERY_KEY, useSessionAccess} from "./session";
 
 function loginErrorMessage(error: unknown): string {
   if (error instanceof ApiProblem && error.status === 429) {
@@ -22,8 +22,8 @@ function loginErrorMessage(error: unknown): string {
 export function LoginPage() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
-  const location = useLocation();
-  const logoutPending = location.state?.logoutPending === true;
+  const sessionAccess = useSessionAccess();
+  const logoutPending = sessionAccess === "signing_out";
   const [submitting, setSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -41,6 +41,7 @@ export function LoginPage() {
       const session = await fetchSession();
       await activateCacheNamespace(queryClient, session.cacheNamespace);
       queryClient.setQueryData(SESSION_QUERY_KEY, session);
+      openSessionAfterLogin();
       navigate("/roots", {replace: true});
     } catch (error) {
       setErrorMessage(loginErrorMessage(error));
@@ -56,7 +57,7 @@ export function LoginPage() {
         <h1 id="login-title">Sign in</h1>
         <p>Access the roots assigned to your account.</p>
         {logoutPending ? <p role="status">Signing out…</p> : null}
-        {location.state?.logoutUnconfirmed ? (
+        {sessionAccess === "unconfirmed" ? (
           <p role="alert">Local data was cleared. Server sign-out could not be confirmed.</p>
         ) : null}
         <form onSubmit={submit} noValidate>

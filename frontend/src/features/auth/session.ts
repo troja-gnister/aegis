@@ -1,7 +1,43 @@
-import {createContext, useContext} from "react";
+import {createContext, useContext, useSyncExternalStore} from "react";
 import type {SessionResponse} from "./types";
 
 export const SESSION_QUERY_KEY = ["auth", "session"] as const;
+
+type SessionAccess = "open" | "signing_out" | "closed" | "unconfirmed";
+let sessionAccess: SessionAccess = "open";
+let accessGeneration = 0;
+const accessListeners = new Set<() => void>();
+
+function setAccess(value: SessionAccess) {
+  sessionAccess = value;
+  for (const listener of accessListeners) listener();
+}
+
+export function beginSignOut(): number {
+  accessGeneration += 1;
+  setAccess("signing_out");
+  return accessGeneration;
+}
+
+export function completeSignOut(generation: number, confirmed: boolean): void {
+  if (generation !== accessGeneration) return;
+  setAccess(confirmed ? "closed" : "unconfirmed");
+}
+
+export function openSessionAfterLogin(): void {
+  accessGeneration += 1;
+  setAccess("open");
+}
+
+export function useSessionAccess(): SessionAccess {
+  return useSyncExternalStore(
+    (listener) => {
+      accessListeners.add(listener);
+      return () => accessListeners.delete(listener);
+    },
+    () => sessionAccess,
+  );
+}
 
 export type AuthSessionContextValue = {
   session: SessionResponse;

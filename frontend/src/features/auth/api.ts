@@ -84,6 +84,9 @@ export async function loginWithCredentials(
 }
 
 export async function logoutSession(): Promise<void> {
-  await csrfMutation<void>("/api/v1/auth/logout");
-  clearCsrfToken();
+  try {
+    await csrfMutation<void>("/api/v1/auth/logout");
+  } finally {
+    clearCsrfToken();
+  }
 }
