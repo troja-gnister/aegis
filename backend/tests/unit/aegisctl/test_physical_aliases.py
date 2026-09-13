@@ -10,9 +10,11 @@ from typing import Any
 import pytest
 from aegisctl.mounts import (
     ConfigError,
+    MountAttestationError,
     SlotSpec,
     local_identity,
     observe_mount_fingerprints,
+    parse_mountinfo,
     preflight_slots,
     write_manifest,
 )
@@ -124,3 +126,39 @@ def test_output_guard_rejects_original_through_physical_bind_parent(
     with pytest.raises(ConfigError, match="original"):
         write_manifest(destination, slots, uid=os.geteuid(), gid=os.getegid())
     assert destination.read_bytes() == b"synthetic original"
+
+
+@pytest.mark.parametrize("ambiguous_target", ["unrelated", "source", "ancestor"])
+def test_host_lookup_only_rejects_ambiguity_on_the_selected_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ambiguous_target: str,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    target = {
+        "unrelated": "/unrelated/stacked-mount",
+        "source": str(source.resolve()),
+        "ancestor": str(source.resolve().parent),
+    }[ambiguous_target]
+    records = (
+        "1 0 0:1 / / rw - tmpfs tmpfs rw\n"
+        f"2 1 8:1 /first {target} ro - ext4 /dev/sda rw\n"
+        f"3 1 8:2 /second {target} ro - ext4 /dev/sdb rw\n"
+    ).encode()
+    real_open = Path.open
+
+    def fixture_mountinfo(path: Path, *args: Any, **kwargs: Any) -> Any:
+        if str(path) == "/proc/self/mountinfo":
+            return io.BytesIO(records)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(Path, "open", fixture_mountinfo)
+    if ambiguous_target == "unrelated":
+        validated = preflight_slots([_slot(source, "photos")])
+        assert validated[0].source == source.resolve()
+    else:
+        with pytest.raises(ConfigError, match="host mount identity"):
+            preflight_slots([_slot(source, "photos")])
+    # Runtime and constrained observer parsing remain globally strict.
+    with pytest.raises(MountAttestationError, match="ambiguous mountpoint"):
+        parse_mountinfo(records)

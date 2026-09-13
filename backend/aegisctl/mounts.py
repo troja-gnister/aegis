@@ -631,14 +631,14 @@ def _option_mode(options: str) -> Mode:
     return "read_only" if has_ro else "read_write"
 
 
-def parse_mountinfo(raw: bytes) -> Mapping[str, MountInfoRecord]:
+def _parse_mountinfo_records(raw: bytes) -> tuple[MountInfoRecord, ...]:
     if len(raw) > MAX_MOUNTINFO_BYTES:
         raise MountAttestationError("mountinfo exceeds size limit")
     try:
         text = raw.decode("ascii")
     except UnicodeDecodeError as exc:
         raise MountAttestationError("mountinfo is malformed") from exc
-    records: dict[str, MountInfoRecord] = {}
+    records: list[MountInfoRecord] = []
     lines = text.splitlines()
     if len(lines) > 8192:
         raise MountAttestationError("mountinfo exceeds record limit")
@@ -676,41 +676,51 @@ def parse_mountinfo(raw: bytes) -> Mapping[str, MountInfoRecord]:
             effective = "read_write"
         else:
             raise MountAttestationError("mountinfo contains ambiguous mount flags")
-        if mountpoint in records:
-            raise MountAttestationError("mountinfo contains an ambiguous mountpoint")
         fingerprint_payload = b"aegis.mount-fingerprint.v1\0" + b"".join(
             value.encode("ascii") + b"\0"
             for value in (major_minor, encoded_root, filesystem_type, mount_source)
         )
-        records[mountpoint] = MountInfoRecord(
+        records.append(MountInfoRecord(
             mountpoint,
             effective,
             hashlib.sha256(fingerprint_payload).hexdigest(),
             (major_minor, filesystem_type),
             filesystem_root,
-        )
+        ))
+    return tuple(records)
+
+
+def parse_mountinfo(raw: bytes) -> Mapping[str, MountInfoRecord]:
+    records: dict[str, MountInfoRecord] = {}
+    for record in _parse_mountinfo_records(raw):
+        if record.mountpoint in records:
+            raise MountAttestationError("mountinfo contains an ambiguous mountpoint")
+        records[record.mountpoint] = record
     return MappingProxyType(records)
 
 
-def _host_mountinfo() -> Mapping[str, MountInfoRecord] | None:
+def _host_mountinfo() -> tuple[MountInfoRecord, ...] | None:
     # macOS host device identities differ from the Linux Docker VM. The
     # observer supplies the physical-root check on that platform.
     if sys.platform != "linux":
         return None
     try:
         with Path("/proc/self/mountinfo").open("rb") as handle:
-            return parse_mountinfo(handle.read(MAX_MOUNTINFO_BYTES + 1))
+            return _parse_mountinfo_records(handle.read(MAX_MOUNTINFO_BYTES + 1))
     except (OSError, MountAttestationError) as exc:
         raise ConfigError("host mount identity cannot be checked") from exc
 
 
 def _physical_location(
-    path: Path, records: Mapping[str, MountInfoRecord],
+    path: Path, records: tuple[MountInfoRecord, ...],
 ) -> tuple[tuple[str, str], PurePosixPath]:
     target = PurePosixPath(path)
-    candidates = [record for record in records.values()
+    candidates = [record for record in records
                   if target.is_relative_to(PurePosixPath(record.mountpoint))]
-    if not candidates:
+    # Host mount tables can contain legitimate stacks at unrelated paths. Keep
+    # those records; never guess stack visibility from file order on our path.
+    mountpoints = [record.mountpoint for record in candidates]
+    if not candidates or len(mountpoints) != len(set(mountpoints)):
         raise ConfigError("host mount identity cannot be checked")
     record = max(candidates, key=lambda item: len(PurePosixPath(item.mountpoint).parts))
     return (
