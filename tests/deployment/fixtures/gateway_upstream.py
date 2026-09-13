@@ -7,6 +7,7 @@ class EchoHandler(BaseHTTPRequestHandler):
         body = json.dumps(
             {
                 "method": self.command,
+                "host": self.headers.get("Host"),
                 "path": self.path,
                 "request_id": self.headers.get("X-Request-ID"),
                 "forwarded_for": self.headers.get("X-Forwarded-For"),

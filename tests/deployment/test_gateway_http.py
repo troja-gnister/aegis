@@ -217,6 +217,15 @@ def gateway(tmp_path_factory: pytest.TempPathFactory) -> Iterator[GatewayHarness
         remove_network(network_name)
 
 
+@pytest.mark.parametrize("path", ("/api/v1/auth/login", "/api/request-id", "/admin/login/"))
+def test_gateway_preserves_nonstandard_origin_port_for_csrf(
+    gateway: GatewayHarness, path: str,
+) -> None:
+    response = gateway.request(path, headers={"Host": "localhost:18080"})
+    assert response.status == 200
+    assert response.json()["host"] == "localhost:18080"
+
+
 def assert_security_headers(response: HttpResponse) -> None:
     for name, expected in SECURITY_HEADERS.items():
         assert response.headers[name] == expected
