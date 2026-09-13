@@ -7,7 +7,7 @@ type RootCardProps = {
 
 function hostCapability(mode: RootShell["mode"]): string {
   return mode === "read_write"
-    ? "Host capability: managed writes declared"
+    ? "Legacy host declaration: read/write"
     : "Host capability: read only";
 }
 

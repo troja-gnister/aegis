@@ -1,6 +1,6 @@
 import {useQueryClient} from "@tanstack/react-query";
 import {useState, type FormEvent} from "react";
-import {useNavigate} from "react-router";
+import {useLocation, useNavigate} from "react-router";
 import {ApiProblem} from "../../api/problem";
 import {fetchSession, loginWithCredentials} from "./api";
 import {activateCacheNamespace, purgePrivateBrowserState} from "./cache";
@@ -22,12 +22,14 @@ function loginErrorMessage(error: unknown): string {
 export function LoginPage() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  const location = useLocation();
+  const logoutPending = location.state?.logoutPending === true;
   const [submitting, setSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (submitting) return;
+    if (submitting || logoutPending) return;
     setSubmitting(true);
     setErrorMessage(null);
     const data = new FormData(event.currentTarget);
@@ -53,6 +55,10 @@ export function LoginPage() {
         <p className="login-card__brand">Aegis</p>
         <h1 id="login-title">Sign in</h1>
         <p>Access the roots assigned to your account.</p>
+        {logoutPending ? <p role="status">Signing out…</p> : null}
+        {location.state?.logoutUnconfirmed ? (
+          <p role="alert">Local data was cleared. Server sign-out could not be confirmed.</p>
+        ) : null}
         <form onSubmit={submit} noValidate>
           <label htmlFor="username">Username</label>
           <input
@@ -62,7 +68,7 @@ export function LoginPage() {
             autoComplete="username"
             required
             maxLength={150}
-            disabled={submitting}
+            disabled={submitting || logoutPending}
           />
           <label htmlFor="password">Password</label>
           <input
@@ -72,10 +78,10 @@ export function LoginPage() {
             autoComplete="current-password"
             required
             maxLength={512}
-            disabled={submitting}
+            disabled={submitting || logoutPending}
           />
           {errorMessage ? <p role="alert">{errorMessage}</p> : null}
-          <button type="submit" disabled={submitting}>
+          <button type="submit" disabled={submitting || logoutPending}>
             {submitting ? "Signing in…" : "Sign in"}
           </button>
         </form>

@@ -8,20 +8,18 @@ export function LogoutButton() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const [pending, setPending] = useState(false);
-  const [failed, setFailed] = useState(false);
 
   const logout = async () => {
     if (pending) return;
     setPending(true);
-    setFailed(false);
-    try {
-      await logoutSession();
-      await purgePrivateBrowserState(queryClient);
-      navigate("/login", {replace: true});
-    } catch {
-      setFailed(true);
-      setPending(false);
-    }
+    // Start with this session's CSRF authority, then immediately remove private
+    // content. A server error may arrive after revocation has already happened.
+    const request = logoutSession().then(() => true, () => false);
+    const cleanup = purgePrivateBrowserState(queryClient);
+    navigate("/login", {replace: true, state: {logoutPending: true}});
+    const confirmed = await request;
+    navigate("/login", {replace: true, state: {logoutUnconfirmed: !confirmed}});
+    await cleanup;
   };
 
   return (
@@ -29,7 +27,6 @@ export function LogoutButton() {
       <button type="button" onClick={logout} disabled={pending}>
         {pending ? "Signing out…" : "Sign out"}
       </button>
-      {failed ? <p role="alert">Sign out could not be completed.</p> : null}
     </div>
   );
 }

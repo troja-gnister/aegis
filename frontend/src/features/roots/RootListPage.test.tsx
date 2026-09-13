@@ -114,7 +114,7 @@ describe("RootListPage", () => {
     fireEvent.click(rootButton);
 
     expect(screen.getByText("File browsing arrives in Phase 2.")).toBeVisible();
-    expect(screen.getByText("Host capability: managed writes declared")).toBeVisible();
+    expect(screen.getByText("Legacy host declaration: read/write")).toBeVisible();
     expect(getComputedStyle(rootButton).minBlockSize).toBe("var(--touch-target)");
   });
 

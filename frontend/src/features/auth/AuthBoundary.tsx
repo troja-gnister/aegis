@@ -24,6 +24,7 @@ export function AuthBoundary({children}: PropsWithChildren) {
     queryFn: fetchSession,
     retry: false,
     staleTime: 0,
+    refetchOnMount: "always",
   });
   const [readyNamespace, setReadyNamespace] = useState<string | null>(null);
   const [anonymous, setAnonymous] = useState(false);
@@ -31,7 +32,8 @@ export function AuthBoundary({children}: PropsWithChildren) {
 
   useEffect(() => {
     const session = sessionQuery.data;
-    if (!session || readyNamespace === session.cacheNamespace) return;
+    if (!session || !sessionQuery.isFetchedAfterMount || sessionQuery.isFetching ||
+        readyNamespace === session.cacheNamespace) return;
     let active = true;
     void (async () => {
       const cacheWasPurged = await activateCacheNamespace(
@@ -46,7 +48,7 @@ export function AuthBoundary({children}: PropsWithChildren) {
     return () => {
       active = false;
     };
-  }, [queryClient, readyNamespace, sessionQuery.data]);
+  }, [queryClient, readyNamespace, sessionQuery.data, sessionQuery.isFetchedAfterMount, sessionQuery.isFetching]);
 
   useEffect(() => {
     if (!sessionQuery.isError) return;
@@ -78,6 +80,8 @@ export function AuthBoundary({children}: PropsWithChildren) {
   if (anonymous) return <Navigate to="/login" replace state={{reason: "session"}} />;
   if (
     sessionQuery.isPending ||
+    !sessionQuery.isFetchedAfterMount ||
+    sessionQuery.isFetching ||
     sessionQuery.isError ||
     restoredPageChecking ||
     !sessionQuery.data ||
