@@ -8,13 +8,14 @@ import resource
 import secrets
 import stat
 import subprocess
+import sys
 import tempfile
 import tomllib
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -83,6 +84,8 @@ class MountInfoRecord:
     mountpoint: str
     effective_mode: Mode
     mount_fingerprint: str
+    filesystem_identity: tuple[str, str]
+    filesystem_root: PurePosixPath
 
 
 def _safe_slot_error(slot_id: object, message: str) -> ConfigError:
@@ -220,6 +223,8 @@ def preflight_slots(slots: list[SlotSpec] | tuple[SlotSpec, ...]) -> tuple[Valid
     seen_paths: set[Path] = set()
     seen_stat: set[tuple[int, int]] = set()
     seen_ids: set[str] = set()
+    mount_records = _host_mountinfo()
+    physical_roots: list[tuple[tuple[str, str], PurePosixPath]] = []
     for spec in sorted(slots, key=lambda item: item.slot_id):
         # Validate callers constructing SlotSpec directly as strictly as parsed config.
         checked = _parse_slot(
@@ -249,6 +254,11 @@ def preflight_slots(slots: list[SlotSpec] | tuple[SlotSpec, ...]) -> tuple[Valid
         for existing in seen_paths:
             if resolved in existing.parents or existing in resolved.parents:
                 raise ConfigError(f"mount slot {checked.slot_id}: source overlap")
+        if mount_records is not None:
+            physical = _physical_location(resolved, mount_records)
+            if any(_physical_overlap(physical, existing) for existing in physical_roots):
+                raise ConfigError(f"mount slot {checked.slot_id}: physical source overlap")
+            physical_roots.append(physical)
         seen_paths.add(resolved)
         seen_stat.add(identity_pair)
         observed_identity = f"local:{info.st_dev}:{info.st_ino}"
@@ -389,11 +399,19 @@ def ensure_outputs_outside_originals(paths: tuple[Path, ...], roots: tuple[Path,
     try:
         boundaries = {root.resolve(strict=True) for root in roots}
         boundaries.update(Path(os.path.abspath(root)) for root in roots)
+        records = _host_mountinfo()
+        physical_roots = ([_physical_location(root, records) for root in boundaries]
+                          if records is not None else [])
         for path in paths:
             candidates = (Path(os.path.abspath(path)), path.resolve(strict=False))
             if any(candidate == root or root in candidate.parents
                    for candidate in candidates for root in boundaries):
                 raise ConfigError("generated artifacts must be outside original roots")
+            if records is not None:
+                physical = _physical_location(path.resolve(strict=False), records)
+                if any(physical[0] == root[0] and physical[1].is_relative_to(root[1])
+                       for root in physical_roots):
+                    raise ConfigError("generated artifacts must be outside original roots")
     except OSError as exc:
         raise ConfigError("original output boundary cannot be checked") from exc
 
@@ -643,7 +661,10 @@ def parse_mountinfo(raw: bytes) -> Mapping[str, MountInfoRecord]:
             for value in (encoded_root, filesystem_type, mount_source)
         ):
             raise MountAttestationError("mountinfo is malformed")
-        _decode_mountinfo_field(encoded_root)
+        decoded_root = _decode_mountinfo_field(encoded_root)
+        filesystem_root = PurePosixPath(decoded_root)
+        if not filesystem_root.is_absolute() or ".." in filesystem_root.parts:
+            raise MountAttestationError("mountinfo is malformed")
         _decode_mountinfo_field(filesystem_type)
         _decode_mountinfo_field(mount_source)
         per_mount = _option_mode(fields[5])
@@ -665,8 +686,46 @@ def parse_mountinfo(raw: bytes) -> Mapping[str, MountInfoRecord]:
             mountpoint,
             effective,
             hashlib.sha256(fingerprint_payload).hexdigest(),
+            (major_minor, filesystem_type),
+            filesystem_root,
         )
     return MappingProxyType(records)
+
+
+def _host_mountinfo() -> Mapping[str, MountInfoRecord] | None:
+    # macOS host device identities differ from the Linux Docker VM. The
+    # observer supplies the physical-root check on that platform.
+    if sys.platform != "linux":
+        return None
+    try:
+        with Path("/proc/self/mountinfo").open("rb") as handle:
+            return parse_mountinfo(handle.read(MAX_MOUNTINFO_BYTES + 1))
+    except (OSError, MountAttestationError) as exc:
+        raise ConfigError("host mount identity cannot be checked") from exc
+
+
+def _physical_location(
+    path: Path, records: Mapping[str, MountInfoRecord],
+) -> tuple[tuple[str, str], PurePosixPath]:
+    target = PurePosixPath(path)
+    candidates = [record for record in records.values()
+                  if target.is_relative_to(PurePosixPath(record.mountpoint))]
+    if not candidates:
+        raise ConfigError("host mount identity cannot be checked")
+    record = max(candidates, key=lambda item: len(PurePosixPath(item.mountpoint).parts))
+    return (
+        record.filesystem_identity,
+        record.filesystem_root / target.relative_to(record.mountpoint),
+    )
+
+
+def _physical_overlap(
+    first: tuple[tuple[str, str], PurePosixPath],
+    second: tuple[tuple[str, str], PurePosixPath],
+) -> bool:
+    return first[0] == second[0] and (
+        first[1].is_relative_to(second[1]) or second[1].is_relative_to(first[1])
+    )
 
 
 def attest_mounts(
@@ -691,6 +750,22 @@ def attest_mounts(
             )
         ):
             raise MountAttestationError(f"mount attestation failed for slot {slot.slot_id}")
+        descriptor = -1
+        try:
+            if not os.access(slot.container_path, os.R_OK | os.X_OK, effective_ids=True):
+                raise MountAttestationError(f"mount attestation failed for slot {slot.slot_id}")
+            descriptor = os.open(
+                slot.container_path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            )
+            if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                raise MountAttestationError(f"mount attestation failed for slot {slot.slot_id}")
+        except OSError as exc:
+            raise MountAttestationError(
+                f"mount attestation failed for slot {slot.slot_id}"
+            ) from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
 
 
 def _observer_project_absent(
@@ -862,12 +937,17 @@ def observe_mount_fingerprints(
         raise ConfigError("container mount observation failed") from exc
     observed: list[ValidatedSlot] = []
     fingerprints: set[str] = set()
+    physical_roots: list[tuple[tuple[str, str], PurePosixPath]] = []
     for slot in slots:
         record = records.get(slot.container_path)
         if record is None or record.effective_mode != "read_only":
             raise ConfigError(f"mount slot {slot.slot_id}: container observation failed")
         if record.mount_fingerprint in fingerprints:
             raise ConfigError(f"mount slot {slot.slot_id}: inconsistent mount fingerprint")
+        physical = (record.filesystem_identity, record.filesystem_root)
+        if any(_physical_overlap(physical, existing) for existing in physical_roots):
+            raise ConfigError(f"mount slot {slot.slot_id}: physical source overlap")
+        physical_roots.append(physical)
         fingerprints.add(record.mount_fingerprint)
         observed.append(
             ValidatedSlot(

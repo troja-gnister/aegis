@@ -270,6 +270,12 @@ def test_backend_attestation_checks_identity_exact_mountpoint_and_role_mode(
         return real_stat(path, follow_symlinks=follow_symlinks)
 
     monkeypatch.setattr(os, "stat", container_stat)
+    real_open, real_access = os.open, os.access
+    roots = {"/srv/aegis/roots/photos": readonly, "/srv/aegis/roots/uploads": writable}
+    monkeypatch.setattr(os, "open", lambda path, *args, **kwargs:
+                        real_open(roots.get(str(path), path), *args, **kwargs))
+    monkeypatch.setattr(os, "access", lambda path, *args, **kwargs:
+                        real_access(roots.get(str(path), path), *args, **kwargs))
 
     roles: tuple[Literal["operations", "indexer", "media"], ...] = (
         "operations",

@@ -116,6 +116,13 @@ expected_identity = "{local_identity(source)}"
     manifest = MountManifest.load(manifest_path, digest)
     mountinfo = tmp_path / "mountinfo"
     mountinfo.write_bytes(raw_record)
+    real_open, real_access = os.open, os.access
+    monkeypatch.setattr(os, "open", lambda path, *args, **kwargs:
+                        real_open(source if str(path) == "/srv/aegis/roots/photos" else path,
+                                  *args, **kwargs))
+    monkeypatch.setattr(os, "access", lambda path, *args, **kwargs:
+                        real_access(source if str(path) == "/srv/aegis/roots/photos" else path,
+                                    *args, **kwargs))
     monkeypatch.setattr(
         os,
         "stat",

@@ -189,6 +189,12 @@ EOF
     if [ "$observed_fingerprint" != "$fingerprint" ]; then
         fail
     fi
+    # Evaluate permissions as the running gateway UID, without enumerating or
+    # opening content. The subshell's cd also verifies effective traversal.
+    if [ ! -d "$target" ] || [ -L "$target" ] || [ ! -r "$target" ] || [ ! -x "$target" ]; then
+        fail
+    fi
+    (cd "$target" 2>/dev/null) || fail
 done < "$attestation_snapshot"
 
 if [ "$count" -lt 1 ] || [ "$count" -gt 128 ]; then

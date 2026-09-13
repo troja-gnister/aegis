@@ -5,11 +5,14 @@ import json
 import os
 import secrets
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 import yaml
 from aegisctl.mounts import (
+    ConfigError,
+    SlotSpec,
     local_identity,
     observe_mount_fingerprints,
     parse_config,
@@ -34,6 +37,169 @@ def _docker(*arguments: str) -> subprocess.CompletedProcess[str]:
         text=True,
         timeout=60,
     )
+
+
+def test_real_observer_rejects_physical_parent_child_bind_roots(tmp_path: Path) -> None:
+    parent = tmp_path / "tree"
+    child = parent / "private"
+    child.mkdir(parents=True)
+    # Validate independently to reach the observer's own physical-alias boundary.
+    # A host bind alias can have unrelated realpaths with these same mount roots.
+    slots = tuple(
+        preflight_slots(
+            [
+                SlotSpec(
+                    slot_id,
+                    source,
+                    f"/srv/aegis/roots/{slot_id}",
+                    "read_only",
+                    local_identity(source),
+                )
+            ]
+        )[0]
+        for source, slot_id in ((parent, "parent"), (child, "alias"))
+    )
+    with pytest.raises(ConfigError, match="overlap"):
+        observe_mount_fingerprints(slots)
+
+
+def test_linux_preflight_rejects_real_bind_alias_ancestry(tmp_path: Path) -> None:
+    parent = tmp_path / "tree"
+    child = parent / "private"
+    child.mkdir(parents=True)
+    script = """
+from pathlib import Path
+from aegisctl.mounts import ConfigError, SlotSpec, local_identity, preflight_slots
+slots = [SlotSpec(name, Path(path), '/srv/aegis/roots/' + name, 'read_only',
+                  local_identity(Path(path)))
+         for name, path in [('parent', '/fixture/tree'), ('alias', '/fixture/private-alias')]]
+try:
+    preflight_slots(slots)
+except ConfigError as error:
+    if 'overlap' not in str(error):
+        raise SystemExit(2)
+    print('physical overlap rejected')
+else:
+    raise SystemExit(3)
+"""
+    result = _docker(
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges:true",
+        "--user",
+        "10001:10001",
+        "--mount",
+        f"type=bind,src={parent},dst=/fixture/tree,readonly",
+        "--mount",
+        f"type=bind,src={child},dst=/fixture/private-alias,readonly",
+        "--mount",
+        f"type=bind,src={REPOSITORY / 'backend/aegisctl'},dst=/app/backend/aegisctl,readonly",
+        "--entrypoint",
+        "python",
+        "aegis-backend",
+        "-c",
+        script,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "physical overlap rejected\n"
+
+
+@pytest.mark.parametrize("role", ["gateway", "operations", "indexer", "media"])
+@pytest.mark.parametrize("mode", [0o000, 0o444, 0o111])
+def test_runtime_attestation_rejects_effective_permission_denial(
+    tmp_path: Path,
+    role: str,
+    mode: int,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    sentinel = source / "keep"
+    sentinel.write_bytes(b"synthetic original")
+    config = tmp_path / "mounts.toml"
+    config.write_text(
+        f'version = 1\n[[slots]]\nslot_id = "photos"\nsource = "{source}"\n'
+        'container_path = "/srv/aegis/roots/photos"\nmode = "read_only"\n'
+        f'expected_identity = "{local_identity(source)}"\n',
+    )
+    observed = observe_mount_fingerprints(preflight_slots(parse_config(config)))
+    manifest, attestation = tmp_path / "manifest.json", tmp_path / "gateway.attestation"
+    digest = write_manifest(manifest, observed, uid=os.geteuid(), gid=os.getegid())
+    rendered = render_artifacts(
+        config, manifest, tmp_path / "compose.yaml", attestation, uid=os.geteuid(), gid=os.getegid()
+    )
+    arguments = [
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges:true",
+        "--mount",
+        f"type=bind,src={source},dst=/srv/aegis/roots/photos,readonly",
+    ]
+    if role == "gateway":
+        arguments += [
+            "--user",
+            "101:101",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,nodev,size=2m",
+            "--env",
+            "AEGIS_GATEWAY_MOUNT_ATTESTATION=/run/aegis/mounts.gateway.attestation",
+            "--env",
+            f"AEGIS_GATEWAY_MOUNT_ATTESTATION_SHA256={rendered.gateway_digest}",
+            "--mount",
+            f"type=bind,src={attestation},dst=/run/aegis/mounts.gateway.attestation,readonly",
+            "--mount",
+            f"type=bind,src={GATEWAY_ATTEST},dst=/usr/local/bin/aegis-mount-attest,readonly",
+            "--entrypoint",
+            "/bin/sh",
+            NGINX_IMAGE,
+            "/usr/local/bin/aegis-mount-attest",
+        ]
+    else:
+        arguments += [
+            "--user",
+            f"{os.geteuid()}:{os.getegid()}",
+            "--env",
+            f"AEGIS_MOUNT_MANIFEST_SHA256={digest}",
+            "--mount",
+            f"type=bind,src={manifest},dst=/run/aegis/mounts.manifest.json,readonly",
+            "--mount",
+            f"type=bind,src={REPOSITORY / 'backend/aegisctl'},dst=/app/backend/aegisctl,readonly",
+            "--entrypoint",
+            "python",
+            "aegis-backend",
+            "-m",
+            "aegisctl",
+            "mounts",
+            "attest",
+            "--manifest",
+            "/run/aegis/mounts.manifest.json",
+            "--role",
+            role,
+        ]
+    source.chmod(mode)
+    try:
+        result = _docker(*arguments)
+    finally:
+        source.chmod(0o755)
+    if (sys.platform != "linux" and result.returncode == 126
+            and "invalid mount config" in result.stderr and "permission denied" in result.stderr):
+        pytest.skip("Docker Desktop denied the unreadable host bind before the attester ran")
+    assert result.returncode != 0
+    failure = json.loads(result.stderr)
+    assert "attestation failed" in failure["message"].lower()
+    assert str(source) not in result.stderr
+    assert sentinel.read_bytes() == b"synthetic original"
 
 
 @pytest.mark.parametrize(
@@ -95,7 +261,8 @@ def test_gateway_mount_attestation_is_noop_only_when_both_settings_are_unset(
 
 
 def test_real_observer_leaves_no_unique_project_resources(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = tmp_path / "private-canary"
     source.mkdir()
@@ -228,9 +395,7 @@ expected_identity = "{local_identity(source)}"
     )
 
     assert malformed_result.returncode != 0
-    assert json.loads(malformed_result.stderr)["message"] == (
-        "Gateway mount attestation failed"
-    )
+    assert json.loads(malformed_result.stderr)["message"] == ("Gateway mount attestation failed")
     assert str(source) not in malformed_result.stderr
 
 
@@ -391,9 +556,7 @@ expected_identity = "{local_identity(source)}"
         }
         assert configured_sources == {literal_source.replace("$", "$$")}
 
-    project = "aegis-dollar-" + hashlib.sha256(
-        str(tmp_path).encode("utf-8")
-    ).hexdigest()[:12]
+    project = "aegis-dollar-" + hashlib.sha256(str(tmp_path).encode("utf-8")).hexdigest()[:12]
     # Even an attestation-only one-off container needs its declared secret binds.
     # Give every declaration private synthetic input, never operator/dev files.
     secret_sources = {}
