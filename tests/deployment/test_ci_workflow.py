@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import py_compile
 import re
 import shlex
 import subprocess
@@ -142,7 +143,10 @@ def test_failure_artifacts_are_only_masked_synthetic_screenshots(
     ("frontend/package-lock.json", False),
     ("frontend/package-lock.json", True),
     ("backend/aegis_apps/roots/migrations/__init__.py", False),
+    ("backend/aegis_apps/roots/migrations/__init__.py", True),
     ("backend/aegis_apps/roots/migrations/0002_unexpected.py", False),
+    ("backend/aegis_apps/roots/migrations/0002_unexpected.py", True),
+    ("backend/aegis_apps/roots/migrations/0003_ignored.py", False),
     ("deploy/mounts.manifest.json", False),
     ("deploy/mounts.gateway.attestation", False),
     ("compose.mounts.generated.yaml", False),
@@ -160,7 +164,8 @@ def test_hygiene_gate_rejects_locks_migrations_ignored_outputs_and_whitespace(
         "backend/aegis_apps/roots/migrations/__init__.py": "",
         "tracked.txt": "clean\n", ".gitignore":
         "/deploy/mounts.manifest.json\n/deploy/mounts.gateway.attestation\n"
-        "/compose.mounts.generated.yaml\n",
+        "/compose.mounts.generated.yaml\n__pycache__/\n*.py[cod]\n"
+        "/backend/aegis_apps/roots/migrations/0003_ignored.py\n",
     }.items():
         target = tmp_path / path
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -169,6 +174,11 @@ def test_hygiene_gate_rejects_locks_migrations_ignored_outputs_and_whitespace(
                       ["-c", "user.name=CI test", "-c", "user.email=ci@e2e.invalid",
                        "commit", "--quiet", "-m", "fixture"]):
         subprocess.run(["git", *arguments], cwd=tmp_path, check=True, capture_output=True)
+    # Django imports migrations during checks/tests; these legitimate caches must
+    # not become generated-source drift. Compile a real tracked module, not a mock.
+    py_compile.compile(
+        str(tmp_path / "backend/aegis_apps/roots/migrations/__init__.py"), doraise=True,
+    )
     if dirty_path is not None:
         target = tmp_path / dirty_path
         target.parent.mkdir(parents=True, exist_ok=True)

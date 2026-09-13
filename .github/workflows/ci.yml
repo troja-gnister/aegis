@@ -46,9 +46,14 @@ jobs:
         if: always()
         run: |
           git diff --check
-          dirty=$(git status --porcelain --untracked-files=all --ignored=matching -- \
-            uv.lock frontend/package-lock.json ':(glob)backend/aegis_apps/*/migrations/**' \
-            deploy/mounts.manifest.json deploy/mounts.gateway.attestation compose.mounts.generated.yaml)
+          dirty=$(
+            git status --porcelain --untracked-files=all -- \
+              uv.lock frontend/package-lock.json ':(glob)backend/aegis_apps/*/migrations/*.py' \
+              deploy/mounts.manifest.json deploy/mounts.gateway.attestation compose.mounts.generated.yaml
+            git ls-files --others --ignored --exclude-standard -- \
+              ':(glob)backend/aegis_apps/*/migrations/*.py' \
+              deploy/mounts.manifest.json deploy/mounts.gateway.attestation compose.mounts.generated.yaml
+          )
           if [[ -n "$dirty" ]]; then
             printf '%s\n' "Locks, migrations, or generated mount outputs are dirty:" "$dirty" >&2
             exit 1
@@ -81,9 +86,14 @@ jobs:
         if: always()
         run: |
           git diff --check
-          dirty=$(git status --porcelain --untracked-files=all --ignored=matching -- \
-            uv.lock frontend/package-lock.json ':(glob)backend/aegis_apps/*/migrations/**' \
-            deploy/mounts.manifest.json deploy/mounts.gateway.attestation compose.mounts.generated.yaml)
+          dirty=$(
+            git status --porcelain --untracked-files=all -- \
+              uv.lock frontend/package-lock.json ':(glob)backend/aegis_apps/*/migrations/*.py' \
+              deploy/mounts.manifest.json deploy/mounts.gateway.attestation compose.mounts.generated.yaml
+            git ls-files --others --ignored --exclude-standard -- \
+              ':(glob)backend/aegis_apps/*/migrations/*.py' \
+              deploy/mounts.manifest.json deploy/mounts.gateway.attestation compose.mounts.generated.yaml
+          )
           if [[ -n "$dirty" ]]; then
             printf '%s\n' "Locks, migrations, or generated mount outputs are dirty:" "$dirty" >&2
             exit 1
@@ -117,9 +127,14 @@ jobs:
         if: always()
         run: |
           git diff --check
-          dirty=$(git status --porcelain --untracked-files=all --ignored=matching -- \
-            uv.lock frontend/package-lock.json ':(glob)backend/aegis_apps/*/migrations/**' \
-            deploy/mounts.manifest.json deploy/mounts.gateway.attestation compose.mounts.generated.yaml)
+          dirty=$(
+            git status --porcelain --untracked-files=all -- \
+              uv.lock frontend/package-lock.json ':(glob)backend/aegis_apps/*/migrations/*.py' \
+              deploy/mounts.manifest.json deploy/mounts.gateway.attestation compose.mounts.generated.yaml
+            git ls-files --others --ignored --exclude-standard -- \
+              ':(glob)backend/aegis_apps/*/migrations/*.py' \
+              deploy/mounts.manifest.json deploy/mounts.gateway.attestation compose.mounts.generated.yaml
+          )
           if [[ -n "$dirty" ]]; then
             printf '%s\n' "Locks, migrations, or generated mount outputs are dirty:" "$dirty" >&2
             exit 1
@@ -170,9 +185,14 @@ jobs:
         if: always()
         run: |
           git diff --check
-          dirty=$(git status --porcelain --untracked-files=all --ignored=matching -- \
-            uv.lock frontend/package-lock.json ':(glob)backend/aegis_apps/*/migrations/**' \
-            deploy/mounts.manifest.json deploy/mounts.gateway.attestation compose.mounts.generated.yaml)
+          dirty=$(
+            git status --porcelain --untracked-files=all -- \
+              uv.lock frontend/package-lock.json ':(glob)backend/aegis_apps/*/migrations/*.py' \
+              deploy/mounts.manifest.json deploy/mounts.gateway.attestation compose.mounts.generated.yaml
+            git ls-files --others --ignored --exclude-standard -- \
+              ':(glob)backend/aegis_apps/*/migrations/*.py' \
+              deploy/mounts.manifest.json deploy/mounts.gateway.attestation compose.mounts.generated.yaml
+          )
           if [[ -n "$dirty" ]]; then
             printf '%s\n' "Locks, migrations, or generated mount outputs are dirty:" "$dirty" >&2
             exit 1
