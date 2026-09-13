@@ -84,6 +84,8 @@ uv run --locked aegisctl mounts preflight --config deploy/mounts.local.toml --ma
 
 Preflight checks identities, aliasing, and effective read access without writing under any original. It observes a mount fingerprint in a constrained disposable container; this supports Docker Desktop, where host/container inode numbers differ. Missing or changed storage fails closed. A manifest is not permission to create the missing source directory.
 
+Keep the manifest, Compose override, gateway attestation, and configured temporary directory outside every original root. Preflight/render reject destinations inside originals, including symlink aliases and detectable Linux bind aliases, before creating generated artifacts. Runtime attestation checks read/traverse access under each role's effective identity; it does not enumerate or promise access to every descendant.
+
 ## Render the override
 
 ```bash

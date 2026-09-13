@@ -44,7 +44,7 @@ The verification runner ignores inherited application/database configuration, ge
 
 The browser runner reserves the Compose project `aegis-phase1-e2e` and loopback ports `18080` and `55432`. It refuses pre-existing project resources. Do not run it concurrently with itself or use that project name for anything else. Its explicit teardown removes its disposable containers, networks, and four test volumes, including the synthetic database. No test data is retained for recovery. Development/production volumes are not cleanup targets.
 
-Only the two tracked empty directories under [tests/fixtures/roots](../tests/fixtures/roots) are original-root fixtures. Host preflight examines their identities and access; it never enumerates user libraries or writes inside originals. Test-only identities cannot be seeded with production settings. The browser checks include direct/group grant isolation, an ungranted administrator, refresh/logout/history, protected URLs, 320/390-pixel layouts, keyboard activation, and reduced motion.
+The browser suite uses the two tracked empty directories under [tests/fixtures/roots](../tests/fixtures/roots) as original-root fixtures. Unit and deployment regressions also create disposable synthetic source trees to test permissions, aliases, and preservation; they never use user libraries. Host preflight examines root identities and access without enumerating contents or writing inside originals. Test-only identities cannot be seeded with production settings. The browser checks include direct/group grant isolation, an ungranted administrator, refresh/logout/history, protected URLs, 320/390-pixel layouts, keyboard activation, and reduced motion.
 
 ## Focused checks
 
