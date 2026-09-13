@@ -82,9 +82,13 @@ export async function purgePrivateBrowserState(queryClient: QueryClient): Promis
 export async function activateCacheNamespace(
   queryClient: QueryClient,
   namespace: string,
+  isCurrent: () => boolean = () => true,
 ): Promise<boolean> {
+  if (!isCurrent()) return false;
   const changed = activeCacheNamespace !== null && activeCacheNamespace !== namespace;
   if (changed) await purgePrivateBrowserState(queryClient);
+  // Browser cleanup can finish after another transition owns the namespace.
+  if (!isCurrent()) return false;
   activeCacheNamespace = namespace;
   return changed;
 }

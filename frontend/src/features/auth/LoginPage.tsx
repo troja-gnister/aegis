@@ -1,10 +1,16 @@
 import {useQueryClient} from "@tanstack/react-query";
-import {useState, type FormEvent} from "react";
+import {useEffect, useRef, useState, type FormEvent} from "react";
 import {useNavigate} from "react-router";
 import {ApiProblem} from "../../api/problem";
 import {fetchSession, loginWithCredentials} from "./api";
 import {activateCacheNamespace, purgePrivateBrowserState} from "./cache";
-import {openSessionAfterLogin, SESSION_QUERY_KEY, useSessionAccess} from "./session";
+import {
+  beginSignIn,
+  isSessionTransitionCurrent,
+  openSessionAfterLogin,
+  SESSION_QUERY_KEY,
+  useSessionAccess,
+} from "./session";
 
 function loginErrorMessage(error: unknown): string {
   if (error instanceof ApiProblem && error.status === 429) {
@@ -26,10 +32,25 @@ export function LoginPage() {
   const logoutPending = sessionAccess === "signing_out";
   const [submitting, setSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const mounted = useRef(false);
+  const attempt = useRef(0);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      attempt.current += 1;
+    };
+  }, []);
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (submitting || logoutPending) return;
+    const currentAttempt = ++attempt.current;
+    const generation = beginSignIn();
+    // A response may outlive this form or a newer sign-in/sign-out transition.
+    const isCurrent = () => mounted.current && attempt.current === currentAttempt &&
+      isSessionTransitionCurrent(generation);
     setSubmitting(true);
     setErrorMessage(null);
     const data = new FormData(event.currentTarget);
@@ -37,16 +58,20 @@ export function LoginPage() {
     const password = String(data.get("password") ?? "");
     try {
       await loginWithCredentials(username, password);
+      if (!isCurrent()) return;
       await purgePrivateBrowserState(queryClient);
+      if (!isCurrent()) return;
       const session = await fetchSession();
-      await activateCacheNamespace(queryClient, session.cacheNamespace);
+      if (!isCurrent()) return;
+      await activateCacheNamespace(queryClient, session.cacheNamespace, isCurrent);
+      if (!isCurrent()) return;
       queryClient.setQueryData(SESSION_QUERY_KEY, session);
       openSessionAfterLogin();
       navigate("/roots", {replace: true});
     } catch (error) {
-      setErrorMessage(loginErrorMessage(error));
+      if (isCurrent()) setErrorMessage(loginErrorMessage(error));
     } finally {
-      setSubmitting(false);
+      if (mounted.current && attempt.current === currentAttempt) setSubmitting(false);
     }
   };
 

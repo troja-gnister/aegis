@@ -24,6 +24,15 @@ export function completeSignOut(generation: number, confirmed: boolean): void {
   setAccess(confirmed ? "closed" : "unconfirmed");
 }
 
+export function beginSignIn(): number {
+  accessGeneration += 1;
+  return accessGeneration;
+}
+
+export function isSessionTransitionCurrent(generation: number): boolean {
+  return generation === accessGeneration;
+}
+
 export function openSessionAfterLogin(): void {
   accessGeneration += 1;
   setAccess("open");

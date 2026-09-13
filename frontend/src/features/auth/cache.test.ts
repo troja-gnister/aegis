@@ -1,6 +1,6 @@
 import {QueryClient} from "@tanstack/react-query";
 import {afterEach, describe, expect, it, vi} from "vitest";
-import {createTrackedObjectUrl, purgePrivateBrowserState} from "./cache";
+import {activateCacheNamespace, createTrackedObjectUrl, purgePrivateBrowserState} from "./cache";
 
 const originalCaches = Object.getOwnPropertyDescriptor(window, "caches");
 const originalServiceWorker = Object.getOwnPropertyDescriptor(
@@ -20,6 +20,29 @@ afterEach(() => {
 });
 
 describe("purgePrivateBrowserState", () => {
+  it("does not let obsolete namespace cleanup replace a newer account namespace", async () => {
+    const client = new QueryClient();
+    await purgePrivateBrowserState(client);
+    await activateCacheNamespace(client, "initial-account");
+    let release = () => {};
+    const gate = new Promise<string[]>((resolve) => { release = () => resolve([]); });
+    Object.defineProperty(window, "caches", {
+      configurable: true,
+      value: {keys: () => gate},
+    });
+    let current = true;
+    const obsoleteActivation = activateCacheNamespace(client, "obsolete-account", () => current);
+    current = false;
+    await activateCacheNamespace(client, "current-account");
+    client.setQueryData(["private", "current-account"], "fresh private selection");
+    release();
+    await obsoleteActivation;
+    await activateCacheNamespace(client, "current-account");
+
+    expect(client.getQueryData(["private", "current-account"])).toBe("fresh private selection");
+    await purgePrivateBrowserState(client);
+  });
+
   it("clears private queries, object URLs, Aegis caches, and app registrations", async () => {
     const queryClient = new QueryClient();
     queryClient.setQueryData(["private", "root"], "secret");
