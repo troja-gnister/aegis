@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from importlib.resources import files
+from pathlib import Path
 from threading import Barrier
+from unittest.mock import patch
 
+import psycopg
 import pytest
 from aegis_apps.catalog.models import CatalogEntry
+from aegis_apps.identity.models import User
 from aegis_apps.indexing.models import DirectoryWork, IndexDeployment, RootIndexState, ScanRun
-from aegis_apps.roots.models import Root
+from aegis_apps.roots.models import Root, RootGrant
 from django.db import connection
 
 from tests.deployment.test_database_roles import _create_scan_fixture, _scan_scalar
@@ -146,3 +151,95 @@ def test_root_epoch_change_fences_active_run_and_allocates_next_generation(
     assert ScanRun.objects.get(pk=old).state == "fenced"
     run = ScanRun.objects.get(pk=new)
     assert (run.generation, run.root_epoch) == (2, 1)
+
+
+@pytest.mark.parametrize("path", ["periodic", "manual"])
+def test_both_installed_paths_execute_the_shared_initialization_fragment(
+    role_database: RoleDatabase,
+    tmp_path: Path,
+    path: str,
+) -> None:
+    root, worker, digest = _create_scan_fixture()
+    actor = User.objects.create_user(username=f"fragment-{uuid.uuid4().hex}")
+    RootGrant.objects.create(root=root, user=actor, permissions=128)
+    resource_dir = tmp_path / "sql"
+    resource_dir.mkdir()
+    packaged = files("aegis_apps.indexing").joinpath("sql")
+    for name in ("schedule.sql", "lease.sql", "start_run.sql"):
+        (resource_dir / name).write_text(packaged.joinpath(name).read_text())
+    # Inject a fault into the trusted installation resource, not into any runtime input.
+    fragment = resource_dir / "start_run.sql"
+    fragment.write_text(
+        fragment.read_text() + "\nRAISE EXCEPTION 'synthetic fragment failure' "
+        "USING ERRCODE = '55000';\n"
+    )
+    try:
+        with patch("aegis_apps.common.database_privileges.files", return_value=tmp_path):
+            role_database.synchronize()
+        role = "aegis_indexer" if path == "periodic" else "aegis_web"
+        with (
+            role_database.connect(role) as caller,
+            pytest.raises(
+                psycopg.errors.ObjectNotInPrerequisiteState,
+            ),
+        ):
+            if path == "periodic":
+                caller.execute(
+                    "SELECT public.aegis_schedule_root_scan(%s,%s,%s)", [root.pk, worker, digest]
+                )
+            else:
+                caller.execute(
+                    "SELECT public.aegis_request_root_scan(%s,%s,%s,%s)",
+                    [root.pk, actor.pk, actor.authorization_epoch, "fragment_request"],
+                )
+        assert not ScanRun.objects.filter(root=root).exists()
+        assert not DirectoryWork.objects.exists()
+    finally:
+        role_database.synchronize()
+
+
+def test_periodic_start_preserves_due_time_and_captures_nonzero_state(
+    role_database: RoleDatabase,
+) -> None:
+    from aegis_apps.indexing.scheduling import schedule_root_scan
+
+    root, worker, digest = _create_scan_fixture()
+    Root.objects.filter(pk=root.pk).update(authorization_epoch=7)
+    anchor = CatalogEntry.objects.get(root=root)
+    CatalogEntry.objects.filter(pk=anchor.pk).update(source_revision=19)
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT clock_timestamp() - interval '1 hour'")
+        due_at = cursor.fetchone()[0]
+    RootIndexState.objects.create(
+        root=root,
+        binding_epoch=1,
+        policy_epoch=1,
+        reconciliation_epoch=11,
+        next_generation=5,
+        due_at=due_at,
+    )
+    with role_database.as_django_role("aegis_indexer"):
+        run_id = schedule_root_scan(root.pk, worker, digest)
+    assert run_id is not None
+    run = ScanRun.objects.get(pk=run_id)
+    work = DirectoryWork.objects.get(run=run)
+    state = RootIndexState.objects.get(root=root)
+    assert (
+        run.generation,
+        run.start_epoch,
+        run.root_epoch,
+        run.binding_epoch,
+        run.policy_epoch,
+    ) == (5, 11, 7, 1, 1)
+    assert (
+        work.parent_revision,
+        work.state,
+        work.attempt,
+        work.last_batch_sequence,
+        work.observed_count,
+        work.eof_identity,
+        work.lease_owner,
+        work.lease_expires_at,
+    ) == (19, "pending", 0, 0, 0, None, None, None)
+    assert state.due_at == due_at
+    assert state.next_generation == 6

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from importlib.resources import files
+from textwrap import indent
 from typing import Any, Final
 
 from django.db import connection, transaction
@@ -1018,12 +1019,30 @@ def _verify_role_boundaries(
         )
 
 
+def _scan_function_sql() -> tuple[str, str]:
+    """Expand only the two installation-owned sites from trusted wheel resources."""
+    resources = files("aegis_apps.indexing").joinpath("sql")
+    schedule = resources.joinpath("schedule.sql").read_text()
+    start_run = resources.joinpath("start_run.sql").read_text().rstrip()
+    for padding, marker in (
+        ("    ", "/* AEGIS_START_PERIODIC_RUN */"),
+        ("        ", "/* AEGIS_START_MANUAL_RUN */"),
+    ):
+        site = padding + marker
+        if schedule.count(site) != 1:
+            raise PrivilegeSynchronizationError("scan SQL installation marker drift")
+        schedule = schedule.replace(site, indent(start_run, padding))
+    if "/* AEGIS_START_" in schedule:
+        raise PrivilegeSynchronizationError("scan SQL installation marker drift")
+    return schedule, resources.joinpath("lease.sql").read_text()
+
+
 def _install_boundary_functions(cursor: Any) -> None:
     for function_sql in HEARTBEAT_FUNCTION_SQL.values():
         cursor.execute(function_sql)
     cursor.execute(AUTHORIZATION_FUNCTION_SQL)
-    for name in ("schedule.sql", "lease.sql"):
-        cursor.execute(files("aegis_apps.indexing").joinpath("sql", name).read_text())
+    for function_sql in _scan_function_sql():
+        cursor.execute(function_sql)
 
 
 def _unexpected_explicit_grantees(cursor: Any) -> tuple[str, ...]:

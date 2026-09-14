@@ -4,10 +4,12 @@ import uuid
 
 import pytest
 from aegis_apps.audit.models import AuditEvent
+from aegis_apps.catalog.models import CatalogEntry
 from aegis_apps.identity.models import User
-from aegis_apps.indexing.models import ScanRequest, ScanRun
-from aegis_apps.roots.models import RootGrant
+from aegis_apps.indexing.models import DirectoryWork, RootIndexState, ScanRequest, ScanRun
+from aegis_apps.roots.models import Root, RootGrant
 from django.contrib.auth.models import Group
+from django.db import connection
 
 from tests.deployment.test_database_roles import _create_scan_fixture
 from tests.support.database_roles import RoleDatabase
@@ -125,3 +127,48 @@ def test_audit_failure_rolls_back_request_and_scan(role_database: RoleDatabase) 
             migrator.execute(
                 "ALTER TABLE public.audit_auditevent DROP CONSTRAINT task4_reject_scan_audit"
             )
+
+
+def test_manual_start_is_immediate_and_captures_nonzero_state(role_database: RoleDatabase) -> None:
+    from aegis_apps.indexing.services import request_root_scan
+
+    root, _, _ = _create_scan_fixture()
+    actor = User.objects.create_user(username=f"manual-state-{uuid.uuid4().hex}")
+    RootGrant.objects.create(root=root, user=actor, permissions=128)
+    Root.objects.filter(pk=root.pk).update(authorization_epoch=7)
+    CatalogEntry.objects.filter(root=root).update(source_revision=19)
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT clock_timestamp() + interval '1 hour'")
+        due_at = cursor.fetchone()[0]
+    RootIndexState.objects.create(
+        root=root,
+        binding_epoch=1,
+        policy_epoch=1,
+        reconciliation_epoch=11,
+        next_generation=5,
+        due_at=due_at,
+    )
+    with role_database.as_django_role("aegis_web"):
+        run_id = request_root_scan(actor, root.pk, "manual_state")
+    run = ScanRun.objects.get(pk=run_id)
+    work = DirectoryWork.objects.get(run=run)
+    state = RootIndexState.objects.get(root=root)
+    assert (
+        run.generation,
+        run.start_epoch,
+        run.root_epoch,
+        run.binding_epoch,
+        run.policy_epoch,
+    ) == (5, 11, 7, 1, 1)
+    assert (
+        work.parent_revision,
+        work.state,
+        work.attempt,
+        work.last_batch_sequence,
+        work.observed_count,
+        work.eof_identity,
+        work.lease_owner,
+        work.lease_expires_at,
+    ) == (19, "pending", 0, 0, 0, None, None, None)
+    assert state.due_at == run.started_at < due_at
+    assert state.next_generation == 6

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import uuid
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -12,6 +13,32 @@ from aegis_apps.operations.models import Operation, WorkerHeartbeat
 from aegis_apps.roots import services as root_services
 from django.core.management import get_commands
 from django.test import override_settings
+
+
+@pytest.mark.parametrize("broken", ["missing", "duplicate", "unknown"])
+def test_scan_sql_installation_rejects_invalid_fixed_markers(tmp_path: Path, broken: str) -> None:
+    sql_dir = tmp_path / "sql"
+    sql_dir.mkdir()
+    periodic = "    /* AEGIS_START_PERIODIC_RUN */"
+    manual = "        /* AEGIS_START_MANUAL_RUN */"
+    template = periodic + "\n" + manual
+    if broken == "missing":
+        template = periodic
+    elif broken == "duplicate":
+        template += "\n" + periodic
+    else:
+        template += "\n/* AEGIS_START_CALLER_SELECTED_RUN */"
+    (sql_dir / "schedule.sql").write_text(template)
+    (sql_dir / "start_run.sql").write_text("SELECT 1;\n")
+    (sql_dir / "lease.sql").write_text("SELECT 2;\n")
+    with (
+        patch("aegis_apps.common.database_privileges.files", return_value=tmp_path),
+        pytest.raises(
+            database_privileges.PrivilegeSynchronizationError,
+        ),
+    ):
+        database_privileges._scan_function_sql()
+
 
 EXPECTED_TABLE_COLUMNS = {
     "catalog_catalogentry": (

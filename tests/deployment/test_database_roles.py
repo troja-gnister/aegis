@@ -196,6 +196,9 @@ def test_only_web_can_request_scan(role_database: RoleDatabase, role: str) -> No
 
 def test_built_runtime_wheel_installs_and_executes_scan_sql(role_database: RoleDatabase) -> None:
     root, worker, digest = _create_scan_fixture()
+    manual_root, _, _ = _create_scan_fixture()
+    actor = User.objects.create_user(username=f"artifact-manual-{uuid.uuid4().hex}")
+    RootGrant.objects.create(root=manual_root, user=actor, permissions=128)
     image_tag = f"aegis-task4-artifact-{uuid.uuid4().hex}"
     repository = Path(__file__).resolve().parents[2]
     script = """
@@ -216,12 +219,17 @@ django.setup()
 from aegis_apps.common import database_privileges
 assert '/app/.venv/' in database_privileges.__file__
 wheel_files = {str(path) for path in metadata.files('aegis-platform')}
-for name in ('schedule.sql', 'lease.sql'):
+for name in ('schedule.sql', 'lease.sql', 'start_run.sql'):
     assert 'aegis_apps/indexing/sql/' + name in wheel_files
     resource = resources.files('aegis_apps.indexing').joinpath('sql', name)
     assert '/app/.venv/' in str(resource)
 with transaction.atomic():
     database_privileges.synchronize_database_privileges()
+with psycopg.connect(dbname=data['database'], host=data['host'], port=data['port'],
+        user='aegis_web', password=data['web_password'], autocommit=True) as web:
+    manual_run = web.execute('SELECT public.aegis_request_root_scan(%s,%s,%s,%s)',
+        [data['manual_root'], data['actor'], data['actor_epoch'], 'artifact_manual']).fetchone()[0]
+    assert manual_run is not None
 with psycopg.connect(dbname=data['database'], host=data['host'], port=data['port'],
         user='aegis_indexer', password=data['indexer_password'], autocommit=True) as caller:
     assert caller.execute('SELECT session_user, current_user').fetchone() == (
@@ -233,7 +241,14 @@ with psycopg.connect(dbname=data['database'], host=data['host'], port=data['port
         [run, data['worker']]).fetchone()[0]
     assert caller.execute('SELECT public.aegis_renew_scan_directory(%s)',
         [Jsonb(lease)]).fetchone()[0] is True
-print('Installed wheel SQL: schedule, request, claim, renew; runtime login round trip passed.')
+    manual_lease = caller.execute('SELECT public.aegis_claim_scan_directory(%s,%s)',
+        [manual_run, data['worker']]).fetchone()[0]
+    assert manual_lease['root_id'] == data['manual_root']
+    assert manual_lease['generation'] == lease['generation'] == 1
+    assert manual_lease['attempt'] == lease['attempt'] == 1
+    assert caller.execute('SELECT public.aegis_renew_scan_directory(%s)',
+        [Jsonb(manual_lease)]).fetchone()[0] is True
+print('Installed wheel shared initialization: periodic and manual runtime login round trip passed.')
 """
     try:
         built = subprocess.run(
@@ -255,6 +270,9 @@ print('Installed wheel SQL: schedule, request, claim, renew; runtime login round
                 "host": host, "port": role_database.port, "database": role_database.database_name,
                 "migrator_password": role_database.passwords["aegis_migrator"],
                 "indexer_password": role_database.passwords["aegis_indexer"],
+                "web_password": role_database.passwords["aegis_web"],
+                "manual_root": str(manual_root.pk), "actor": str(actor.pk),
+                "actor_epoch": actor.authorization_epoch,
                 "root": str(root.pk), "worker": worker, "digest": digest,
             }), capture_output=True, text=True, timeout=60,
         )
