@@ -4,6 +4,8 @@ Phase 1 provides credential login, authorized root cards, administration, durabl
 
 The [Phase 2 delivery design](superpowers/specs/2026-09-14-phase-2-v1-delivery-design.md) groups the complete v1 build into milestones 2A–2G. Its scope includes metadata-filter controls and photo/video thumbnails. Specifications and plans are not implementation evidence: keep feature statuses Planned until their work begins, and retain the original-file and isolated-test boundaries throughout.
 
+The first work package is [2A.1 indexed browsing](superpowers/specs/2026-09-14-phase-2a-indexed-browser-design.md). Its written design is awaiting review; there are no Phase 2 implementation commands or benchmark results to run or claim yet. Use the existing canonical checks below until a verified package extends them.
+
 ## Prerequisites
 
 Use Python 3.13, uv 0.12.8, Node.js 24 LTS, npm, Git, and Docker with Compose v2 or newer. Docker must be running. Development uses Docker Desktop/macOS; CI targets Ubuntu 24.04. Run host commands as a non-root user. Dependencies and browser binaries require network access during installation; application workers do not get internet access.

@@ -14,7 +14,7 @@ Phase 2 now delivers the complete v1 application. The former Phase 2–6 feature
 
 The stack remains Django, PostgreSQL, React/TypeScript, role-separated workers, Nginx delivery, and Docker Compose. PostgreSQL is the catalog and initial durable-work store. No required Redis, separate search service, or microservice migration is introduced.
 
-This document governs delivery order and shared contracts. Each work package receives a focused specification and implementation plan. One milestone can contain multiple independently verified packages; a package is not automatically a completed milestone. The first package builds actual indexed browsing on the existing authorized-root shell.
+This document governs delivery order and shared contracts. Each work package receives a focused specification and implementation plan. One milestone can contain multiple independently verified packages; a package is not automatically a completed milestone. The first package, [2A.1 — Indexed browser](2026-09-14-phase-2a-indexed-browser-design.md), builds actual indexed browsing on the existing authorized-root shell. The remainder of 2A still requires event reconciliation, broader filename/path search, reconnectable progress, and authorized byte delivery before that milestone can pass.
 
 WebDAV/sync, public sharing, collaboration, arbitrary storage adapters, full nested-mount support, and certified 10M+ operation remain outside v1. The public identifiers and cursor contracts must allow later scale work without changing their meaning.
 
@@ -122,7 +122,7 @@ As of this design checkpoint: seven milestones defined, zero implemented or acce
 
 | Milestone | Design/implementation state | Accepted packages | Acceptance evidence |
 | --- | --- | --- | --- |
-| 2A | First indexed-browser package is the next detailed design | 0 | None yet |
+| 2A | [2A.1 indexed-browser specification](2026-09-14-phase-2a-indexed-browser-design.md) written; awaiting review before its implementation plan | 0 | None yet |
 | 2B | Planned | 0 | None yet |
 | 2C | Planned, including metadata UI and photo/video thumbnails | 0 | None yet |
 | 2D | Planned | 0 | None yet |

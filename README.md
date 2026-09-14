@@ -121,6 +121,8 @@ Targets 2A–2G are milestones within the expanded Phase 2. A feature spanning m
 
 The current focus is **Phase 2 design review — Complete v1 application**, starting with the indexed-browser work in milestone 2A. The expanded scope, metadata filters, and photo/video thumbnails are approved; the written specifications precede implementation. The [Phase 1 secure foundation](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md) remains complete.
 
+The first focused specification is [2A.1 — Indexed browser](docs/superpowers/specs/2026-09-14-phase-2a-indexed-browser-design.md): catalog, safe checkpointed scans, cursor API, basic metadata filters, virtualized mobile browsing, and early scale measurements. Event-driven reconciliation, broader search, reconnectable progress, and downloads remain required follow-up work within 2A; this first package alone cannot complete the milestone.
+
 The September 13 foundation checkpoint completed **all 14 Phase 1 tasks**: 620 backend tests, 235 Linux deployment tests, 43 frontend tests, and eight Chromium/WebKit journeys passed. Runbooks, accepted review, the enforced nested-mount restriction, and fresh-checkout verification are recorded in the [acceptance report](docs/verification/phase-1.md).
 
 On September 14, the remaining v1 scope was consolidated into **seven Phase 2 milestones, zero accepted so far**. Detailed task counts will come from their implementation plans; seven milestones does not mean seven implementation tasks. The [delivery ledger](docs/superpowers/specs/2026-09-14-phase-2-v1-delivery-design.md#9-delivery-ledger-and-documentation) tracks the packages and evidence. The former Phase 3–6 capabilities are included below, not postponed beyond Phase 2.
@@ -187,6 +189,7 @@ The Django backend, React shell, role-separated containers, and browser/CI gates
 - [Phase 1 acceptance evidence and limitations](docs/verification/phase-1.md)
 - [Approved platform design](docs/superpowers/specs/2026-08-31-aegis-platform-rewrite-design.md)
 - [Phase 2 delivery design and milestone ledger](docs/superpowers/specs/2026-09-14-phase-2-v1-delivery-design.md)
+- [Phase 2A.1 indexed-browser specification](docs/superpowers/specs/2026-09-14-phase-2a-indexed-browser-design.md)
 - [Approved Phase 1 implementation plan](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md)
 - License: [MIT](LICENSE)
 
