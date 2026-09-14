@@ -2,7 +2,7 @@
 
 **Date:** September 14, 2026
 
-**Status:** Written specification approved on September 14, 2026. The [18-task implementation plan](../plans/2026-09-14-phase-2a-indexed-browser.md) is written; no application implementation or benchmark acceptance is claimed.
+**Status:** Written specification approved on September 14, 2026. The [18-task implementation plan](../plans/2026-09-14-phase-2a-indexed-browser.md) is in progress; no package or benchmark acceptance is claimed.
 
 **Parent:** [Complete-v1 Phase 2 delivery design](2026-09-14-phase-2-v1-delivery-design.md)
 

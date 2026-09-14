@@ -38,11 +38,11 @@
 
 ## Status and task ledger
 
-Planning baseline: `842ba2a` on `main`, with unchanged application code from the verified Phase 1 foundation. This plan defines **18 tasks: 0 complete, 18 remaining**. Application implementation has not started. The ledger is authoritative; checkboxes below record the execution recipe and subsequent evidence, not a second task count.
+Planning baseline: `842ba2a` on `main`, with unchanged application code from the verified Phase 1 foundation; execution begins from the committed plan at `6169402`. This plan defines **18 tasks: 1 complete, 17 remaining**. Task 1 passed verification and review; Task 2 is next. The ledger is authoritative; checkboxes below record the execution recipe and subsequent evidence, not a second task count.
 
 | Task | Independently testable deliverable | Depends on | Status |
 | --- | --- | --- | --- |
-| 1 | Lossless filename/order domain and safe focused verification | Foundation | Planned |
+| 1 | Lossless filename/order domain and safe focused verification | Foundation | Complete (`104208f`) |
 | 2 | Catalog schema, constraints, and explicit role grants | 1 | Planned |
 | 3 | Deployment-bound root maintenance schema and configuration | 2 | Planned |
 | 4 | Database-enforced scheduling, claims, renewal, and rescan authority | 3 | Planned |
@@ -62,6 +62,14 @@ Planning baseline: `842ba2a` on `main`, with unchanged application code from the
 | 18 | Fresh-checkout acceptance, upgrade runbook, and reconciled roadmap | 1–17 | Planned |
 
 Later 2A plans still own watcher/event ingestion, broader filename/path search, reconnectable events, and authorized downloads/ranges. All 2B–2G milestones remain required. Their task counts have not been assigned, so 18 is not the remaining-task count for the full rewrite.
+
+### Completed-task evidence
+
+| Task | Tested revision | Verification and review | Remaining boundary |
+| --- | --- | --- | --- |
+| 1 | `104208f` (initial implementation `7489be9`) | 673 backend tests; 35 filename cases; Ruff and mypy clean (161 files). The unchanged verifier's actual owned-cleanup regression passed at `7489be9`. Independent review and one scoped fix review passed. All disposable databases were removed. | Domain and verification tooling only; no catalog schema, browsing API, UI or scale acceptance. |
+
+Task 1's review corrected the recipe's supplementary-Unicode escape ambiguity with a failing collision regression and fixed-width escapes. Raw identity and the proven 1,530-byte maximum key remain intact; no persisted catalog/cursor existed during this pre-release correction.
 
 ## File and responsibility map
 
@@ -241,7 +249,7 @@ Do not run the browser harness concurrently with itself. Final clean-checkout ve
 
 **Interfaces:** Consumes Python filesystem byte semantics. Produces the domain types above and `source_name(raw: bytes) -> SourceName`; `SORT_KEY_VERSION = 1`. The root anchor's empty name is created by Task 2, never accepted by this child-name function.
 
-- [ ] **Step 1: Write failing name and runner tests.**
+- [x] **Step 1: Write failing name and runner tests.**
 
 ```python
 import pytest
@@ -263,9 +271,9 @@ def test_raw_identity_survives_display_escaping_and_normalization() -> None:
 
 Add property tests over non-NUL/non-slash byte components, literal backslashes, controls/bidi characters, normalization collisions, case folding, no executable HTML, and maximum Linux component lengths. Runner tests use `runpy.run_path`, injected argument vectors and a captured `run()` to reject `../`, absolute paths, symlink escapes, options masquerading as paths, empty selectors, and cross-mode test paths before creating a database.
 
-- [ ] **Step 2: Verify red.** Run `uv run --locked python scripts/verify.py backend`. Expect collection failure for the absent catalog module or explicit missing target-parser assertions; keep the unrelated foundation tests passing.
+- [x] **Step 2: Verify red.** Run `uv run --locked python scripts/verify.py backend`. Expect collection failure for the absent catalog module or explicit missing target-parser assertions; keep the unrelated foundation tests passing.
 
-- [ ] **Step 3: Implement the domain, escaping, and focused runner.**
+- [x] **Step 3: Implement the domain, escaping, and focused runner.**
 
 ```python
 import unicodedata
@@ -282,6 +290,7 @@ def source_name(raw: bytes) -> SourceName:
     display = "".join(
         f"\\x{ord(c) - 0xDC00:02x}" if 0xDC80 <= ord(c) <= 0xDCFF else
         "\\\\" if c == "\\" else
+        f"\\U{ord(c):08x}" if unicodedata.category(c).startswith("C") and ord(c) > 0xFFFF else
         f"\\u{ord(c):04x}" if unicodedata.category(c).startswith("C") else c
         for c in decoded
     )
@@ -293,13 +302,13 @@ def source_name(raw: bytes) -> SourceName:
     return SourceName(raw, display, key, hint)
 ```
 
-Prove the maximum encoded sort key is below PostgreSQL's chosen index-tuple budget using the supported 255-byte component domain, including case-fold expansion and escaping; enforce a 2,048-byte defensive stored-key ceiling and fail visibly if it is exceeded, never truncate. Extension hints deliberately accept only ASCII alphanumerics. Escape representation remains separate from raw uniqueness. Normalize the case-folded key with NFC as shown.
+Prove the maximum encoded sort key is below PostgreSQL's chosen index-tuple budget using the supported 255-byte component domain, including case-fold expansion and escaping; enforce a 2,048-byte defensive stored-key ceiling and fail visibly if it is exceeded, never truncate. Extension hints deliberately accept only ASCII alphanumerics. Escape representation remains separate from raw uniqueness. Use fixed-width `\uXXXX` for BMP controls and `\UXXXXXXXX` for supplementary controls: U+E0001 must not display like U+E000 followed by literal `1`. Normalize the case-folded key with NFC as shown. This escaping clarification was added during Task 1 review before any catalog or cursor was deployed.
 
 Use `argparse` in the runner with `mode` choices unchanged and repeated `--test-target`; resolve the filename portion beneath the allowed test tree with `Path.resolve().is_relative_to()`, require an existing file/directory, validate identifier-only `::` selectors, then construct the fixed pytest argv list. Preserve the sanitized environment, private password file, owned-container checks and final cleanup.
 
-- [ ] **Step 4: Verify green and regressions.** Run `uv run --locked python scripts/verify.py backend --test-target backend/tests/unit/catalog --test-target backend/tests/unit/common/test_verify_targets.py`, `uv run --locked ruff check backend scripts tests`, and `uv run --locked mypy backend`. Run the existing deployment verification-runner test through its isolated `deployment --test-target` mode to prove cleanup on failure.
+- [x] **Step 4: Verify green and regressions.** Run `uv run --locked python scripts/verify.py backend --test-target backend/tests/unit/catalog --test-target backend/tests/unit/common/test_verify_targets.py`, `uv run --locked ruff check backend scripts tests`, and `uv run --locked mypy backend`. Run the existing deployment verification-runner test through its isolated `deployment --test-target` mode to prove cleanup on failure.
 
-- [ ] **Step 5: Review and commit.** Inspect exact changed files and `git diff --check`; update Task 1's ledger evidence, then `git add` only this task's paths and commit `feat: define lossless catalog names and ordering`. Push `origin main` after the scoped checks pass.
+- [x] **Step 5: Review and commit.** Inspect exact changed files and `git diff --check`; update Task 1's ledger evidence, then `git add` only this task's paths and commit `feat: define lossless catalog names and ordering`. Push `origin main` after the scoped checks pass.
 
 ## Task 2: Catalog schema and immutable source boundary
 

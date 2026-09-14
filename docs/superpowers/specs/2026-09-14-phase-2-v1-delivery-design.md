@@ -2,7 +2,7 @@
 
 **Date:** September 14, 2026
 
-**Status:** Written specification approved on September 14, 2026, including scope and filter/thumbnail behavior. The first implementation plan is written; application implementation has not started.
+**Status:** Written specification approved on September 14, 2026, including scope and filter/thumbnail behavior. The first implementation plan is in progress; no Phase 2 package is accepted yet.
 
 **Canonical status:** [README roadmap](../../../README.md#roadmap)
 
@@ -118,11 +118,11 @@ Work continues on `main`, with scoped verified commits and regular pushes. No au
 
 ## 9. Delivery ledger and documentation
 
-As of this planning checkpoint: seven milestones defined, zero implemented or accepted. The [2A.1 implementation plan](../plans/2026-09-14-phase-2a-indexed-browser.md#status-and-task-ledger) defines 18 tasks, zero complete and 18 remaining. Subsequent package task counts have not yet been assigned; neither seven milestones nor 18 first-package tasks is the full remaining rewrite task count.
+As of this implementation checkpoint: seven milestones defined, zero accepted. The [2A.1 implementation plan](../plans/2026-09-14-phase-2a-indexed-browser.md#status-and-task-ledger) defines 18 tasks, one complete and 17 remaining. Task 1 delivered filename handling and focused verification; the catalog schema is next. Subsequent package task counts have not yet been assigned; neither seven milestones nor 18 first-package tasks is the full remaining rewrite task count.
 
 | Milestone | Design/implementation state | Accepted packages | Acceptance evidence |
 | --- | --- | --- | --- |
-| 2A | [2A.1 specification](2026-09-14-phase-2a-indexed-browser-design.md) approved; [18-task plan](../plans/2026-09-14-phase-2a-indexed-browser.md) written, implementation not started | 0 | None yet |
+| 2A | [2A.1 specification](2026-09-14-phase-2a-indexed-browser-design.md) approved; [18-task plan](../plans/2026-09-14-phase-2a-indexed-browser.md) in progress | 0 | No package acceptance yet |
 | 2B | Planned | 0 | None yet |
 | 2C | Planned, including metadata UI and photo/video thumbnails | 0 | None yet |
 | 2D | Planned | 0 | None yet |
