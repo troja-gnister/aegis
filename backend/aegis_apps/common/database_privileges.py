@@ -26,6 +26,13 @@ RUNTIME_PROCESS_DATABASE_ROLES: Final = {
 ALLOWED_ROLE_MEMBERSHIPS: Final[frozenset[tuple[str, str]]] = frozenset()
 
 MANAGED_TABLE_COLUMNS: Final[dict[str, tuple[str, ...]]] = {
+    "catalog_catalogentry": (
+        "id", "raw_name", "display_name", "name_key", "logical_name", "kind", "type_hint",
+        "source_state", "size", "mtime_ns", "ctime_ns", "device", "inode", "source_revision",
+        "catalog_version", "children_version", "observation_epoch",
+        "seen_generation", "seen_attempt",
+        "observed_at", "logical_parent_id", "root_id", "source_parent_id",
+    ),
     "django_migrations": ("id", "app", "name", "applied"),
     "django_admin_log": (
         "id",
@@ -157,6 +164,7 @@ MANAGED_SEQUENCES: Final[tuple[str, ...]] = (
 
 ROLE_TABLE_PRIVILEGES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
     "aegis_web": {
+        "catalog_catalogentry": ("SELECT",),
         "django_migrations": ("SELECT",),
         "django_admin_log": ("SELECT", "INSERT"),
         "auth_permission": ("SELECT",),
@@ -184,6 +192,7 @@ ROLE_TABLE_PRIVILEGES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
         "audit_auditevent": ("INSERT",),
     },
     "aegis_indexer": {
+        "catalog_catalogentry": ("SELECT",),
         "django_migrations": ("SELECT",),
         "operations_operation": ("SELECT",),
         "operations_job": ("SELECT",),

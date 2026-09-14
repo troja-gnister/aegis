@@ -14,6 +14,31 @@ from django.core.management import get_commands
 from django.test import override_settings
 
 EXPECTED_TABLE_COLUMNS = {
+    "catalog_catalogentry": (
+        "id",
+        "raw_name",
+        "display_name",
+        "name_key",
+        "logical_name",
+        "kind",
+        "type_hint",
+        "source_state",
+        "size",
+        "mtime_ns",
+        "ctime_ns",
+        "device",
+        "inode",
+        "source_revision",
+        "catalog_version",
+        "children_version",
+        "observation_epoch",
+        "seen_generation",
+        "seen_attempt",
+        "observed_at",
+        "logical_parent_id",
+        "root_id",
+        "source_parent_id",
+    ),
     "django_migrations": ("id", "app", "name", "applied"),
     "django_admin_log": (
         "id",
@@ -201,6 +226,14 @@ def test_worker_grants_are_column_fenced_without_authorization_graph_access() ->
             "roots_rootgrant",
         ):
             assert table not in privilege_source.ROLE_TABLE_PRIVILEGES[role]
+
+
+def test_catalog_is_select_only_for_web_and_indexer() -> None:
+    for role in database_privileges.RUNTIME_DATABASE_ROLES:
+        assert database_privileges.ROLE_TABLE_PRIVILEGES[role].get("catalog_catalogentry", ()) == (
+            ("SELECT",) if role in ("aegis_web", "aegis_indexer") else ()
+        )
+        assert "catalog_catalogentry" not in database_privileges.ROLE_COLUMN_PRIVILEGES[role]
 
 
 def test_function_execution_allowlist_is_exact_and_public_is_never_a_grantee() -> None:

@@ -2,9 +2,6 @@ from __future__ import annotations
 
 import secrets
 import uuid
-from collections.abc import Iterator
-from contextlib import contextmanager
-from dataclasses import dataclass, field
 from typing import Any
 
 import psycopg
@@ -42,333 +39,23 @@ from django.utils import timezone
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
+from tests.support.database_roles import (
+    ALL_TEST_ROLES,
+    MIGRATOR_ROLE,
+    RoleDatabase,
+    _django_login,
+    _quote,
+    managed_role_database,
+)
+
 pytestmark = [pytest.mark.integration, pytest.mark.django_db(transaction=True)]
 
-MIGRATOR_ROLE = "aegis_migrator"
-ALL_TEST_ROLES = (MIGRATOR_ROLE, *RUNTIME_DATABASE_ROLES)
 HEARTBEAT_FUNCTIONS = {
     "operations": "aegis_publish_operations_heartbeat",
     "indexer": "aegis_publish_indexer_heartbeat",
     "media": "aegis_publish_media_heartbeat",
 }
 HEARTBEAT_ARGUMENTS = "%s, %s, %s, %s, %s, %s, %s, %s, %s"
-
-
-@dataclass(frozen=True, slots=True)
-class RoleDatabase:
-    database_name: str
-    host: str
-    port: int
-    passwords: dict[str, str] = field(repr=False)
-
-    def connect(self, role: str) -> psycopg.Connection[Any]:
-        if role not in self.passwords:
-            raise ValueError("unknown test database role")
-        return psycopg.connect(
-            dbname=self.database_name,
-            host=self.host,
-            port=self.port,
-            user=role,
-            password=self.passwords[role],
-            connect_timeout=5,
-            autocommit=True,
-        )
-
-    def synchronize(self) -> None:
-        with _django_login(MIGRATOR_ROLE, self.passwords[MIGRATOR_ROLE]):
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    SELECT table_name, column_name
-                      FROM information_schema.columns
-                     WHERE table_schema = 'public'
-                     ORDER BY table_name, ordinal_position
-                    """
-                )
-                visible: dict[str, list[str]] = {}
-                for table, column in cursor.fetchall():
-                    visible.setdefault(table, []).append(column)
-                actual_columns = {
-                    table: tuple(columns) for table, columns in visible.items()
-                }
-                assert actual_columns == MANAGED_TABLE_COLUMNS, actual_columns
-                cursor.execute(
-                    """
-                    SELECT sequencename
-                      FROM pg_catalog.pg_sequences
-                     WHERE schemaname = 'public'
-                     ORDER BY sequencename
-                    """
-                )
-                actual_sequences = tuple(row[0] for row in cursor.fetchall())
-                if actual_sequences != MANAGED_SEQUENCES:
-                    cursor.execute(
-                        """
-                        SELECT relation.relname,
-                               pg_catalog.pg_get_userbyid(relation.relowner)
-                          FROM pg_catalog.pg_class AS relation
-                          JOIN pg_catalog.pg_namespace AS namespace
-                            ON namespace.oid = relation.relnamespace
-                         WHERE namespace.nspname = 'public'
-                           AND relation.relkind = 'S'
-                         ORDER BY relation.relname
-                        """
-                    )
-                    pytest.fail(
-                        f"sequence visibility drift: {actual_sequences!r}; "
-                        f"catalog: {cursor.fetchall()!r}"
-                    )
-            for _attempt in range(2):
-                with transaction.atomic(durable=True):
-                    synchronize_database_privileges()
-
-
-def _quote(identifier: str) -> sql.Identifier:
-    return sql.Identifier(identifier)
-
-
-def _create_login_role(role: str, password: str) -> None:
-    if role not in ALL_TEST_ROLES:
-        raise ValueError("unknown test database role")
-    with transaction.atomic(), connection.cursor() as cursor:
-        cursor.execute(
-            "SELECT pg_catalog.set_config(%s, %s, true)",
-            ["aegis.test_role_password", password],
-        )
-        cursor.execute(
-            sql.SQL(
-                """
-                DO $aegis_test_role$
-                DECLARE
-                    role_password text := pg_catalog.current_setting(
-                        'aegis.test_role_password'
-                    );
-                BEGIN
-                    IF role_password = ''
-                       OR pg_catalog.octet_length(role_password) > 4096 THEN
-                        RAISE EXCEPTION 'invalid test role password';
-                    END IF;
-                    EXECUTE pg_catalog.format(
-                        'CREATE ROLE %I LOGIN NOINHERIT NOSUPERUSER NOCREATEDB '
-                        'NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L',
-                        {role},
-                        role_password
-                    );
-                END
-                $aegis_test_role$;
-                """
-            ).format(role=sql.Literal(role))
-        )
-
-
-@contextmanager
-def _django_login(role: str, password: str) -> Iterator[None]:
-    settings_dict = connection.settings_dict
-    original_user = settings_dict["USER"]
-    original_password = settings_dict["PASSWORD"]
-    connection.close()
-    settings_dict["USER"] = role
-    settings_dict["PASSWORD"] = password
-    try:
-        connection.ensure_connection()
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT session_user, current_user")
-            assert cursor.fetchone() == (role, role)
-        yield
-    finally:
-        connection.close()
-        settings_dict["USER"] = original_user
-        settings_dict["PASSWORD"] = original_password
-        connection.ensure_connection()
-
-
-def _alter_relation_owner(*, relation: str, kind: str, owner: str) -> None:
-    keyword = "SEQUENCE" if kind == "S" else "TABLE"
-    with connection.cursor() as cursor:
-        cursor.execute(
-            sql.SQL("ALTER {} {} OWNER TO {}").format(
-                sql.SQL(keyword),
-                sql.Identifier("public", relation),
-                _quote(owner),
-            )
-        )
-
-
-def _restore_and_drop_roles(
-    *,
-    original_database_owner: str,
-    original_schema_owner: str,
-    original_relation_owners: dict[str, tuple[str, str]],
-) -> None:
-    connection.close()
-    connection.ensure_connection()
-    with connection.cursor() as cursor:
-        cursor.execute("RESET SESSION AUTHORIZATION")
-        cursor.execute("RESET ROLE")
-
-        for signature in MANAGED_FUNCTION_SIGNATURES.values():
-            cursor.execute(
-                "SELECT to_regprocedure(%s)",
-                [signature],
-            )
-            if cursor.fetchone() != (None,):
-                cursor.execute(
-                    sql.SQL("ALTER FUNCTION {} OWNER TO {}").format(
-                        sql.SQL(signature),
-                        _quote(original_schema_owner),
-                    )
-                )
-
-        for relation, (kind, owner) in original_relation_owners.items():
-            if kind == "S":
-                continue
-            _alter_relation_owner(relation=relation, kind=kind, owner=owner)
-        for relation, (kind, owner) in original_relation_owners.items():
-            if kind != "S":
-                continue
-            _alter_relation_owner(relation=relation, kind=kind, owner=owner)
-
-        cursor.execute(
-            sql.SQL("ALTER SCHEMA public OWNER TO {}").format(
-                _quote(original_schema_owner)
-            )
-        )
-        cursor.execute(
-            sql.SQL("ALTER DATABASE {} OWNER TO {}").format(
-                _quote(connection.settings_dict["NAME"]),
-                _quote(original_database_owner),
-            )
-        )
-
-        for signature in MANAGED_FUNCTION_SIGNATURES.values():
-            cursor.execute(f"DROP FUNCTION IF EXISTS {signature}")
-
-        for role in reversed(ALL_TEST_ROLES):
-            cursor.execute(
-                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = %s)",
-                [role],
-            )
-            if cursor.fetchone() == (True,):
-                cursor.execute(
-                    sql.SQL("DROP OWNED BY {}").format(_quote(role))
-                )
-                cursor.execute(sql.SQL("DROP ROLE {}").format(_quote(role)))
-
-
-@pytest.fixture(scope="module")
-def role_database(
-    django_db_setup: object,
-    django_db_blocker: Any,
-) -> Iterator[RoleDatabase]:
-    del django_db_setup
-    created_roles: list[str] = []
-    original_database_owner = ""
-    original_schema_owner = ""
-    original_relation_owners: dict[str, tuple[str, str]] = {}
-    with django_db_blocker.unblock():
-        connection.ensure_connection()
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT pg_catalog.current_database(),
-                       pg_catalog.current_setting('server_version_num')::integer,
-                       pg_catalog.pg_get_userbyid(database.datdba),
-                       pg_catalog.pg_get_userbyid(namespace.nspowner)
-                  FROM pg_catalog.pg_database AS database
-                  JOIN pg_catalog.pg_namespace AS namespace
-                    ON namespace.nspname = 'public'
-                 WHERE database.datname = pg_catalog.current_database()
-                """
-            )
-            row = cursor.fetchone()
-            assert row is not None
-            database_name, server_version, original_database_owner, original_schema_owner = row
-            if not str(database_name).startswith("test_") or server_version // 10_000 != 18:
-                pytest.fail("database-role tests require a disposable PostgreSQL 18 test database")
-
-            cursor.execute(
-                "SELECT rolname FROM pg_catalog.pg_roles WHERE rolname = ANY(%s)",
-                [list(ALL_TEST_ROLES)],
-            )
-            if cursor.fetchall():
-                pytest.fail(
-                    "database-role tests require no pre-existing Aegis database roles"
-                )
-
-            cursor.execute(
-                """
-                SELECT relation.relname,
-                       relation.relkind,
-                       pg_catalog.pg_get_userbyid(relation.relowner)
-                  FROM pg_catalog.pg_class AS relation
-                  JOIN pg_catalog.pg_namespace AS namespace
-                    ON namespace.oid = relation.relnamespace
-                 WHERE namespace.nspname = 'public'
-                   AND (
-                        relation.relname = ANY(%s)
-                        OR relation.relname = ANY(%s)
-                   )
-                """,
-                [list(MANAGED_TABLE_COLUMNS), list(MANAGED_SEQUENCES)],
-            )
-            original_relation_owners = {
-                name: (kind, owner) for name, kind, owner in cursor.fetchall()
-            }
-            if set(original_relation_owners) != set(MANAGED_TABLE_COLUMNS) | set(
-                MANAGED_SEQUENCES
-            ):
-                pytest.fail("managed database relation manifest is incomplete")
-
-        passwords = {role: secrets.token_urlsafe(48) for role in ALL_TEST_ROLES}
-        try:
-            for role in ALL_TEST_ROLES:
-                _create_login_role(role, passwords[role])
-                created_roles.append(role)
-
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    sql.SQL("ALTER DATABASE {} OWNER TO {}").format(
-                        _quote(database_name),
-                        _quote(MIGRATOR_ROLE),
-                    )
-                )
-                cursor.execute(
-                    sql.SQL("ALTER SCHEMA public OWNER TO {}").format(
-                        _quote(MIGRATOR_ROLE)
-                    )
-                )
-            for relation, (kind, _owner) in original_relation_owners.items():
-                if kind == "S":
-                    continue
-                _alter_relation_owner(
-                    relation=relation,
-                    kind=kind,
-                    owner=MIGRATOR_ROLE,
-                )
-            for relation, (kind, _owner) in original_relation_owners.items():
-                if kind != "S":
-                    continue
-                _alter_relation_owner(
-                    relation=relation,
-                    kind=kind,
-                    owner=MIGRATOR_ROLE,
-                )
-
-            environment = RoleDatabase(
-                database_name=str(database_name),
-                host=str(connection.settings_dict["HOST"]),
-                port=int(connection.settings_dict["PORT"]),
-                passwords=passwords,
-            )
-            environment.synchronize()
-            yield environment
-        finally:
-            if created_roles:
-                _restore_and_drop_roles(
-                    original_database_owner=original_database_owner,
-                    original_schema_owner=original_schema_owner,
-                    original_relation_owners=original_relation_owners,
-                )
 
 
 def _assert_sqlstate(
@@ -493,6 +180,91 @@ def _create_job_for_role(
 def _clear_worker_heartbeats() -> None:
     with connection.cursor() as cursor:
         cursor.execute("DELETE FROM public.operations_workerheartbeat")
+
+
+def test_role_fixture_restores_preexisting_managed_function_and_dependency() -> None:
+    signature = "public.aegis_validate_operation_authorization(uuid)"
+    dependent = "public.aegis_test_function_dependency()"
+    owner = f"aegis_test_function_owner_{uuid.uuid4().hex}"
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT to_regprocedure(%s)", [signature])
+        prior = cursor.fetchone()
+        assert prior == (None,), "preservation test requires its own function"
+        cursor.execute(sql.SQL("CREATE ROLE {} NOLOGIN").format(_quote(owner)))
+        cursor.execute("""
+            CREATE FUNCTION public.aegis_validate_operation_authorization(p_operation_id uuid)
+            RETURNS boolean LANGUAGE sql AS 'SELECT false'
+        """)
+        cursor.execute(
+            sql.SQL("ALTER FUNCTION {} OWNER TO {}").format(sql.SQL(signature), _quote(owner))
+        )
+        cursor.execute("""
+            CREATE FUNCTION public.aegis_test_function_dependency()
+            RETURNS boolean LANGUAGE sql
+            BEGIN ATOMIC
+                SELECT public.aegis_validate_operation_authorization(NULL::uuid);
+            END
+        """)
+        cursor.execute("SELECT pg_get_functiondef(%s::regprocedure)", [signature])
+        definition = cursor.fetchone()[0]
+    try:
+        with (
+            managed_role_database() as database,
+            database.as_django_role("aegis_web"),
+            connection.cursor() as cursor,
+        ):
+            cursor.execute("SELECT session_user, current_user")
+            assert cursor.fetchone() == ("aegis_web", "aegis_web")
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT pg_get_functiondef(oid), pg_get_userbyid(proowner)
+                FROM pg_proc WHERE oid = %s::regprocedure
+            """,
+                [signature],
+            )
+            assert cursor.fetchone() == (definition, owner)
+            cursor.execute("SELECT public.aegis_test_function_dependency()")
+            assert cursor.fetchone() == (False,)
+            cursor.execute(
+                "SELECT rolname FROM pg_roles WHERE rolname = ANY(%s)", [list(ALL_TEST_ROLES)]
+            )
+            assert cursor.fetchall() == []
+    finally:
+        with connection.cursor() as cursor:
+            cursor.execute(sql.SQL("DROP FUNCTION {}").format(sql.SQL(dependent)))
+            cursor.execute(sql.SQL("DROP FUNCTION {}").format(sql.SQL(signature)))
+            cursor.execute(sql.SQL("DROP ROLE {}").format(_quote(owner)))
+
+
+@pytest.mark.parametrize("role", RUNTIME_DATABASE_ROLES)
+def test_catalog_actual_login_read_and_mutation_boundary(
+    role_database: RoleDatabase, role: str
+) -> None:
+    from aegis_apps.catalog.models import CatalogEntry
+
+    root = Root.objects.create(
+        slot_id="catalog-role-test", display_name="Synthetic", mode="read_only"
+    )
+    anchor = CatalogEntry.objects.create(
+        root=root, raw_name=b"", display_name="", name_key=b"", kind="directory"
+    )
+    with role_database.connect(role) as runtime:
+        if role in ("aegis_web", "aegis_indexer"):
+            with runtime.cursor() as cursor:
+                cursor.execute("SELECT id FROM catalog_catalogentry WHERE id = %s", [anchor.pk])
+                assert cursor.fetchone() == (anchor.pk,)
+        else:
+            _assert_sqlstate(runtime, "SELECT id FROM catalog_catalogentry")
+        for statement in (
+            "INSERT INTO catalog_catalogentry SELECT * FROM catalog_catalogentry WHERE false",
+            "UPDATE catalog_catalogentry SET display_name = 'changed'",
+            "DELETE FROM catalog_catalogentry",
+            "TRUNCATE catalog_catalogentry",
+        ):
+            _assert_sqlstate(runtime, statement)
+    anchor.refresh_from_db()
+    assert anchor.display_name == ""
 
 
 def test_sync_is_idempotent_only_for_an_authenticated_migrator(
