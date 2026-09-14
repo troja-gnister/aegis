@@ -2,6 +2,8 @@
 
 Phase 1 provides credential login, authorized root cards, administration, durable job primitives, and the deployment boundary. Its [acceptance evidence](verification/phase-1.md) records the tested revision, clean-install results, and limitations. It does not enumerate files, generate previews, or edit documents. Follow the [roadmap](../README.md#roadmap) for those later slices.
 
+The [Phase 2 delivery design](superpowers/specs/2026-09-14-phase-2-v1-delivery-design.md) groups the complete v1 build into milestones 2A–2G. Its scope includes metadata-filter controls and photo/video thumbnails. Specifications and plans are not implementation evidence: keep feature statuses Planned until their work begins, and retain the original-file and isolated-test boundaries throughout.
+
 ## Prerequisites
 
 Use Python 3.13, uv 0.12.8, Node.js 24 LTS, npm, Git, and Docker with Compose v2 or newer. Docker must be running. Development uses Docker Desktop/macOS; CI targets Ubuntu 24.04. Run host commands as a non-root user. Dependencies and browser binaries require network access during installation; application workers do not get internet access.

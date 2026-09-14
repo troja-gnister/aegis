@@ -8,6 +8,8 @@
 
 **Canonical roadmap:** [README.md](../../../README.md)
 
+**September 14 delivery amendment:** The user approved consolidating the former Phase 2–6 capabilities into one complete-v1 Phase 2, with milestones 2A–2G, explicit metadata-filter UI, and photo/video thumbnails. The [Phase 2 delivery design](2026-09-14-phase-2-v1-delivery-design.md) records that scope; its written specification awaits review. This changes delivery grouping, not the original-protection, authorization, egress, or benchmark contracts below. Phase 1 acceptance remains unchanged.
+
 ## 1. Decision summary
 
 Aegis will be a Docker-deployable, mobile-first web application for browsing and managing files that the operator explicitly mounts into the deployment. It will provide the focused drive capabilities normally sought from Nextcloud and the photo/video discovery experience normally sought from PhotoPrism, without collaborative editing in the first release.
@@ -24,7 +26,7 @@ The selected architecture is:
 
 The implementation target is at least 1,000,000 indexed entries overall and 50,000 direct children in one folder on an x86 NAS or home server with 4–8 CPU cores and 8–16 GB RAM. The external API and catalog identities must admit later 10,000,000+ entry scaling without changing their meaning.
 
-This document defines the overall platform. It does not authorize a single all-at-once build. The first implementation plan will cover only Phase 1, and each later phase will receive a bounded plan with its own verification gate.
+This document defines the overall platform. It does not authorize a single all-at-once build. Phase 1 has its own completed implementation plan. The expanded Phase 2 is delivered through milestone-specific work packages with bounded plans and their own verification gates.
 
 ## 2. Repository and legacy boundary
 
@@ -584,7 +586,7 @@ Each machine result records provider, model/version, input fingerprint, paramete
 
 ### 13.3 AI capabilities
 
-Phase 5 includes local embeddings, semantic search, OCR, broad labels, captions, and virtual smart albums. Optional face grouping is disabled by default and requires an explicit administrator setting because it processes biometric-like data.
+Milestone 2F includes local embeddings, semantic search, OCR, broad labels, captions, and virtual smart albums. Optional face grouping is disabled by default and requires an explicit administrator setting because it processes biometric-like data.
 
 AI suggestions are stored separately from accepted human metadata. Re-running or replacing a model creates new provenance rather than silently rewriting prior results. AI never deletes, overwrites, renames, moves, or otherwise modifies an original; an accepted suggestion changes metadata or requests a new immutable managed copy/version only.
 
@@ -669,7 +671,7 @@ Regression thresholds run in CI where practical and in a repeatable release benc
 
 ### 16.1 Compose services
 
-The target production Compose topology includes the following services. Phase 1 implements the service boundaries and foundation probes; file and media processing arrive in later phases:
+The target production Compose topology includes the following services. Phase 1 implements the service boundaries and foundation probes; file and media processing arrive in Phase 2 milestones:
 
 - `gateway`: unprivileged Nginx, the only core published HTTP service;
 - `web`: Django ASGI/WSGI application with bounded worker count;
@@ -804,7 +806,7 @@ Query plans and index sizes are captured with results.
 
 ### 18.6 Failure injection and recovery drills
 
-Tests restart PostgreSQL and workers, revoke grants and filesystem permissions, expire a lease while its old worker is paused, fill staging/managed-version/derivative destinations, lose watcher events, interrupt every copy/publish/sync step, replace or alias a root mount, corrupt job payloads, and restore from both application-consistent and crash-consistent backups. They also prove every original remains byte-for-byte unchanged across success, retry, cancellation, and failure. Phase 6 requires a documented operator-run recovery drill, not only mocked tests.
+Tests restart PostgreSQL and workers, revoke grants and filesystem permissions, expire a lease while its old worker is paused, fill staging/managed-version/derivative destinations, lose watcher events, interrupt every copy/publish/sync step, replace or alias a root mount, corrupt job payloads, and restore from both application-consistent and crash-consistent backups. They also prove every original remains byte-for-byte unchanged across success, retry, cancellation, and failure. Milestone 2G requires a documented operator-run recovery drill, not only mocked tests.
 
 ## 19. Delivery roadmap
 
@@ -820,35 +822,21 @@ Create the Django/React/PostgreSQL/Compose skeleton, same-origin credential sess
 
 Gate: through the deployed gateway, a user can sign in and see only authorized root shells; unauthorized metadata and delivery attempts fail; core checks pass.
 
-### Phase 2 — Scalable drive core
+### Phase 2 — Complete v1 application
 
-Build checkpointed indexing, watcher ingestion, cursor browsing, filename search, resumable managed uploads, immutable versions/copies, logical organization, metadata-only archive/restore, reconciliation, audit, progress, the functional mobile Files/Transfers UI, and the performance fixture.
+All remaining v1 features are required within Phase 2. The [delivery design](2026-09-14-phase-2-v1-delivery-design.md#2-milestones-and-dependencies) supplies these milestones:
 
-Gate: complete UI and API drive workflows meet correctness and server-latency budgets with 1M total entries and a 50K-entry folder.
+| Milestone | Required scope |
+| --- | --- |
+| 2A — Indexed drive | Checkpointed indexing, event/periodic reconciliation, cursor browsing, filename/path search, basic filter UI, downloads/ranges, scan status, and initial 1M/50K fixtures |
+| 2B — Managed files | Resumable uploads, immutable versions/copies, logical organization, managed folders, metadata-only archive/restore, audit, and persistent Transfers UI |
+| 2C — Photos and videos | Photo thumbnails, video posters, EXIF/GPS/media filters, timeline, photo/video viewers, range/HLS playback, and installable PWA navigation |
+| 2D — Documents | Progressive PDF/text/CSV/XLSX/ODS viewing and non-collaborative editing as new immutable managed versions |
+| 2E — Organization and search | Rich combined filters, document full-text search, albums, tags, ratings, favorites, saved searches, and duplicate review |
+| 2F — Local intelligence | Optional local CPU/GPU inference, OCR/labels/captions/embeddings, semantic search, provenance, smart albums, optional face grouping, and explicit frontier connectors |
+| 2G — Release readiness | Integrated benchmark/security/browser gates, optional TOTP, backup/restore and recovery drills, upgrades, resource tuning, operations, and the v1 release checklist |
 
-### Phase 3 — Mobile media and documents
-
-Complete installable PWA navigation and build thumbnails, timeline, photo/video viewers, range/HLS delivery, PDF/text/CSV/common-spreadsheet viewers, and non-collaborative copy-on-write document editing on the Files/Transfers foundation from Phase 2.
-
-Gate: mobile Chromium/WebKit, accessibility, payload, LCP, and INP journeys pass under representative data.
-
-### Phase 4 — Search and human organization
-
-Add EXIF/GPS/date/type/size filtering, document text, albums, tags, ratings, favorites, saved filters, and duplicate candidates.
-
-Gate: combined search and organization remain permission-safe and stable through external reconciliation.
-
-### Phase 5 — Local intelligence and optional frontier providers
-
-Add local CPU embeddings/OCR/labels/captions, optional GPU execution, semantic search, provenance/confidence, optional face grouping, virtual smart albums, and explicit frontier connectors.
-
-Gate: all core features pass with AI disabled and failed, local CPU is useful on baseline hardware, and network tests prove no unapproved content egress.
-
-### Phase 6 — Release hardening
-
-Complete backup/restore drills, hostile-media coverage, failure injection, authentication/rate-limit review, optional TOTP, deployment and upgrade documentation, resource tuning, and the v1 release checklist.
-
-Gate: documented installation, upgrade, backup, restore, and recovery exercises pass on the supported deployment.
+Each milestone has smaller reviewed work packages and acceptance evidence. Gate: all required UI/API workflows pass correctness, authorization, original-preservation, mobile, scale, and recovery checks; local-model failure cannot break the core product. Performance and security testing start in 2A and are repeated under actual media/document/model workloads as they become available. A catalog-only run cannot close the final integrated gate.
 
 ### Later work
 
@@ -871,7 +859,7 @@ WebDAV/sync, controlled sharing, 10M+ certification, storage adapters, and colla
 | Hostile processor reaches unrelated data or network | Per-job sandboxes, role-scoped mounts/database principals, internal networks, and an isolated frontier connector |
 | Cloud AI violates privacy expectations | Disabled by default, separate egress profile, per-capability opt-in, payload minimization, and audit |
 | Derivative growth consumes storage | Content-addressed manifests, quotas/watermarks, eviction, and reproducibility |
-| All-at-once rewrite stalls | Phase-specific plans, first-usable drive gate in Phase 2, and acceptance criteria in the canonical README |
+| All-at-once rewrite stalls | Bounded milestone work packages, early usable drive gates, and task/evidence tracking in the canonical README |
 
 ## 21. Resolved decisions
 

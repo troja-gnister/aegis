@@ -163,7 +163,7 @@ A mount or authorization failure is a reason to fix deployment inputs, not to gr
 
 ## Upgrade checkpoint
 
-Before changing versions, record the running commit/image identities, deployment project, protected secret sources, manifest identity, and PostgreSQL backup. Stop external writes when a consistent snapshot requires it. Preserve the original filesystem independently: the database does not contain original bytes, and originals alone do not restore accounts, grants, or audit history. Automated backup/restore and recovery drills remain Phase 6 work.
+Before changing versions, record the running commit/image identities, deployment project, protected secret sources, manifest identity, and PostgreSQL backup. Stop external writes when a consistent snapshot requires it. Preserve the original filesystem independently: the database does not contain original bytes, and originals alone do not restore accounts, grants, or audit history. Automated backup/restore and recovery drills remain planned in milestone 2G of the [expanded Phase 2](../superpowers/specs/2026-09-14-phase-2-v1-delivery-design.md).
 
 Use a reviewed, locked build; rerun preflight/render when mount inputs change, then recreate the full deployment and verify readiness and representative user access. Do not assume downgrading an image reverses migrations. Keep the previous checkpoint until upgrade verification succeeds. Never use volume removal as an upgrade step.
 

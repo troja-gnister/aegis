@@ -4,7 +4,7 @@ Aegis is a planned self-hosted, mobile-first file drive and media library. It wi
 
 > **Project status: Phase 1 secure-platform foundation verified.** The active tree contains the Django/React foundation; the full file-drive and media-library features remain planned. The legacy Arch Linux hardening CLI remains recoverable as `legacy-hardening-cli-v0.1.0` at commit `1cb4277`.
 
-The [platform design](docs/superpowers/specs/2026-08-31-aegis-platform-rewrite-design.md) defines the product boundaries. The [Phase 1 implementation plan](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md#implementation-status) tracks delivery and verification.
+The [platform design](docs/superpowers/specs/2026-08-31-aegis-platform-rewrite-design.md) defines the product boundaries. The [Phase 2 delivery design](docs/superpowers/specs/2026-09-14-phase-2-v1-delivery-design.md) consolidates the remaining v1 work into milestones 2A–2G. The [Phase 1 task ledger](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md#implementation-status) preserves the completed foundation checkpoints.
 
 The [Phase 1 acceptance report](docs/verification/phase-1.md) records passing fresh-checkout and Linux suites, independent review, and remaining product/release limitations. Original roots containing nested filesystem mounts are rejected; use [separately declared, non-overlapping leaf roots](docs/operations/phase-1-deployment.md#slot-inspection-and-configuration).
 
@@ -15,6 +15,7 @@ Aegis will provide a secure browser interface for files mounted into its Docker 
 - Browse, search, upload, organize, preview, stream, and download files while keeping every mounted original unchanged.
 - Handle at least 1,000,000 indexed entries and 50,000 entries in one folder on the initial target hardware.
 - Show responsive photo and video libraries with thumbnails, metadata filters, and mobile viewers.
+- Provide touch-friendly metadata filters, active filter chips, ranges, and saved searches across Files, Photos, and Search. Photo thumbnails and video posters load progressively without automatic grid playback.
 - Preview PDF, plain text, CSV, and common spreadsheet files without downloading the complete file when avoidable.
 - Support multiple accounts, groups, separately granted roots, and operation-level permissions.
 - When AI is enabled, run it locally on CPU by default, optionally accelerate it with a GPU, and use frontier APIs only after explicit configuration and per-capability opt-in.
@@ -62,6 +63,8 @@ Every feature pull request must update its row. Implemented and Verified rows li
 
 Phase 1 verification covers login/admin, granted root cards, authorization epochs, job/status primitives, and deployment boundaries only. It does not certify file-content delivery or per-file operations, live scan/disk-pressure metrics, indexing, or hostile-document/media processing; those are later phase gates.
 
+Targets 2A–2G are milestones within the expanded Phase 2. A feature spanning milestones remains Planned/Implemented until all its required behavior passes; design approval alone does not advance its status.
+
 | ID | Capability | Status | Target | Evidence |
 | --- | --- | --- | --- | --- |
 | PLAT-001 | Docker Compose deployment with gateway, web, workers, PostgreSQL, and explicit roots | Verified | Phase 1 | [Acceptance evidence](docs/verification/phase-1.md) |
@@ -70,43 +73,45 @@ Phase 1 verification covers login/admin, granted root cards, authorization epoch
 | AUTH-001 | Credential login with Argon2id and revocable server-side sessions | Verified | Phase 1 | [Acceptance evidence](docs/verification/phase-1.md) |
 | AUTH-002 | Multiple users and groups with administrative management | Verified | Phase 1 | [Acceptance evidence](docs/verification/phase-1.md) |
 | AUTH-003 | Additive per-user/group root grants and authorization epochs | Verified | Phase 1 | [Acceptance evidence](docs/verification/phase-1.md) |
-| AUTH-004 | Optional administrator-enforced TOTP | Planned | Phase 6 | — |
-| FILE-001 | Indexed directory API with stable keyset cursor pagination | Planned | Phase 2 | — |
+| AUTH-004 | Optional administrator-enforced TOTP | Planned | 2G | — |
+| FILE-001 | Indexed directory API with stable keyset cursor pagination | Planned | 2A | — |
 | FILE-002 | Deployment-declared, alias-checked mount slots and logical roots | Verified | Phase 1 | [Acceptance evidence](docs/verification/phase-1.md) |
-| FILE-003 | Resumable uploads into immutable managed storage with progress and conflict handling | Planned | Phase 2 | — |
-| FILE-004 | Copy-on-write folders, copies, logical organization, and idempotent operation recovery | Planned | Phase 2 | — |
-| FILE-005 | Authorized downloads and browser-compatible byte-range streaming | Planned | Phase 2 | — |
-| FILE-006 | Reversible metadata archive/hide state with no source or managed-version byte deletion | Planned | Phase 2 | — |
-| FILE-007 | Filesystem event ingestion plus checkpointed full reconciliation | Planned | Phase 2 | — |
-| FILE-008 | Permission-safe filename and path search | Planned | Phase 2 | — |
+| FILE-003 | Resumable uploads into immutable managed storage with progress and conflict handling | Planned | 2B | — |
+| FILE-004 | Copy-on-write folders, copies, logical organization, and idempotent operation recovery | Planned | 2B | — |
+| FILE-005 | Authorized downloads and browser-compatible byte-range streaming | Planned | 2A | — |
+| FILE-006 | Reversible metadata archive/hide state with no source or managed-version byte deletion | Planned | 2B | — |
+| FILE-007 | Filesystem event ingestion plus checkpointed full reconciliation | Planned | 2A | — |
+| FILE-008 | Permission-safe filename and path search | Planned | 2A | — |
 | UX-001 | Dark responsive authenticated application shell | Verified | Phase 1 | [Acceptance evidence](docs/verification/phase-1.md) |
-| UX-002 | Virtualized mobile Files UI and persistent resumable transfer manager | Planned | Phase 2 | — |
-| UX-003 | Installable PWA with Files, Photos, Search, and More navigation | Planned | Phase 3 | — |
-| UX-004 | Reconnectable server-sent operation, transfer, and job progress | Planned | Phase 2 | — |
-| MEDIA-001 | Responsive thumbnails, video posters, and media probing | Planned | Phase 3 | — |
-| MEDIA-002 | Keyset photo timeline, date/type filters, and virtualized grids | Planned | Phase 3 | — |
-| MEDIA-003 | Touch-oriented photo and video viewing | Planned | Phase 3 | — |
-| MEDIA-004 | Original video range streaming with cached HLS fallback when required | Planned | Phase 3 | — |
-| DOC-001 | Progressive PDF viewer and page thumbnails | Planned | Phase 3 | — |
-| DOC-002 | Escaped, chunked text viewing with encoding detection | Planned | Phase 3 | — |
-| DOC-003 | Server-paged CSV viewing with bounded filtering | Planned | Phase 3 | — |
-| DOC-004 | Sandboxed viewing of common spreadsheet formats | Planned | Phase 3 | — |
-| DOC-005 | Non-collaborative text/CSV/spreadsheet edits and safe PDF annotations/forms as new immutable managed versions | Planned | Phase 3 | — |
-| META-001 | EXIF/GPS/date/type/size extraction and filtering | Planned | Phase 4 | — |
-| ORG-001 | Albums, tags, ratings, favorites, and duplicate candidates | Planned | Phase 4 | — |
-| SEARCH-001 | Permission-safe combined filename and metadata search | Planned | Phase 4 | — |
-| SEARCH-002 | Extracted PDF/text full-text search | Planned | Phase 4 | — |
-| AI-001 | Optional local CPU embeddings, OCR, labels, and captions | Planned | Phase 5 | — |
-| AI-002 | Optional GPU acceleration using a deployment profile | Planned | Phase 5 | — |
-| AI-003 | Semantic search and virtual smart albums with provenance and confidence | Planned | Phase 5 | — |
-| AI-004 | Explicit per-capability frontier API connector | Planned | Phase 5 | — |
+| UX-002 | Virtualized mobile Files UI and persistent resumable transfer manager | Planned | 2A/2B | — |
+| UX-003 | Installable PWA with Files, Photos, Search, and More navigation | Planned | 2C | — |
+| UX-004 | Reconnectable server-sent operation, transfer, and job progress | Planned | 2A/2B | — |
+| UX-005 | Mobile metadata-filter panel, active chips, multi-select/ranges, and saved searches | Planned | 2A/2C/2E | — |
+| MEDIA-001 | Responsive thumbnails, video posters, and media probing | Planned | 2C | — |
+| MEDIA-002 | Keyset photo timeline, date/type filters, and virtualized grids | Planned | 2C | — |
+| MEDIA-003 | Touch-oriented photo and video viewing | Planned | 2C | — |
+| MEDIA-004 | Original video range streaming with cached HLS fallback when required | Planned | 2C | — |
+| DOC-001 | Progressive PDF viewer and page thumbnails | Planned | 2D | — |
+| DOC-002 | Escaped, chunked text viewing with encoding detection | Planned | 2D | — |
+| DOC-003 | Server-paged CSV viewing with bounded filtering | Planned | 2D | — |
+| DOC-004 | Sandboxed viewing of common spreadsheet formats | Planned | 2D | — |
+| DOC-005 | Non-collaborative text/CSV/spreadsheet edits and safe PDF annotations/forms as new immutable managed versions | Planned | 2D | — |
+| META-001 | EXIF/GPS/date/type/size extraction and filtering | Planned | 2C/2E | — |
+| ORG-001 | Albums, tags, ratings, favorites, and duplicate candidates | Planned | 2E | — |
+| SEARCH-001 | Permission-safe combined filename and metadata search | Planned | 2E | — |
+| SEARCH-002 | Extracted PDF/text full-text search | Planned | 2E | — |
+| AI-001 | Optional local CPU embeddings, OCR, labels, and captions | Planned | 2F | — |
+| AI-002 | Optional GPU acceleration using a deployment profile | Planned | 2F | — |
+| AI-003 | Semantic search and virtual smart albums with provenance and confidence | Planned | 2F | — |
+| AI-004 | Explicit per-capability frontier API connector | Planned | 2F | — |
 | SEC-001 | Hardened same-origin edge and least-privilege container foundation | Verified | Phase 1 | [Acceptance evidence](docs/verification/phase-1.md) |
 | SEC-002 | Authentication, grant, and administration audit trail | Verified | Phase 1 | [Acceptance evidence](docs/verification/phase-1.md) |
-| SEC-003 | Managed publication, version, copy, and archive audit trail | Planned | Phase 2 | — |
-| SEC-004 | Frontier egress audit trail and isolation tests | Planned | Phase 5 | — |
-| SEC-005 | Release security/rate-limit review and hostile-content gate | Planned | Phase 6 | — |
-| PERF-001 | Automated 1,000,000-entry and 50,000-entry-folder performance suite | Planned | Phase 2 | — |
-| OPS-001 | Documented backup, restore, upgrade, failure-injection, and recovery workflows | Planned | Phase 6 | — |
+| SEC-003 | Managed publication, version, copy, and archive audit trail | Planned | 2B | — |
+| SEC-004 | Frontier egress audit trail and isolation tests | Planned | 2F | — |
+| SEC-005 | Release security/rate-limit review and hostile-content gate | Planned | 2G | — |
+| PERF-001 | Automated 1,000,000-entry and 50,000-entry-folder performance suite | Planned | 2A–2G | — |
+| OPS-001 | Documented backup, restore, upgrade, failure-injection, and recovery workflows | Planned | 2G | — |
+| OPS-003 | Live scan progress and staging/managed/derivative capacity metrics | Planned | 2A–2C | — |
 | EXT-001 | WebDAV and desktop synchronization | Deferred | Later | — |
 | EXT-002 | Controlled sharing | Deferred | Later | — |
 | EXT-003 | Certified 10,000,000+ entry operation and storage adapters | Deferred | Later | — |
@@ -114,20 +119,32 @@ Phase 1 verification covers login/admin, granted root cards, authorization epoch
 
 ## Roadmap
 
-The current focus is **Phase 2 planning — Scalable drive core**. The [Phase 1 secure foundation](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md) is complete. A phase is complete only when its acceptance gate passes; landing some listed features is not enough.
+The current focus is **Phase 2 design review — Complete v1 application**, starting with the indexed-browser work in milestone 2A. The expanded scope, metadata filters, and photo/video thumbnails are approved; the written specifications precede implementation. The [Phase 1 secure foundation](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md) remains complete.
 
-As of September 13, 2026, **all 14 Phase 1 tasks are complete**. All four Linux CI jobs pass: 620 backend tests, 235 deployment tests, 43 frontend tests, and eight Chromium/WebKit journeys. Runbooks, accepted review, the enforced nested-mount restriction, and fresh-checkout verification are recorded in the [acceptance report](docs/verification/phase-1.md). The five later implementation phases remain planned, including file indexing, large-folder browsing, media viewers, and document editing; they do not yet have a final task count.
+The September 13 foundation checkpoint completed **all 14 Phase 1 tasks**: 620 backend tests, 235 Linux deployment tests, 43 frontend tests, and eight Chromium/WebKit journeys passed. Runbooks, accepted review, the enforced nested-mount restriction, and fresh-checkout verification are recorded in the [acceptance report](docs/verification/phase-1.md).
+
+On September 14, the remaining v1 scope was consolidated into **seven Phase 2 milestones, zero accepted so far**. Detailed task counts will come from their implementation plans; seven milestones does not mean seven implementation tasks. The [delivery ledger](docs/superpowers/specs/2026-09-14-phase-2-v1-delivery-design.md#9-delivery-ledger-and-documentation) tracks the packages and evidence. The former Phase 3–6 capabilities are included below, not postponed beyond Phase 2.
 
 | Phase | Deliverable | Acceptance gate | Status |
 | --- | --- | --- | --- |
 | 0 — Design and checkpoint | Canonical README/specification, legacy release tag, and first bounded implementation plan | Design reviewed, legacy state recoverable by name, and clean documentation checkpoint | Verified |
 | 1 — Secure foundation | Django/React/PostgreSQL/Compose skeleton, same-origin auth, role-scoped credentials/volumes, mount slots, users/groups/grants, fenced job/operation primitives, health, and CI | A user can sign in and reach only an authorized root shell through the least-privilege deployed stack | Verified |
-| 2 — Scalable drive core | Indexer, cursor browser, functional mobile Files/transfers UI, search, resumable managed uploads, immutable versions/copies, metadata-only archive, reconciliation, and audit | Complete UI and API workflows pass against 1M total entries and a 50K-entry folder | Planned |
-| 3 — Mobile media and documents | Installable PWA navigation, thumbnails, photo timeline, photo/video viewers, range/HLS delivery, PDF/text/CSV/spreadsheet viewers, and copy-on-write document editing | Mobile interaction budgets and Chromium/WebKit browser journeys pass | Planned |
-| 4 — Search and human organization | Rich metadata, albums, tags, ratings, favorites, duplicates, and full-text search | Combined search remains correct and permission-safe across users and roots | Planned |
-| 5 — Local intelligence | CPU AI, optional GPU, semantic search, provenance, smart albums, and opt-in frontier providers | Files remain fully usable with AI disabled or failed; no unapproved egress occurs | Planned |
-| 6 — Release hardening | Backup/restore drills, hostile media tests, failure injection, security review, upgrade path, and operations guide | A documented recovery exercise and release checklist pass for v1 | Planned |
+| 2 — Complete v1 application | Indexed drive, managed files, photo/video/document viewing and editing, metadata filters, organization/search, optional local models, and release hardening | All milestones 2A–2G pass their feature, scale, security, browser, and recovery gates | Planned |
 | Later | WebDAV/sync, controlled sharing, 10M+ certification, storage adapters, and separately specified collaboration | Each capability receives its own approved specification and scale/security gate | Deferred |
+
+### Phase 2 milestones
+
+| Milestone | Deliverable | Acceptance gate | Status |
+| --- | --- | --- | --- |
+| 2A — Indexed drive | Scans/reconciliation, cursor browsing, filename/path search, basic filters, downloads/ranges, scan status, and initial 1M/50K fixtures | Read-side UI/API workflows, mount-loss recovery, authorization, and scale measurements pass | Planned |
+| 2B — Managed files | Resumable uploads, immutable versions/copies, managed folders, logical organization, archive/restore, and transfers | Restart/revocation/conflict journeys preserve every original and published version | Planned |
+| 2C — Photos and videos | Photo thumbnails, video posters, timeline, metadata filters, viewers, compatible playback, and installable PWA navigation | Private preview delivery, bounded media processing, and mobile interaction/load gates pass | Planned |
+| 2D — Documents | PDF/text/CSV/spreadsheet viewers and non-collaborative editing as new immutable versions | Progressive viewing and save/conflict/hostile-document journeys pass | Planned |
+| 2E — Organization and search | Rich metadata/full-text filters, albums, tags, ratings, favorites, saved searches, and duplicate review | Queries, suggestions, and review actions remain permission-safe and metadata-only | Planned |
+| 2F — Local intelligence | Optional CPU models, optional GPU, semantic search, provenance, smart albums, and opt-in frontier providers | Core app works with models off/failed; no unapproved provider egress occurs | Planned |
+| 2G — Release readiness | Integrated performance/security tests, optional TOTP, backup/restore, failure injection, upgrades, and operations | Full benchmark, deployment, upgrade, and documented recovery exercises pass | Planned |
+
+Performance and security checks begin in 2A and grow with the workload; they are not postponed until 2G. Core metadata filters and thumbnails do not require model inference. Each milestone is delivered through smaller reviewed packages and regular commits on `main`.
 
 ## Performance contract
 
@@ -163,12 +180,13 @@ Directory APIs use bounded page sizes, compact list records, compound indexes, a
 
 ## Development and documentation
 
-The Django backend, React shell, role-separated containers, and browser/CI gates are verified for Phase 1. Review and clean-install evidence are recorded; file browsing and the rest of the product remain future work. Subsequent phases receive their own bounded plans so scale, security, and recovery gates stay visible.
+The Django backend, React shell, role-separated containers, and browser/CI gates are verified for Phase 1. Review and clean-install evidence are recorded; the expanded Phase 2 is in design review. Its work packages receive bounded plans so task counts, scale, security, and recovery gates stay visible.
 
 - [Development and verification](docs/development.md)
 - [Deployment and operation](docs/operations/phase-1-deployment.md)
 - [Phase 1 acceptance evidence and limitations](docs/verification/phase-1.md)
 - [Approved platform design](docs/superpowers/specs/2026-08-31-aegis-platform-rewrite-design.md)
+- [Phase 2 delivery design and milestone ledger](docs/superpowers/specs/2026-09-14-phase-2-v1-delivery-design.md)
 - [Approved Phase 1 implementation plan](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md)
 - License: [MIT](LICENSE)
 
