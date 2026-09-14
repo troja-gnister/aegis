@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
 import secrets
+import subprocess
+import sys
 import uuid
+from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -56,6 +60,214 @@ HEARTBEAT_FUNCTIONS = {
     "media": "aegis_publish_media_heartbeat",
 }
 HEARTBEAT_ARGUMENTS = "%s, %s, %s, %s, %s, %s, %s, %s, %s"
+
+
+def test_role_fixture_restores_preexisting_managed_function_and_dependency() -> None:
+    signature = "public.aegis_validate_operation_authorization(uuid)"
+    dependent = "public.aegis_test_function_dependency()"
+    owner = f"aegis_test_function_owner_{uuid.uuid4().hex}"
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT to_regprocedure(%s)", [signature])
+        prior = cursor.fetchone()
+        assert prior == (None,), "preservation test requires its own function"
+        cursor.execute(sql.SQL("CREATE ROLE {} NOLOGIN").format(_quote(owner)))
+        cursor.execute("""
+            CREATE FUNCTION public.aegis_validate_operation_authorization(p_operation_id uuid)
+            RETURNS boolean LANGUAGE sql AS 'SELECT false'
+        """)
+        cursor.execute(
+            sql.SQL("ALTER FUNCTION {} OWNER TO {}").format(sql.SQL(signature), _quote(owner))
+        )
+        cursor.execute("""
+            CREATE FUNCTION public.aegis_test_function_dependency()
+            RETURNS boolean LANGUAGE sql
+            BEGIN ATOMIC
+                SELECT public.aegis_validate_operation_authorization(NULL::uuid);
+            END
+        """)
+        cursor.execute("SELECT pg_get_functiondef(%s::regprocedure)", [signature])
+        definition = cursor.fetchone()[0]
+    try:
+        with (
+            managed_role_database() as database,
+            database.as_django_role("aegis_web"),
+            connection.cursor() as cursor,
+        ):
+            cursor.execute("SELECT session_user, current_user")
+            assert cursor.fetchone() == ("aegis_web", "aegis_web")
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT pg_get_functiondef(oid), pg_get_userbyid(proowner)
+                FROM pg_proc WHERE oid = %s::regprocedure
+            """,
+                [signature],
+            )
+            assert cursor.fetchone() == (definition, owner)
+            cursor.execute("SELECT public.aegis_test_function_dependency()")
+            assert cursor.fetchone() == (False,)
+            cursor.execute(
+                "SELECT rolname FROM pg_roles WHERE rolname = ANY(%s)", [list(ALL_TEST_ROLES)]
+            )
+            assert cursor.fetchall() == []
+    finally:
+        with connection.cursor() as cursor:
+            cursor.execute(sql.SQL("DROP FUNCTION {}").format(sql.SQL(dependent)))
+            cursor.execute(sql.SQL("DROP FUNCTION {}").format(sql.SQL(signature)))
+            cursor.execute(sql.SQL("DROP ROLE {}").format(_quote(owner)))
+
+
+
+def _scan_scalar(cursor: psycopg.Cursor[Any]) -> Any:
+    row = cursor.fetchone()
+    assert row is not None
+    return row[0]
+
+
+def _create_scan_fixture() -> tuple[Root, str, str]:
+    from aegis_apps.catalog.models import CatalogEntry
+    from aegis_apps.indexing.models import IndexDeployment
+    from aegis_apps.operations.models import WorkerHeartbeat
+
+    root = Root.objects.create(
+        slot_id=f"scan-{uuid.uuid4().hex}", display_name="Synthetic scan root",
+        mode=Root.Mode.READ_ONLY, active=True,
+    )
+    CatalogEntry.objects.create(
+        root=root, raw_name=b"", display_name="", name_key=b"", kind="directory",
+    )
+    deployment, created = IndexDeployment.objects.get_or_create(
+        pk=1, defaults={
+            "manifest_identity": "a" * 64, "slot_ids": [root.slot_id],
+            "interval_seconds": 3600, "idle_timeout_seconds": 120,
+            "batch_records": 500, "readers": 2,
+        },
+    )
+    if not created:
+        deployment.slot_ids = sorted(set([*deployment.slot_ids, root.slot_id]))
+        deployment.save(update_fields=("slot_ids",))
+    worker_id = str(uuid.uuid4())
+    WorkerHeartbeat.objects.create(
+        role="indexer", worker_id=worker_id, release_id="task4-test",
+        schema_identity="schema-test", manifest_identity=deployment.manifest_identity,
+        last_seen_at=timezone.now(), status="idle", metrics={},
+    )
+    return root, worker_id, deployment.manifest_identity
+
+
+def test_only_indexer_can_schedule_and_renew(role_database: RoleDatabase) -> None:
+    root, worker_id, digest = _create_scan_fixture()
+    with role_database.connect("aegis_web") as web:
+        _assert_sqlstate(web, "SELECT public.aegis_schedule_root_scan(%s,%s,%s)",
+                         (root.pk, worker_id, digest))
+    with role_database.connect("aegis_indexer") as indexer:
+        run_id = _scan_scalar(indexer.execute(
+            "SELECT public.aegis_schedule_root_scan(%s,%s,%s)",
+            (root.pk, worker_id, digest),
+        ))
+        assert isinstance(run_id, uuid.UUID)
+        lease = _scan_scalar(indexer.execute(
+            "SELECT public.aegis_claim_scan_directory(%s,%s)", (run_id, worker_id),
+        ))
+        assert _scan_scalar(indexer.execute(
+            "SELECT public.aegis_renew_scan_directory(%s)", (Jsonb(lease),),
+        )) is True
+
+
+@pytest.mark.parametrize("role", ["aegis_web", "aegis_operations", "aegis_media", "aegis_migrator"])
+def test_scan_maintenance_checks_actual_caller(role_database: RoleDatabase, role: str) -> None:
+    root, worker, digest = _create_scan_fixture()
+    with role_database.connect(role) as caller:
+        _assert_sqlstate(caller, "SELECT public.aegis_schedule_root_scan(%s,%s,%s)",
+                         (root.pk, worker, digest))
+        _assert_sqlstate(caller, "SELECT public.aegis_claim_scan_directory(%s,%s)",
+                         (uuid.uuid4(), worker))
+        _assert_sqlstate(caller, "SELECT public.aegis_renew_scan_directory(%s)", (Jsonb({}),))
+
+
+@pytest.mark.parametrize(
+    "role", ["aegis_indexer", "aegis_operations", "aegis_media", "aegis_migrator"]
+)
+def test_only_web_can_request_scan(role_database: RoleDatabase, role: str) -> None:
+    with role_database.connect(role) as caller:
+        _assert_sqlstate(caller, "SELECT public.aegis_request_root_scan(%s,%s,%s,%s)",
+                         (uuid.uuid4(), uuid.uuid4(), 0, "request_123"))
+
+
+def test_built_runtime_wheel_installs_and_executes_scan_sql(role_database: RoleDatabase) -> None:
+    root, worker, digest = _create_scan_fixture()
+    image_tag = f"aegis-task4-artifact-{uuid.uuid4().hex}"
+    repository = Path(__file__).resolve().parents[2]
+    script = """
+import json, sys
+from importlib import metadata, resources
+import django
+from django.conf import settings
+from django.db import transaction
+import psycopg
+from psycopg.types.json import Jsonb
+data = json.load(sys.stdin)
+settings.configure(DATABASES={'default': {
+    'ENGINE': 'django.db.backends.postgresql', 'NAME': data['database'],
+    'USER': 'aegis_migrator', 'PASSWORD': data['migrator_password'],
+    'HOST': data['host'], 'PORT': data['port'],
+}}, INSTALLED_APPS=[])
+django.setup()
+from aegis_apps.common import database_privileges
+assert '/app/.venv/' in database_privileges.__file__
+wheel_files = {str(path) for path in metadata.files('aegis-platform')}
+for name in ('schedule.sql', 'lease.sql'):
+    assert 'aegis_apps/indexing/sql/' + name in wheel_files
+    resource = resources.files('aegis_apps.indexing').joinpath('sql', name)
+    assert '/app/.venv/' in str(resource)
+with transaction.atomic():
+    database_privileges.synchronize_database_privileges()
+with psycopg.connect(dbname=data['database'], host=data['host'], port=data['port'],
+        user='aegis_indexer', password=data['indexer_password'], autocommit=True) as caller:
+    assert caller.execute('SELECT session_user, current_user').fetchone() == (
+        'aegis_indexer', 'aegis_indexer')
+    run = caller.execute('SELECT public.aegis_schedule_root_scan(%s,%s,%s)',
+        [data['root'], data['worker'], data['digest']]).fetchone()[0]
+    assert run is not None
+    lease = caller.execute('SELECT public.aegis_claim_scan_directory(%s,%s)',
+        [run, data['worker']]).fetchone()[0]
+    assert caller.execute('SELECT public.aegis_renew_scan_directory(%s)',
+        [Jsonb(lease)]).fetchone()[0] is True
+print('Installed wheel SQL: schedule, request, claim, renew; runtime login round trip passed.')
+"""
+    try:
+        built = subprocess.run(
+            ["docker", "build", "--label", f"aegis.verify.owner={image_tag}", "--tag", image_tag,
+             "--file", "docker/backend.Dockerfile", "."],
+            cwd=repository, capture_output=True, text=True, timeout=300,
+        )
+        assert built.returncode == 0, built.stderr[-4000:]
+        # Build time must not make the synthetic heartbeat stale before the runtime proof.
+        with connection.cursor() as cursor:
+            cursor.execute("UPDATE operations_workerheartbeat SET last_seen_at=clock_timestamp() "
+                           "WHERE worker_id=%s", [worker])
+        host = "host.docker.internal" if sys.platform == "darwin" else "127.0.0.1"
+        network = [] if sys.platform == "darwin" else ["--network", "host"]
+        result = subprocess.run(
+            ["docker", "run", "--rm", "--interactive", *network, "--workdir", "/tmp",
+             "--entrypoint", "python", image_tag, "-I", "-c", script],
+            input=json.dumps({
+                "host": host, "port": role_database.port, "database": role_database.database_name,
+                "migrator_password": role_database.passwords["aegis_migrator"],
+                "indexer_password": role_database.passwords["aegis_indexer"],
+                "root": str(root.pk), "worker": worker, "digest": digest,
+            }), capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 0, result.stderr[-4000:]
+        assert "runtime login round trip passed" in result.stdout
+    finally:
+        inspected = subprocess.run(["docker", "image", "inspect", image_tag],
+                                   capture_output=True, text=True, timeout=30)
+        if inspected.returncode == 0:
+            info = json.loads(inspected.stdout)[0]
+            assert info["Config"]["Labels"].get("aegis.verify.owner") == image_tag
+            subprocess.run(["docker", "image", "rm", image_tag],
+                           check=True, capture_output=True, timeout=30)
 
 
 def _assert_sqlstate(
@@ -181,60 +393,6 @@ def _clear_worker_heartbeats() -> None:
     with connection.cursor() as cursor:
         cursor.execute("DELETE FROM public.operations_workerheartbeat")
 
-
-def test_role_fixture_restores_preexisting_managed_function_and_dependency() -> None:
-    signature = "public.aegis_validate_operation_authorization(uuid)"
-    dependent = "public.aegis_test_function_dependency()"
-    owner = f"aegis_test_function_owner_{uuid.uuid4().hex}"
-    with connection.cursor() as cursor:
-        cursor.execute("SELECT to_regprocedure(%s)", [signature])
-        prior = cursor.fetchone()
-        assert prior == (None,), "preservation test requires its own function"
-        cursor.execute(sql.SQL("CREATE ROLE {} NOLOGIN").format(_quote(owner)))
-        cursor.execute("""
-            CREATE FUNCTION public.aegis_validate_operation_authorization(p_operation_id uuid)
-            RETURNS boolean LANGUAGE sql AS 'SELECT false'
-        """)
-        cursor.execute(
-            sql.SQL("ALTER FUNCTION {} OWNER TO {}").format(sql.SQL(signature), _quote(owner))
-        )
-        cursor.execute("""
-            CREATE FUNCTION public.aegis_test_function_dependency()
-            RETURNS boolean LANGUAGE sql
-            BEGIN ATOMIC
-                SELECT public.aegis_validate_operation_authorization(NULL::uuid);
-            END
-        """)
-        cursor.execute("SELECT pg_get_functiondef(%s::regprocedure)", [signature])
-        definition = cursor.fetchone()[0]
-    try:
-        with (
-            managed_role_database() as database,
-            database.as_django_role("aegis_web"),
-            connection.cursor() as cursor,
-        ):
-            cursor.execute("SELECT session_user, current_user")
-            assert cursor.fetchone() == ("aegis_web", "aegis_web")
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT pg_get_functiondef(oid), pg_get_userbyid(proowner)
-                FROM pg_proc WHERE oid = %s::regprocedure
-            """,
-                [signature],
-            )
-            assert cursor.fetchone() == (definition, owner)
-            cursor.execute("SELECT public.aegis_test_function_dependency()")
-            assert cursor.fetchone() == (False,)
-            cursor.execute(
-                "SELECT rolname FROM pg_roles WHERE rolname = ANY(%s)", [list(ALL_TEST_ROLES)]
-            )
-            assert cursor.fetchall() == []
-    finally:
-        with connection.cursor() as cursor:
-            cursor.execute(sql.SQL("DROP FUNCTION {}").format(sql.SQL(dependent)))
-            cursor.execute(sql.SQL("DROP FUNCTION {}").format(sql.SQL(signature)))
-            cursor.execute(sql.SQL("DROP ROLE {}").format(_quote(owner)))
 
 
 @pytest.mark.parametrize("role", RUNTIME_DATABASE_ROLES)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from importlib.resources import files
 from typing import Any, Final
 
 from django.db import connection, transaction
@@ -335,7 +336,7 @@ ROLE_SEQUENCE_PRIVILEGES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
 }
 
 ROLE_FUNCTION_PRIVILEGES: Final[dict[str, tuple[str, ...]]] = {
-    "aegis_web": (),
+    "aegis_web": ("aegis_request_root_scan",),
     "aegis_operations": (
         "aegis_publish_operations_heartbeat",
         "aegis_validate_operation_authorization",
@@ -343,6 +344,9 @@ ROLE_FUNCTION_PRIVILEGES: Final[dict[str, tuple[str, ...]]] = {
     "aegis_indexer": (
         "aegis_publish_indexer_heartbeat",
         "aegis_validate_operation_authorization",
+        "aegis_schedule_root_scan",
+        "aegis_claim_scan_directory",
+        "aegis_renew_scan_directory",
     ),
     "aegis_media": (
         "aegis_publish_media_heartbeat",
@@ -815,6 +819,10 @@ $aegis_function$;
 
 
 MANAGED_FUNCTION_SIGNATURES: Final[dict[str, str]] = {
+    "aegis_schedule_root_scan": "public.aegis_schedule_root_scan(uuid,text,text)",
+    "aegis_request_root_scan": "public.aegis_request_root_scan(uuid,uuid,bigint,text)",
+    "aegis_claim_scan_directory": "public.aegis_claim_scan_directory(uuid,text)",
+    "aegis_renew_scan_directory": "public.aegis_renew_scan_directory(jsonb)",
     **{
         function_name: f"public.{function_name}{HEARTBEAT_FUNCTION_SIGNATURE}"
         for function_name in HEARTBEAT_FUNCTION_SQL
@@ -825,6 +833,10 @@ MANAGED_FUNCTION_SIGNATURES: Final[dict[str, str]] = {
     ),
 }
 MANAGED_FUNCTION_IDENTITY_ARGUMENTS: Final[dict[str, str]] = {
+    "aegis_schedule_root_scan": "uuid, text, text",
+    "aegis_request_root_scan": "uuid, uuid, bigint, text",
+    "aegis_claim_scan_directory": "uuid, text",
+    "aegis_renew_scan_directory": "jsonb",
     **{
         function_name: "text, text, text, text, text, jsonb, uuid, integer, integer"
         for function_name in HEARTBEAT_FUNCTION_SQL
@@ -1010,6 +1022,8 @@ def _install_boundary_functions(cursor: Any) -> None:
     for function_sql in HEARTBEAT_FUNCTION_SQL.values():
         cursor.execute(function_sql)
     cursor.execute(AUTHORIZATION_FUNCTION_SQL)
+    for name in ("schedule.sql", "lease.sql"):
+        cursor.execute(files("aegis_apps.indexing").joinpath("sql", name).read_text())
 
 
 def _unexpected_explicit_grantees(cursor: Any) -> tuple[str, ...]:

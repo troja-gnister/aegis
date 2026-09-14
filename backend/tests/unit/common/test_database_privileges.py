@@ -336,7 +336,7 @@ def test_function_execution_allowlist_is_exact_and_public_is_never_a_grantee() -
     privilege_source = database_privileges
 
     assert privilege_source.ROLE_FUNCTION_PRIVILEGES == {
-        "aegis_web": (),
+        "aegis_web": ("aegis_request_root_scan",),
         "aegis_operations": (
             "aegis_publish_operations_heartbeat",
             "aegis_validate_operation_authorization",
@@ -344,6 +344,9 @@ def test_function_execution_allowlist_is_exact_and_public_is_never_a_grantee() -
         "aegis_indexer": (
             "aegis_publish_indexer_heartbeat",
             "aegis_validate_operation_authorization",
+            "aegis_schedule_root_scan",
+            "aegis_claim_scan_directory",
+            "aegis_renew_scan_directory",
         ),
         "aegis_media": (
             "aegis_publish_media_heartbeat",
