@@ -8,7 +8,7 @@
 
 **Canonical roadmap:** [README.md](../../../README.md)
 
-**September 14 delivery amendment:** The user approved consolidating the former Phase 2–6 capabilities into one complete-v1 Phase 2, with milestones 2A–2G, explicit metadata-filter UI, and photo/video thumbnails. The [Phase 2 delivery design](2026-09-14-phase-2-v1-delivery-design.md) records that scope; its written specification awaits review. This changes delivery grouping, not the original-protection, authorization, egress, or benchmark contracts below. Phase 1 acceptance remains unchanged.
+**September 14 delivery amendment:** The user approved consolidating the former Phase 2–6 capabilities into one complete-v1 Phase 2, with milestones 2A–2G, explicit metadata-filter UI, and photo/video thumbnails. The written [Phase 2 delivery design](2026-09-14-phase-2-v1-delivery-design.md) and first indexed-browser specification are approved; the [2A.1 implementation plan](../plans/2026-09-14-phase-2a-indexed-browser.md) defines 18 initial tasks. This changes delivery grouping, not the original-protection, authorization, egress, or benchmark contracts below. Phase 1 acceptance remains unchanged.
 
 ## 1. Decision summary
 

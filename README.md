@@ -119,13 +119,15 @@ Targets 2A–2G are milestones within the expanded Phase 2. A feature spanning m
 
 ## Roadmap
 
-The current focus is **Phase 2 implementation planning — Indexed browser**, starting with the indexed-browser work in milestone 2A. The written specifications for the expanded scope and first package are approved, including metadata filters and photo/video thumbnails. Application implementation has not started. The [Phase 1 secure foundation](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md) remains complete.
+The current focus is **Phase 2A.1 — Indexed-browser implementation plan**, starting the indexed-drive milestone. The written specifications for the expanded scope and first package are approved, including metadata filters and photo/video thumbnails. Phase 2 application implementation has not started. The [Phase 1 secure foundation](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md) remains complete.
 
 The first focused specification is [2A.1 — Indexed browser](docs/superpowers/specs/2026-09-14-phase-2a-indexed-browser-design.md): catalog, safe checkpointed scans, cursor API, basic metadata filters, virtualized mobile browsing, and early scale measurements. Event-driven reconciliation, broader search, reconnectable progress, and downloads remain required follow-up work within 2A; this first package alone cannot complete the milestone.
 
+Its [implementation plan and task ledger](docs/superpowers/plans/2026-09-14-phase-2a-indexed-browser.md#status-and-task-ledger) define **18 tasks: zero complete, 18 remaining**. These cover source identity/schema, maintenance authority, safe scanning/recovery, filters/cursor APIs, mobile browsing, real-stack tests, catalog/filesystem/mobile benchmarks, and the operating/acceptance handoff. This is the count for 2A.1 only, not all remaining v1 work.
+
 The September 13 foundation checkpoint completed **all 14 Phase 1 tasks**: 620 backend tests, 235 Linux deployment tests, 43 frontend tests, and eight Chromium/WebKit journeys passed. Runbooks, accepted review, the enforced nested-mount restriction, and fresh-checkout verification are recorded in the [acceptance report](docs/verification/phase-1.md).
 
-On September 14, the remaining v1 scope was consolidated into **seven Phase 2 milestones, zero accepted so far**. Detailed task counts will come from their implementation plans; seven milestones does not mean seven implementation tasks. The [delivery ledger](docs/superpowers/specs/2026-09-14-phase-2-v1-delivery-design.md#9-delivery-ledger-and-documentation) tracks the packages and evidence. The former Phase 3–6 capabilities are included below, not postponed beyond Phase 2.
+On September 14, the remaining v1 scope was consolidated into **seven Phase 2 milestones, zero accepted so far**. The first package has 18 planned tasks; task counts for subsequent packages are not yet assigned. Seven milestones does not mean seven implementation tasks. The [delivery ledger](docs/superpowers/specs/2026-09-14-phase-2-v1-delivery-design.md#9-delivery-ledger-and-documentation) tracks the packages and evidence. The former Phase 3–6 capabilities are included below, not postponed beyond Phase 2.
 
 | Phase | Deliverable | Acceptance gate | Status |
 | --- | --- | --- | --- |
@@ -190,6 +192,7 @@ The Django backend, React shell, role-separated containers, and browser/CI gates
 - [Approved platform design](docs/superpowers/specs/2026-08-31-aegis-platform-rewrite-design.md)
 - [Phase 2 delivery design and milestone ledger](docs/superpowers/specs/2026-09-14-phase-2-v1-delivery-design.md)
 - [Phase 2A.1 indexed-browser specification](docs/superpowers/specs/2026-09-14-phase-2a-indexed-browser-design.md)
+- [Phase 2A.1 implementation plan and task ledger](docs/superpowers/plans/2026-09-14-phase-2a-indexed-browser.md)
 - [Approved Phase 1 implementation plan](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md)
 - License: [MIT](LICENSE)
 
