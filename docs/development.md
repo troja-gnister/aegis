@@ -67,6 +67,17 @@ npm --prefix frontend run build
 
 The `backend` and `deployment` runner modes include their own isolated database. A direct `pytest` invocation does not provision PostgreSQL; use it only with a deliberately configured disposable instance, never inherited production credentials. `make test` is the low-level pytest alias, not the self-contained acceptance command.
 
+For a focused check, repeat `--test-target` with repository-relative existing files or directories beneath the selected mode's test tree:
+
+```bash
+uv run --locked python scripts/verify.py backend --test-target backend/tests/unit/catalog --test-target backend/tests/unit/common/test_verify_targets.py
+uv run --locked python scripts/verify.py deployment --test-target tests/deployment/test_verification_runner.py
+```
+
+Optional file selectors use identifier-only `::ClassName::test_name` syntax; parameterized bracket selectors and pytest options are not accepted. Absolute paths, parent traversal, symlinks escaping the allowed tree, and cross-mode targets fail before any database is created. `compose` does not accept test targets. Backend focused checks still run Django checks and migration-drift detection; omitting targets preserves the full suite.
+
+Catalog child names retain their exact filesystem bytes separately from plain-text display and ordering. Display escapes undecodable bytes, literal backslashes, and Unicode controls (including bidi controls); markup-shaped text remains literal data, not HTML. Order keys use NFC after case folding and do not establish raw identity. The 255-byte component domain expands at most six bytes per source byte, giving a 1,530-byte maximum key below the 2,048-byte defensive stored-key ceiling and PostgreSQL's index-tuple budget. Boundary fixtures and an exhaustive Unicode scalar expansion check cover escaping, canonical decomposition, and case folding; oversize keys fail rather than truncate. This domain foundation does not enumerate or open files and does not complete milestone 2A.
+
 ## Interactive deployment
 
 Use the [deployment runbook](operations/phase-1-deployment.md). It establishes secret ownership, an explicit project name, mount preflight/rendering, migrations, readiness, bootstrap, and grants in the required order. The React production build is served through the gateway on the same origin as Django. `npm run dev` by itself is not an authenticated full-stack deployment.

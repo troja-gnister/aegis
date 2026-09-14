@@ -1,6 +1,7 @@
 """Run repository checks with disposable inputs, never an operator database."""
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import runpy
@@ -118,22 +119,50 @@ def verify_compose() -> None:
         support["cleanup"](directory)
 
 
+def test_targets(mode: str, targets: list[str], parser: argparse.ArgumentParser) -> list[str]:
+    tree = "backend/tests" if mode == "backend" else "tests/deployment"
+    allowed = (REPOSITORY / tree).resolve()
+    validated = []
+    for target in targets:
+        filename, *selectors = target.split("::")
+        path = Path(filename)
+        if not filename or filename.startswith("-") or path.is_absolute() or ".." in path.parts:
+            parser.error(
+                "test targets must be repository-relative paths beneath the mode's test tree",
+            )
+        if any(not selector.isidentifier() for selector in selectors):
+            parser.error("test selectors must be nonempty identifiers separated by ::")
+        try:
+            resolved = (REPOSITORY / path).resolve()
+            valid = resolved.is_relative_to(allowed) and (resolved.is_file() or resolved.is_dir())
+        except (OSError, ValueError, RuntimeError):
+            valid = False
+        if not valid:
+            parser.error("test target must exist beneath the mode's test tree")
+        if selectors and not resolved.is_file():
+            parser.error("test selectors require a file target")
+        validated.append("::".join([resolved.relative_to(REPOSITORY).as_posix(), *selectors]))
+    return validated or [tree]
+
+
 def main() -> None:
-    if len(sys.argv) != 2 or sys.argv[1] not in ("backend", "deployment", "compose"):
-        raise SystemExit("usage: verify.py backend|deployment|compose")
-    if sys.argv[1] == "compose":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("mode", choices=("backend", "deployment", "compose"))
+    parser.add_argument("--test-target", action="append", default=[], metavar="PATH[::IDENTIFIER]")
+    arguments = parser.parse_args()
+    if arguments.mode == "compose":
+        if arguments.test_target:
+            parser.error("compose mode does not accept test targets")
         verify_compose()
         return
+    targets = test_targets(arguments.mode, arguments.test_target, parser)
     with test_database() as env:
-        if sys.argv[1] == "backend":
+        if arguments.mode == "backend":
             run([sys.executable, "backend/manage.py", "check"], env)
             run([
                 sys.executable, "backend/manage.py", "makemigrations", "--check", "--dry-run",
             ], env)
-            target = "backend/tests"
-        else:
-            target = "tests/deployment"
-        run([sys.executable, "-m", "pytest", target, "-q", "--tb=short"], env)
+        run([sys.executable, "-m", "pytest", *targets, "-q", "--tb=short"], env)
 
 
 if __name__ == "__main__":
