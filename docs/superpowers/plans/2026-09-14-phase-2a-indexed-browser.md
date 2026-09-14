@@ -38,12 +38,12 @@
 
 ## Status and task ledger
 
-Planning baseline: `842ba2a` on `main`, with unchanged application code from the verified Phase 1 foundation; execution begins from the committed plan at `6169402`. This plan defines **18 tasks: 1 complete, 17 remaining**. Task 1 passed verification and review; Task 2 is next. The ledger is authoritative; checkboxes below record the execution recipe and subsequent evidence, not a second task count.
+Planning baseline: `842ba2a` on `main`, with unchanged application code from the verified Phase 1 foundation; execution begins from the committed plan at `6169402`. This plan defines **18 tasks: 2 complete, 16 remaining**. Tasks 1–2 passed verification and review; Task 3 is next. The ledger is authoritative; checkboxes below record the execution recipe and subsequent evidence, not a second task count.
 
 | Task | Independently testable deliverable | Depends on | Status |
 | --- | --- | --- | --- |
 | 1 | Lossless filename/order domain and safe focused verification | Foundation | Complete (`104208f`) |
-| 2 | Catalog schema, constraints, and explicit role grants | 1 | Planned |
+| 2 | Catalog schema, constraints, and explicit role grants | 1 | Complete (`a46ea81`) |
 | 3 | Deployment-bound root maintenance schema and configuration | 2 | Planned |
 | 4 | Database-enforced scheduling, claims, renewal, and rescan authority | 3 | Planned |
 | 5 | Descriptor-relative, bounded read-only directory reader | 1 | Planned |
@@ -67,7 +67,8 @@ Later 2A plans still own watcher/event ingestion, broader filename/path search, 
 
 | Task | Tested revision | Verification and review | Remaining boundary |
 | --- | --- | --- | --- |
-| 1 | `104208f` (initial implementation `7489be9`) | 673 backend tests; 35 filename cases; Ruff and mypy clean (161 files). The unchanged verifier's actual owned-cleanup regression passed at `7489be9`. Independent review and one scoped fix review passed. All disposable databases were removed. | Domain and verification tooling only; no catalog schema, browsing API, UI or scale acceptance. |
+| 1 | `104208f` (initial implementation `7489be9`); documentation checkpoint `1e084c6` | 673 backend tests; 35 filename cases; Ruff and mypy clean (161 files). The unchanged verifier's actual owned-cleanup regression passed at `7489be9`. Independent review and one scoped fix review passed. All four [Linux CI jobs](https://github.com/troja-gnister/aegis/actions/runs/34858091205) passed at `1e084c6`, including deployment and mobile browser regressions. All disposable databases were removed. | Domain and verification tooling only; no catalog schema, browsing API, UI or scale acceptance. |
+| 2 | `a46ea81` | 706 backend tests; 48 focused model/privilege tests; 32 actual-role tests; Ruff and mypy clean (168 files); generated SQL and migration drift checked. Independent specification and code-quality review passed. Same-root/deletion boundaries and pre-existing function/owner/dependency preservation tested using actual PostgreSQL logins. All disposable databases removed. | Protected schema only; no scanning, API, UI or scale acceptance. One earlier existing immediate-reclaim test failed once and then passed focused/full reruns; its cause remains unconfirmed and requires follow-up if it recurs. |
 
 Task 1's review corrected the recipe's supplementary-Unicode escape ambiguity with a failing collision regression and fixed-width escapes. Raw identity and the proven 1,530-byte maximum key remain intact; no persisted catalog/cursor existed during this pre-release correction.
 
@@ -312,11 +313,11 @@ Use `argparse` in the runner with `mode` choices unchanged and repeated `--test-
 
 ## Task 2: Catalog schema and immutable source boundary
 
-**Files:** Create `backend/aegis_apps/catalog/apps.py`, `backend/aegis_apps/catalog/models.py`, `backend/aegis_apps/catalog/migrations/__init__.py`, `backend/aegis_apps/catalog/migrations/0001_initial.py`, `backend/tests/conftest.py`, `backend/tests/integration/catalog/test_models.py`, `conftest.py`, `tests/__init__.py`, and `tests/support/{__init__,database_roles}.py`. Modify `backend/aegis/settings/base.py`, `pyproject.toml`, `backend/aegis_apps/common/database_privileges.py`, `backend/tests/unit/common/test_database_privileges.py`, and `tests/deployment/test_database_roles.py`.
+**Files:** Create `backend/aegis_apps/catalog/apps.py`, `backend/aegis_apps/catalog/models.py`, `backend/aegis_apps/catalog/migrations/__init__.py`, `backend/aegis_apps/catalog/migrations/0001_initial.py`, `backend/tests/conftest.py`, `backend/tests/integration/catalog/{__init__,test_models}.py`, `conftest.py`, `tests/__init__.py`, and `tests/support/{__init__,database_roles}.py`. Modify `backend/aegis/settings/base.py`, `pyproject.toml`, `backend/aegis_apps/common/database_privileges.py`, `backend/tests/unit/common/test_database_privileges.py`, and `tests/deployment/test_database_roles.py`.
 
 **Interfaces:** Consumes Task 1's names/enums. Produces `CatalogEntry`, with protected root/source/logical parent relationships, and test fixtures `catalog_root` and `entry_factory`. No production insertion route exists yet; migrator/test fixtures may seed records, runtime roles cannot mutate them directly.
 
-- [ ] **Step 1: Write failing database invariants.**
+- [x] **Step 1: Write failing database invariants.**
 
 ```python
 import pytest
@@ -343,9 +344,9 @@ def test_catalog_delete_is_disabled(catalog_root, entry_factory):
 
 Cover cross-root source/logical parents, self-parenting, duplicate anchors, non-directory anchor, null/empty child name, invalid states, negative sizes/revisions, full-precision timestamps/inodes and protected root deletion. Check direct SQL constraints, not only `full_clean`. Test web SELECT and denial of runtime INSERT/UPDATE/DELETE/TRUNCATE; operations/media get no new catalog grant.
 
-- [ ] **Step 2: Verify red.** Run `uv run --locked python scripts/verify.py backend --test-target backend/tests/integration/catalog/test_models.py` and capture the absent-model failure.
+- [x] **Step 2: Verify red.** Run `uv run --locked python scripts/verify.py backend --test-target backend/tests/integration/catalog/test_models.py` and capture the absent-model failure.
 
-- [ ] **Step 3: Add the model, migrations, and exact privilege map.**
+- [x] **Step 3: Add the model, migrations, and exact privilege map.**
 
 ```python
 class CatalogEntryQuerySet(models.QuerySet["CatalogEntry"]):
@@ -394,9 +395,9 @@ Move the existing `RoleDatabase`, role-login/setup/ownership/teardown helpers an
 
 Snapshot existing managed function definitions/owners as well as table/sequence owners before role setup. Restore pre-existing functions after the module and drop only functions created by that fixture. This is required when Task 6's migration-owned trigger depends on a managed function: teardown must not drop that function or cascade away its trigger. Only test-owned temporary roles/resources are removed.
 
-- [ ] **Step 4: Verify green.** Run the focused model tests, `backend --test-target backend/tests/unit/common/test_database_privileges.py`, and `deployment --test-target tests/deployment/test_database_roles.py` through `scripts/verify.py`. Run Ruff/mypy and the runner's migration-drift check.
+- [x] **Step 4: Verify green.** Run the focused model tests, `backend --test-target backend/tests/unit/common/test_database_privileges.py`, and `deployment --test-target tests/deployment/test_database_roles.py` through `scripts/verify.py`. Run Ruff/mypy and the runner's migration-drift check.
 
-- [ ] **Step 5: Review and commit.** Record schema/role evidence, inspect the generated SQL and diff, and commit `feat: add protected source and logical catalog schema`; push `origin main`.
+- [x] **Step 5: Review and commit.** Record schema/role evidence, inspect the generated SQL and diff, and commit `feat: add protected source and logical catalog schema`; push `origin main`.
 
 ## Task 3: Deployment-bound maintenance state
 

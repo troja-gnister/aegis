@@ -118,7 +118,7 @@ Work continues on `main`, with scoped verified commits and regular pushes. No au
 
 ## 9. Delivery ledger and documentation
 
-As of this implementation checkpoint: seven milestones defined, zero accepted. The [2A.1 implementation plan](../plans/2026-09-14-phase-2a-indexed-browser.md#status-and-task-ledger) defines 18 tasks, one complete and 17 remaining. Task 1 delivered filename handling and focused verification; the catalog schema is next. Subsequent package task counts have not yet been assigned; neither seven milestones nor 18 first-package tasks is the full remaining rewrite task count.
+As of this implementation checkpoint: seven milestones defined, zero accepted. The [2A.1 implementation plan](../plans/2026-09-14-phase-2a-indexed-browser.md#status-and-task-ledger) defines 18 tasks, two complete and 16 remaining. Filename handling, focused verification and the protected catalog schema are implemented; deployment-bound scan state is next. Subsequent package task counts have not yet been assigned; neither seven milestones nor 18 first-package tasks is the full remaining rewrite task count.
 
 | Milestone | Design/implementation state | Accepted packages | Acceptance evidence |
 | --- | --- | --- | --- |
