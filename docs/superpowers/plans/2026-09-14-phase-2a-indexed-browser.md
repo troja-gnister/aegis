@@ -38,13 +38,13 @@
 
 ## Status and task ledger
 
-Planning baseline: `842ba2a` on `main`, with unchanged application code from the verified Phase 1 foundation; execution begins from the committed plan at `6169402`. This plan defines **18 tasks: 2 complete, 16 remaining**. Tasks 1–2 passed verification and review; Task 3 is next. The ledger is authoritative; checkboxes below record the execution recipe and subsequent evidence, not a second task count.
+Planning baseline: `842ba2a` on `main`, with unchanged application code from the verified Phase 1 foundation; execution begins from the committed plan at `6169402`. This plan defines **18 tasks: 3 complete, 15 remaining**. Tasks 1–3 passed verification and review; Task 4 is next. The ledger is authoritative; checkboxes below record the execution recipe and subsequent evidence, not a second task count.
 
 | Task | Independently testable deliverable | Depends on | Status |
 | --- | --- | --- | --- |
 | 1 | Lossless filename/order domain and safe focused verification | Foundation | Complete (`104208f`) |
 | 2 | Catalog schema, constraints, and explicit role grants | 1 | Complete (`a46ea81`) |
-| 3 | Deployment-bound root maintenance schema and configuration | 2 | Planned |
+| 3 | Deployment-bound root maintenance schema and configuration | 2 | Complete (`3a11b83`) |
 | 4 | Database-enforced scheduling, claims, renewal, and rescan authority | 3 | Planned |
 | 5 | Descriptor-relative, bounded read-only directory reader | 1 | Planned |
 | 6 | Atomic observations, checkpoint finalization, and stale-work rejection | 4, 5 | Planned |
@@ -68,9 +68,12 @@ Later 2A plans still own watcher/event ingestion, broader filename/path search, 
 | Task | Tested revision | Verification and review | Remaining boundary |
 | --- | --- | --- | --- |
 | 1 | `104208f` (initial implementation `7489be9`); documentation checkpoint `1e084c6` | 673 backend tests; 35 filename cases; Ruff and mypy clean (161 files). The unchanged verifier's actual owned-cleanup regression passed at `7489be9`. Independent review and one scoped fix review passed. All four [Linux CI jobs](https://github.com/troja-gnister/aegis/actions/runs/34858091205) passed at `1e084c6`, including deployment and mobile browser regressions. All disposable databases were removed. | Domain and verification tooling only; no catalog schema, browsing API, UI or scale acceptance. |
-| 2 | `a46ea81` | 706 backend tests; 48 focused model/privilege tests; 32 actual-role tests; Ruff and mypy clean (168 files); generated SQL and migration drift checked. Independent specification and code-quality review passed. Same-root/deletion boundaries and pre-existing function/owner/dependency preservation tested using actual PostgreSQL logins. All disposable databases removed. | Protected schema only; no scanning, API, UI or scale acceptance. One earlier existing immediate-reclaim test failed once and then passed focused/full reruns; its cause remains unconfirmed and requires follow-up if it recurs. |
+| 2 | `a46ea81`; documentation checkpoint `8116b29` | 706 backend tests; 48 focused model/privilege tests; 32 actual-role tests; Ruff and mypy clean (168 files); generated SQL and migration drift checked. Independent specification and code-quality review passed. Same-root/deletion boundaries and pre-existing function/owner/dependency preservation tested using actual PostgreSQL logins. All four [Linux CI jobs](https://github.com/troja-gnister/aegis/actions/runs/34861090070) passed at `8116b29`. All disposable databases removed. | Protected schema only; no scanning, API, UI or scale acceptance. One earlier existing immediate-reclaim test failed once and then passed focused/full reruns; its cause remains unconfirmed and requires follow-up if it recurs. |
+| 3 | `3a11b83` (initial implementation `f38ce0b`) | 728 backend tests; 34 actual-role/ACL tests; 30 focused binding/privilege cases; Ruff and mypy clean (179 files); migration drift and forward/reverse SQL generation checked. Initial Compose build passed; mount tests passed 23 cases with eight Docker Desktop unreadable-bind skips. Independent review and scoped fix review passed. Counter decreases and eager invalidation were demonstrated failing before correction; shared test ACLs and migration-function dependencies are preserved. Owned databases removed. | Configuration/schema only; no scheduling, scan execution, API, UI or scale acceptance. Historical-schema upgrade remains Task 18. Reverse SQL was generated, not separately executed. Platform skips do not prove attester behavior; Linux CI for this checkpoint is pending. |
 
 Task 1's review corrected the recipe's supplementary-Unicode escape ambiguity with a failing collision regression and fixed-width escapes. Raw identity and the proven 1,530-byte maximum key remain intact; no persisted catalog/cursor existed during this pre-release correction.
+
+Task 3's review clarified the database counter invariant: attempts never decrease, and sequences never decrease within one attempt; a new attempt can restart its sequence. Its forward guard migration occupies `0002`, so Task 6's commit-fence migration is `0003`. Existing-table role tests consume the exact privilege maps without duplicating assertions; the shared fixture now restores prior schema/database ACL semantics as well as function ownership.
 
 ## File and responsibility map
 
@@ -401,11 +404,11 @@ Snapshot existing managed function definitions/owners as well as table/sequence 
 
 ## Task 3: Deployment-bound maintenance state
 
-**Files:** Create `backend/aegis_apps/indexing/{__init__,apps,config,models,binding}.py`, `backend/aegis_apps/indexing/migrations/{__init__,0001_initial}.py`, `backend/tests/unit/indexing/test_config.py`, `backend/tests/integration/indexing/test_binding.py`. Modify `backend/aegis/settings/base.py`, `backend/aegis_apps/common/{database_privileges.py,management/commands/deploy_database.py}`, `backend/aegisctl/mounts.py`, `backend/tests/unit/aegisctl/test_render.py`, `backend/tests/unit/common/test_deploy_database.py`, `tests/deployment/{test_database_roles,test_rendered_mounts}.py`, `compose.yaml`, `.env.example`, and `pyproject.toml`.
+**Files:** Create `backend/aegis_apps/indexing/{__init__,apps,config,models,binding}.py`, `backend/aegis_apps/indexing/migrations/{__init__,0001_initial,0002_directory_counter_guard}.py`, `backend/tests/unit/indexing/test_config.py`, `backend/tests/integration/indexing/test_binding.py`, and `tests/deployment/test_database_roles_cleanup.py`. Modify `backend/aegis/settings/base.py`, `backend/aegis_apps/common/{database_privileges.py,management/commands/deploy_database.py}`, `backend/aegisctl/mounts.py`, `backend/tests/unit/aegisctl/test_render.py`, `backend/tests/unit/common/{test_database_privileges,test_deploy_database}.py`, `tests/deployment/{test_database_roles,test_rendered_mounts}.py`, `tests/support/database_roles.py`, `compose.yaml`, `.env.example`, and `pyproject.toml`.
 
 **Interfaces:** Produces `ScanPolicy`, `IndexDeployment`, `RootIndexState`, `ScanRun`, `DirectoryWork`, `ScanRequest`, and `install_index_binding(manifest: MountManifest | None, policy: ScanPolicy) -> None`. Installation requires the actual migrator login. Indexer reads the binding but cannot replace it.
 
-- [ ] **Step 1: Write failing configuration/binding tests.**
+- [x] **Step 1: Write failing configuration/binding tests.**
 
 ```python
 import pytest
@@ -425,9 +428,9 @@ def test_scan_defaults_and_bounds() -> None:
 
 Binding integration tests create a protected manifest fixture, install it under the migrator test login, repeat installation without advancing epochs, then replace the manifest/policy and assert an epoch advance. Test web/indexer binding writes are denied, an absent manifest disables indexing without erasing catalog rows, and generated migrate mounts contain only the manifest—not any source root. Upgrade tests preserve existing accounts, roots, grants, jobs, and catalog rows.
 
-- [ ] **Step 2: Verify red.** Run `uv run --locked python scripts/verify.py backend --test-target backend/tests/unit/indexing/test_config.py --test-target backend/tests/integration/indexing/test_binding.py`.
+- [x] **Step 2: Verify red.** Run `uv run --locked python scripts/verify.py backend --test-target backend/tests/unit/indexing/test_config.py --test-target backend/tests/integration/indexing/test_binding.py`.
 
-- [ ] **Step 3: Implement persisted binding and durable models.**
+- [x] **Step 3: Implement persisted binding and durable models.**
 
 ```python
 from collections.abc import Mapping
@@ -467,7 +470,7 @@ Use these exact model fields, UUIDs except the singleton/one-to-one keys, restri
 | `IndexDeployment` (`id=1`) | `epoch`, `manifest_identity`, sorted `slot_ids` JSON, four `ScanPolicy` integer fields, `updated_at` | Singleton check; bounded policy; migrator-only writes; at most the existing manifest `MAX_SLOTS` |
 | `RootIndexState` (`root_id` primary key) | `binding_epoch`, `policy_epoch`, `reconciliation_epoch`, `next_generation`, `due_at`, `active_run_id` nullable, `rescan_requested`, `status`, `observed_entries`, `completed_directories`, `degraded_directories`, `updated_at`, `last_completed_at` | Status from wire contract; nonnegative counters; due-time index; protected root/run references |
 | `ScanRun` | `root_id`, `binding_epoch`, `policy_epoch`, `root_epoch`, `manifest_identity`, `generation`, `start_epoch`, `state`, `started_at`, `settled_at` nullable | `(root_id,generation)` unique; one queued/running run per root; `queued/running/complete/degraded/fenced` |
-| `DirectoryWork` | `run_id`, `directory_id`, `parent_revision`, `state`, `attempt`, `lease_owner`, `lease_expires_at`, `available_at`, `last_batch_sequence`, `observed_count`, `eof_identity` nullable JSON, `error_code`, `updated_at` | `(run_id,directory_id)` unique; bounded claim index `(run_id,state,available_at,id)`; pending/reading/finalizing/complete/degraded; attempt and batch sequence monotonic |
+| `DirectoryWork` | `run_id`, `directory_id`, `parent_revision`, `state`, `attempt`, `lease_owner`, `lease_expires_at`, `available_at`, `last_batch_sequence`, `observed_count`, `eof_identity` nullable JSON, `error_code`, `updated_at` | `(run_id,directory_id)` unique; bounded claim index `(run_id,state,available_at,id)`; pending/reading/finalizing/complete/degraded; database update guard: attempt never decreases and sequence never decreases within one attempt; a strictly increased attempt may reset sequence |
 | `ScanRequest` | `root_id`, `actor_id`, `client_request_id`, `run_id`, `created_at` | Unique `(actor_id,client_request_id)`; replay with another root rejects; request IDs follow existing 8–64 character request-ID contract |
 
 The `IndexDeployment` row is the authoritative current configuration, not whichever worker heartbeat arrived last. `deploy_database` loads/validates the mounted manifest and policy, then installs this row in its existing durable deployment transaction. Same configuration is idempotent; changes increment its epoch and fence old runs. A missing manifest records no active slots. Preserve existing schema-comment keys and privilege synchronization; no background worker may roll the binding back to an earlier manifest.
@@ -478,9 +481,9 @@ Extend the generated mount override to pass the protected manifest file and dige
 
 Add exact table columns and SELECT grants for web/indexer; no runtime DML on these tables. Add `slot_id` SELECT only for indexer in the existing roots column map. `ScanRequest` is web-readable only; indexer does not gain access to actors, passwords, sessions, or group membership. Migrator installation is the only direct binding writer. Deferred `RootIndexState.active_run` FK resolves the schema cycle with `ScanRun`.
 
-- [ ] **Step 4: Verify green.** Run the focused config/binding/render/deploy tests, the actual database-role suite, Ruff/mypy, and generated Compose validation. Compare generated service mount sets with Phase 1; only migrator configuration-file access may expand.
+- [x] **Step 4: Verify green.** Run the focused config/binding/render/deploy tests, the actual database-role suite, Ruff/mypy, and generated Compose validation. Compare generated service mount sets with Phase 1; only migrator configuration-file access may expand.
 
-- [ ] **Step 5: Review and commit.** Record upgrade/mount/grant evidence; commit `feat: bind indexing policy and checkpoints to deployments` and push `origin main`.
+- [x] **Step 5: Review and commit.** Record upgrade/mount/grant evidence; commit `feat: bind indexing policy and checkpoints to deployments` and push `origin main`.
 
 ## Task 4: Scheduling, lease, and manual-rescan authority
 
@@ -621,7 +624,7 @@ Protocol frames are a four-byte unsigned length followed by strict UTF-8 JSON; r
 
 ## Task 6: Atomic observations and safe directory finalization
 
-**Files:** Create `backend/aegis_apps/indexing/checkpoints.py`, `backend/aegis_apps/indexing/sql/{observations,finalize}.sql`, `backend/aegis_apps/indexing/migrations/0002_commit_fence.py`, `backend/tests/integration/indexing/{test_observations,test_finalization,test_recovery}.py`. Modify `backend/aegis_apps/indexing/{models.py,sql/lease.sql}`, `backend/tests/conftest.py`, `backend/aegis_apps/common/database_privileges.py`, and `tests/deployment/test_database_roles.py`.
+**Files:** Create `backend/aegis_apps/indexing/checkpoints.py`, `backend/aegis_apps/indexing/sql/{observations,finalize}.sql`, `backend/aegis_apps/indexing/migrations/0003_commit_fence.py` after Task 3's `0002_directory_counter_guard`, `backend/tests/integration/indexing/{test_observations,test_finalization,test_recovery}.py`. Modify `backend/aegis_apps/indexing/{models.py,sql/lease.sql}`, `backend/tests/conftest.py`, `backend/aegis_apps/common/database_privileges.py`, and `tests/deployment/test_database_roles.py`.
 
 **Interfaces:** Produces `record_batch(lease: ScanLease, batch: ReaderBatch) -> BatchResult`, `seal_directory(lease: ScanLease, complete: ReaderComplete) -> bool`, `finalize_directory(lease: ScanLease, limit: int = 500) -> FinalizeResult`, and `fail_directory(lease: ScanLease, code: str) -> bool`. Define frozen `BatchResult(observed: int, inserted: int, changed: int)` and `FinalizeResult(affected: int, complete: bool)` in `checkpoints.py`. All results describe catalog metadata, not filesystem writes.
 

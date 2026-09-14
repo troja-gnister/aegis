@@ -4,7 +4,7 @@ Phase 1 provides credential login, authorized root cards, administration, durabl
 
 The [Phase 2 delivery design](superpowers/specs/2026-09-14-phase-2-v1-delivery-design.md) groups the complete v1 build into milestones 2A–2G. Its scope includes metadata-filter controls and photo/video thumbnails. Specifications and plans are not implementation evidence: keep feature statuses Planned until their work begins, and retain the original-file and isolated-test boundaries throughout.
 
-The first work package is [2A.1 indexed browsing](superpowers/specs/2026-09-14-phase-2a-indexed-browser-design.md). Its [implementation plan](superpowers/plans/2026-09-14-phase-2a-indexed-browser.md) defines 18 tasks: two completed and 16 remaining. The filename domain, focused verification commands and protected catalog schema are implemented; reviewed Task 2 revision `a46ea81` passed 706 backend tests and 32 actual-role tests. Other planned modules and commands are not available until their tasks land. No browsing API, screen or Phase 2 benchmark result is claimed yet.
+The first work package is [2A.1 indexed browsing](superpowers/specs/2026-09-14-phase-2a-indexed-browser-design.md). Its [implementation plan](superpowers/plans/2026-09-14-phase-2a-indexed-browser.md) defines 18 tasks: three completed and 15 remaining. The filename domain, focused verification commands, protected catalog schema and deployment-bound scan state are implemented; reviewed Task 3 revision `3a11b83` passed 728 backend tests and 34 actual-role/cleanup tests. Deployment installs the scan configuration alongside schema and counter guards; scheduling and worker execution are not enabled yet. No browsing API, screen or Phase 2 benchmark result is claimed yet.
 
 ## Prerequisites
 

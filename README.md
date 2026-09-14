@@ -119,11 +119,11 @@ Targets 2A–2G are milestones within the expanded Phase 2. A feature spanning m
 
 ## Roadmap
 
-The current focus is **Phase 2A.1 — Indexed-browser implementation**, starting the indexed-drive milestone. Tasks 1–2 are complete: lossless filename handling, safely scoped verification commands, and the protected catalog schema. Deployment-bound scan state is next; new browsing APIs and screens are not available yet. The approved scope still includes metadata filters and photo/video thumbnails. The [Phase 1 secure foundation](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md) remains complete.
+The current focus is **Phase 2A.1 — Indexed-browser implementation**, starting the indexed-drive milestone. Tasks 1–3 are complete: lossless filename handling, safely scoped verification commands, protected catalog schema, and deployment-bound scan state. Database-enforced scheduling and leases are next; new browsing APIs and screens are not available yet. The approved scope still includes metadata filters and photo/video thumbnails. The [Phase 1 secure foundation](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md) remains complete.
 
 The first focused specification is [2A.1 — Indexed browser](docs/superpowers/specs/2026-09-14-phase-2a-indexed-browser-design.md): catalog, safe checkpointed scans, cursor API, basic metadata filters, virtualized mobile browsing, and early scale measurements. Event-driven reconciliation, broader search, reconnectable progress, and downloads remain required follow-up work within 2A; this first package alone cannot complete the milestone.
 
-Its [implementation plan and task ledger](docs/superpowers/plans/2026-09-14-phase-2a-indexed-browser.md#status-and-task-ledger) define **18 tasks: 2 complete, 16 remaining**. These cover source identity/schema, maintenance authority, safe scanning/recovery, filters/cursor APIs, mobile browsing, real-stack tests, catalog/filesystem/mobile benchmarks, and the operating/acceptance handoff. This is the count for 2A.1 only, not all remaining v1 work. Task 2 passed review, 706 backend tests, and 32 actual-database-role tests at `a46ea81`; no package-scale gate is claimed yet.
+Its [implementation plan and task ledger](docs/superpowers/plans/2026-09-14-phase-2a-indexed-browser.md#status-and-task-ledger) define **18 tasks: 3 complete, 15 remaining**. These cover source identity/schema, maintenance authority, safe scanning/recovery, filters/cursor APIs, mobile browsing, real-stack tests, catalog/filesystem/mobile benchmarks, and the operating/acceptance handoff. This is the count for 2A.1 only, not all remaining v1 work. Task 3 passed review, 728 backend tests, and 34 actual-database-role/cleanup tests at `3a11b83`; no package-scale gate is claimed yet.
 
 The September 13 foundation checkpoint completed **all 14 Phase 1 tasks**: 620 backend tests, 235 Linux deployment tests, 43 frontend tests, and eight Chromium/WebKit journeys passed. Runbooks, accepted review, the enforced nested-mount restriction, and fresh-checkout verification are recorded in the [acceptance report](docs/verification/phase-1.md).
 
@@ -133,14 +133,14 @@ On September 14, the remaining v1 scope was consolidated into **seven Phase 2 mi
 | --- | --- | --- | --- |
 | 0 — Design and checkpoint | Canonical README/specification, legacy release tag, and first bounded implementation plan | Design reviewed, legacy state recoverable by name, and clean documentation checkpoint | Verified |
 | 1 — Secure foundation | Django/React/PostgreSQL/Compose skeleton, same-origin auth, role-scoped credentials/volumes, mount slots, users/groups/grants, fenced job/operation primitives, health, and CI | A user can sign in and reach only an authorized root shell through the least-privilege deployed stack | Verified |
-| 2 — Complete v1 application | Indexed drive, managed files, photo/video/document viewing and editing, metadata filters, organization/search, optional local models, and release hardening | All milestones 2A–2G pass their feature, scale, security, browser, and recovery gates | Planned |
+| 2 — Complete v1 application | Indexed drive, managed files, photo/video/document viewing and editing, metadata filters, organization/search, optional local models, and release hardening | All milestones 2A–2G pass their feature, scale, security, browser, and recovery gates | In progress |
 | Later | WebDAV/sync, controlled sharing, 10M+ certification, storage adapters, and separately specified collaboration | Each capability receives its own approved specification and scale/security gate | Deferred |
 
 ### Phase 2 milestones
 
 | Milestone | Deliverable | Acceptance gate | Status |
 | --- | --- | --- | --- |
-| 2A — Indexed drive | Scans/reconciliation, cursor browsing, filename/path search, basic filters, downloads/ranges, scan status, and initial 1M/50K fixtures | Read-side UI/API workflows, mount-loss recovery, authorization, and scale measurements pass | Planned |
+| 2A — Indexed drive | Scans/reconciliation, cursor browsing, filename/path search, basic filters, downloads/ranges, scan status, and initial 1M/50K fixtures | Read-side UI/API workflows, mount-loss recovery, authorization, and scale measurements pass | In progress |
 | 2B — Managed files | Resumable uploads, immutable versions/copies, managed folders, logical organization, archive/restore, and transfers | Restart/revocation/conflict journeys preserve every original and published version | Planned |
 | 2C — Photos and videos | Photo thumbnails, video posters, timeline, metadata filters, viewers, compatible playback, and installable PWA navigation | Private preview delivery, bounded media processing, and mobile interaction/load gates pass | Planned |
 | 2D — Documents | PDF/text/CSV/spreadsheet viewers and non-collaborative editing as new immutable versions | Progressive viewing and save/conflict/hostile-document journeys pass | Planned |
@@ -184,7 +184,7 @@ Directory APIs use bounded page sizes, compact list records, compound indexes, a
 
 ## Development and documentation
 
-The Django backend, React shell, role-separated containers, and browser/CI gates are verified for Phase 1. Review and clean-install evidence are recorded; the expanded Phase 2 is in design review. Its work packages receive bounded plans so task counts, scale, security, and recovery gates stay visible.
+The Django backend, React shell, role-separated containers, and browser/CI gates are verified for Phase 1. Review and clean-install evidence are recorded; the expanded Phase 2 scope is approved and its first indexed-browser package is in implementation. Work packages have bounded plans so task counts, scale, security, and recovery gates stay visible.
 
 - [Development and verification](docs/development.md)
 - [Deployment and operation](docs/operations/phase-1-deployment.md)
