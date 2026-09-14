@@ -80,6 +80,70 @@ EXPECTED_TABLE_COLUMNS = {
         "failures",
         "blocked_until",
     ),
+    "indexing_directorywork": (
+        "id",
+        "parent_revision",
+        "state",
+        "attempt",
+        "lease_owner",
+        "lease_expires_at",
+        "available_at",
+        "last_batch_sequence",
+        "observed_count",
+        "eof_identity",
+        "error_code",
+        "updated_at",
+        "directory_id",
+        "run_id",
+    ),
+    "indexing_indexdeployment": (
+        "id",
+        "epoch",
+        "manifest_identity",
+        "slot_ids",
+        "interval_seconds",
+        "idle_timeout_seconds",
+        "batch_records",
+        "readers",
+        "updated_at",
+    ),
+    "indexing_rootindexstate": (
+        "root_id",
+        "binding_epoch",
+        "policy_epoch",
+        "reconciliation_epoch",
+        "next_generation",
+        "due_at",
+        "rescan_requested",
+        "status",
+        "observed_entries",
+        "completed_directories",
+        "degraded_directories",
+        "updated_at",
+        "last_completed_at",
+        "active_run_id",
+    ),
+    "indexing_scanrequest": (
+        "id",
+        "client_request_id",
+        "created_at",
+        "actor_id",
+        "root_id",
+        "run_id",
+    ),
+    "indexing_scanrun": (
+        "id",
+        "binding_epoch",
+        "policy_epoch",
+        "root_epoch",
+        "manifest_identity",
+        "generation",
+        "start_epoch",
+        "state",
+        "started_at",
+        "settled_at",
+        "root_id",
+    ),
     "audit_auditevent": (
         "id",
         "occurred_at",
@@ -215,9 +279,13 @@ def test_worker_grants_are_column_fenced_without_authorization_graph_access() ->
         assert privilege_source.ROLE_COLUMN_PRIVILEGES[role][
             "operations_job"
         ] == expected_job_updates
-        assert privilege_source.ROLE_COLUMN_PRIVILEGES[role][
+        root_reads = privilege_source.ROLE_COLUMN_PRIVILEGES[role][
             "roots_root"
-        ] == expected_root_reads
+        ]
+        if role == "aegis_indexer":
+            assert root_reads == {**expected_root_reads, "slot_id": ("SELECT",)}
+        else:
+            assert root_reads == expected_root_reads
         for table in (
             "identity_user",
             "identity_user_groups",
@@ -234,6 +302,34 @@ def test_catalog_is_select_only_for_web_and_indexer() -> None:
             ("SELECT",) if role in ("aegis_web", "aegis_indexer") else ()
         )
         assert "catalog_catalogentry" not in database_privileges.ROLE_COLUMN_PRIVILEGES[role]
+
+
+def test_indexing_state_is_select_only_for_web_and_indexer() -> None:
+    shared = {
+        "indexing_directorywork",
+        "indexing_indexdeployment",
+        "indexing_rootindexstate",
+        "indexing_scanrun",
+    }
+    assert {
+        table
+        for table, privileges in database_privileges.ROLE_TABLE_PRIVILEGES[
+            "aegis_indexer"
+        ].items()
+        if table.startswith("indexing_") and privileges == ("SELECT",)
+    } == shared
+    assert {
+        table
+        for table, privileges in database_privileges.ROLE_TABLE_PRIVILEGES[
+            "aegis_web"
+        ].items()
+        if table.startswith("indexing_") and privileges == ("SELECT",)
+    } == shared | {"indexing_scanrequest"}
+    for role in ("aegis_operations", "aegis_media"):
+        assert not any(
+            table.startswith("indexing_")
+            for table in database_privileges.ROLE_TABLE_PRIVILEGES[role]
+        )
 
 
 def test_function_execution_allowlist_is_exact_and_public_is_never_a_grantee() -> None:

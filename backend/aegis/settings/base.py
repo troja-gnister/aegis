@@ -2,6 +2,7 @@ import os
 from datetime import timedelta
 from pathlib import Path
 
+from aegis_apps.indexing.config import ScanPolicy
 from aegis_apps.operations.config import WorkerRuntimeConfig
 
 from aegis.config import RuntimeConfig, read_secret
@@ -14,6 +15,7 @@ if _runtime_environ.get("AEGIS_ENV", "development").strip().lower() != "producti
     _runtime_environ.setdefault("AEGIS_DB_PASSWORD", "development-only-database-password")
 RUNTIME_CONFIG = RuntimeConfig.from_environ(_runtime_environ)
 WORKER_RUNTIME_CONFIG = WorkerRuntimeConfig.from_environ(_runtime_environ)
+AEGIS_SCAN_POLICY = ScanPolicy.from_environment(_runtime_environ)
 AEGIS_AUTH_THROTTLE_HMAC_KEY = read_secret(
     _runtime_environ,
     "AEGIS_AUTH_THROTTLE_HMAC_KEY",
@@ -55,6 +57,7 @@ INSTALLED_APPS = [
     "aegis_apps.roots",
     "aegis_apps.operations",
     "aegis_apps.catalog",
+    "aegis_apps.indexing",
 ]
 
 MIDDLEWARE = [

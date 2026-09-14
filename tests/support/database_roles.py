@@ -20,6 +20,7 @@ from psycopg import sql
 
 MIGRATOR_ROLE = "aegis_migrator"
 ALL_TEST_ROLES = (MIGRATOR_ROLE, *RUNTIME_DATABASE_ROLES)
+AclEntry = tuple[str, str, bool]
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +174,8 @@ def _restore_and_drop_roles(
     original_schema_owner: str,
     original_relation_owners: dict[str, tuple[str, str]],
     original_functions: dict[str, tuple[str, str]],
+    original_database_acl: tuple[AclEntry, ...],
+    original_schema_acl: tuple[AclEntry, ...],
 ) -> None:
     connection.close()
     connection.ensure_connection()
@@ -235,6 +238,91 @@ def _restore_and_drop_roles(
                 cursor.execute(sql.SQL("DROP OWNED BY {}").format(_quote(role)))
                 cursor.execute(sql.SQL("DROP ROLE {}").format(_quote(role)))
 
+        _restore_acl(
+            cursor,
+            kind="DATABASE",
+            target=str(connection.settings_dict["NAME"]),
+            entries=original_database_acl,
+        )
+        _restore_acl(
+            cursor,
+            kind="SCHEMA",
+            target="public",
+            entries=original_schema_acl,
+        )
+
+
+def _acl_entries(cursor: Any, *, kind: str) -> tuple[AclEntry, ...]:
+    if kind == "DATABASE":
+        source = "database.datacl"
+        fallback = "pg_catalog.acldefault('d', database.datdba)"
+        join = ""
+    elif kind == "SCHEMA":
+        source = "namespace.nspacl"
+        fallback = "pg_catalog.acldefault('n', namespace.nspowner)"
+        join = "JOIN pg_catalog.pg_namespace AS namespace ON namespace.nspname = 'public'"
+    else:
+        raise ValueError("unknown ACL kind")
+    cursor.execute(
+        f"""
+        SELECT CASE acl.grantee
+                   WHEN 0 THEN 'PUBLIC'
+                   ELSE pg_catalog.pg_get_userbyid(acl.grantee)
+               END,
+               acl.privilege_type,
+               acl.is_grantable
+          FROM pg_catalog.pg_database AS database
+          {join}
+          CROSS JOIN LATERAL pg_catalog.aclexplode(
+              COALESCE({source}, {fallback})
+          ) AS acl
+         WHERE database.datname = pg_catalog.current_database()
+         ORDER BY 1, 2, 3
+        """
+    )
+    return tuple(cursor.fetchall())
+
+
+def _restore_acl(
+    cursor: Any,
+    *,
+    kind: str,
+    target: str,
+    entries: tuple[AclEntry, ...],
+) -> None:
+    if kind not in ("DATABASE", "SCHEMA"):
+        raise ValueError("unknown ACL kind")
+    _clear_acl(cursor, kind=kind, target=target, entries=entries)
+    for grantee, privilege, grantable in entries:
+        recipient = sql.SQL("PUBLIC") if grantee == "PUBLIC" else _quote(grantee)
+        suffix = sql.SQL(" WITH GRANT OPTION") if grantable else sql.SQL("")
+        cursor.execute(
+            sql.SQL("GRANT {} ON {} {} TO {}{}").format(
+                sql.SQL(privilege),
+                sql.SQL(kind),
+                sql.Identifier(target),
+                recipient,
+                suffix,
+            )
+        )
+
+
+def _clear_acl(
+    cursor: Any,
+    *,
+    kind: str,
+    target: str,
+    entries: tuple[AclEntry, ...],
+) -> None:
+    grantees = {entry[0] for entry in entries} | {"PUBLIC"}
+    for grantee in sorted(grantees):
+        recipient = sql.SQL("PUBLIC") if grantee == "PUBLIC" else _quote(grantee)
+        cursor.execute(
+            sql.SQL("REVOKE ALL PRIVILEGES ON {} {} FROM {}").format(
+                sql.SQL(kind), sql.Identifier(target), recipient
+            )
+        )
+
 
 @contextmanager
 def managed_role_database() -> Iterator[RoleDatabase]:
@@ -243,6 +331,8 @@ def managed_role_database() -> Iterator[RoleDatabase]:
     original_schema_owner = ""
     original_relation_owners: dict[str, tuple[str, str]] = {}
     original_functions: dict[str, tuple[str, str]] = {}
+    original_database_acl: tuple[AclEntry, ...] = ()
+    original_schema_acl: tuple[AclEntry, ...] = ()
     connection.ensure_connection()
     with connection.cursor() as cursor:
         cursor.execute(
@@ -269,6 +359,9 @@ def managed_role_database() -> Iterator[RoleDatabase]:
         )
         if cursor.fetchall():
             pytest.fail("database-role tests require no pre-existing Aegis database roles")
+
+        original_database_acl = _acl_entries(cursor, kind="DATABASE")
+        original_schema_acl = _acl_entries(cursor, kind="SCHEMA")
 
         cursor.execute(
             """
@@ -344,6 +437,20 @@ def managed_role_database() -> Iterator[RoleDatabase]:
                 owner=MIGRATOR_ROLE,
             )
 
+        with connection.cursor() as cursor:
+            _clear_acl(
+                cursor,
+                kind="DATABASE",
+                target=str(database_name),
+                entries=original_database_acl,
+            )
+            _clear_acl(
+                cursor,
+                kind="SCHEMA",
+                target="public",
+                entries=original_schema_acl,
+            )
+
         environment = RoleDatabase(
             database_name=str(database_name),
             host=str(connection.settings_dict["HOST"]),
@@ -359,6 +466,8 @@ def managed_role_database() -> Iterator[RoleDatabase]:
                 original_schema_owner=original_schema_owner,
                 original_relation_owners=original_relation_owners,
                 original_functions=original_functions,
+                original_database_acl=original_database_acl,
+                original_schema_acl=original_schema_acl,
             )
 
 

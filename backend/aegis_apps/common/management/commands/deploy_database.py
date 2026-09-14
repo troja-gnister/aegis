@@ -15,8 +15,10 @@ from aegis_apps.common.database_privileges import (
     synchronize_database_privileges,
     verify_database_deployment_prerequisites,
 )
+from aegis_apps.indexing.binding import install_index_binding
 from aegis_apps.operations.config import validated_release_identity
 from aegis_apps.operations.selectors import current_schema_identity
+from aegis_apps.roots.manifest import configured_manifest
 
 
 class Command(BaseCommand):
@@ -33,6 +35,7 @@ class Command(BaseCommand):
                 settings.AEGIS_RELEASE_ID,
                 production=settings.AEGIS_ENVIRONMENT == "production",
             )
+            manifest = configured_manifest()
             verify_database_deployment_prerequisites()
             call_command("migrate", interactive=False, verbosity=1)
             executor = MigrationExecutor(connection)
@@ -41,6 +44,7 @@ class Command(BaseCommand):
                 raise PrivilegeSynchronizationError("database migrations remain pending")
             with transaction.atomic(durable=True):
                 synchronize_database_privileges()
+                install_index_binding(manifest, settings.AEGIS_SCAN_POLICY)
                 schema_identity = current_schema_identity()
                 metadata = json.dumps(
                     {

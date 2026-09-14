@@ -462,6 +462,13 @@ expected_identity = "{local_identity(source)}"
     assert "/srv/aegis/roots/photos" not in {
         mount["target"] for mount in services["migrate"].get("volumes", [])
     }
+    migrate_mounts = services["migrate"].get("volumes", [])
+    assert {
+        (mount["target"], mount["read_only"]) for mount in migrate_mounts
+    } == {("/run/aegis/mounts.manifest.json", True)}
+    assert services["migrate"]["environment"]["AEGIS_MOUNT_MANIFEST_SHA256"] == (
+        hashlib.sha256(manifest.read_bytes()).hexdigest()
+    )
     for role in ("operations", "indexer", "media"):
         command = " ".join(services[role]["command"])
         assert "aegisctl mounts attest" in command

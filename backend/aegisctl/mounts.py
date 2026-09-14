@@ -523,6 +523,7 @@ def render_artifacts(
         "AEGIS_MOUNT_MANIFEST_SHA256": manifest_digest,
     }
     service_volumes = {
+        "migrate": [_bind(manifest_path.resolve(), manifest_target, read_only=True)],
         "web": [_bind(manifest_path.resolve(), manifest_target, read_only=True)],
         "operations": [_bind(manifest_path.resolve(), manifest_target, read_only=True)],
         "indexer": [_bind(manifest_path.resolve(), manifest_target, read_only=True)],
@@ -536,6 +537,13 @@ def render_artifacts(
         ],
     }
     services: dict[str, dict[str, object]] = {
+        "migrate": {
+            "environment": {
+                "AEGIS_MOUNT_MANIFEST": manifest_target,
+                "AEGIS_MOUNT_MANIFEST_SHA256": manifest_digest,
+            },
+            "volumes": service_volumes["migrate"],
+        },
         "web": {
             "user": identity,
             "environment": backend_environment,

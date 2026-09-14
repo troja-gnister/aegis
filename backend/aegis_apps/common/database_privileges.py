@@ -74,6 +74,70 @@ MANAGED_TABLE_COLUMNS: Final[dict[str, tuple[str, ...]]] = {
         "failures",
         "blocked_until",
     ),
+    "indexing_directorywork": (
+        "id",
+        "parent_revision",
+        "state",
+        "attempt",
+        "lease_owner",
+        "lease_expires_at",
+        "available_at",
+        "last_batch_sequence",
+        "observed_count",
+        "eof_identity",
+        "error_code",
+        "updated_at",
+        "directory_id",
+        "run_id",
+    ),
+    "indexing_indexdeployment": (
+        "id",
+        "epoch",
+        "manifest_identity",
+        "slot_ids",
+        "interval_seconds",
+        "idle_timeout_seconds",
+        "batch_records",
+        "readers",
+        "updated_at",
+    ),
+    "indexing_rootindexstate": (
+        "root_id",
+        "binding_epoch",
+        "policy_epoch",
+        "reconciliation_epoch",
+        "next_generation",
+        "due_at",
+        "rescan_requested",
+        "status",
+        "observed_entries",
+        "completed_directories",
+        "degraded_directories",
+        "updated_at",
+        "last_completed_at",
+        "active_run_id",
+    ),
+    "indexing_scanrequest": (
+        "id",
+        "client_request_id",
+        "created_at",
+        "actor_id",
+        "root_id",
+        "run_id",
+    ),
+    "indexing_scanrun": (
+        "id",
+        "binding_epoch",
+        "policy_epoch",
+        "root_epoch",
+        "manifest_identity",
+        "generation",
+        "start_epoch",
+        "state",
+        "started_at",
+        "settled_at",
+        "root_id",
+    ),
     "audit_auditevent": (
         "id",
         "occurred_at",
@@ -165,6 +229,11 @@ MANAGED_SEQUENCES: Final[tuple[str, ...]] = (
 ROLE_TABLE_PRIVILEGES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
     "aegis_web": {
         "catalog_catalogentry": ("SELECT",),
+        "indexing_directorywork": ("SELECT",),
+        "indexing_indexdeployment": ("SELECT",),
+        "indexing_rootindexstate": ("SELECT",),
+        "indexing_scanrequest": ("SELECT",),
+        "indexing_scanrun": ("SELECT",),
         "django_migrations": ("SELECT",),
         "django_admin_log": ("SELECT", "INSERT"),
         "auth_permission": ("SELECT",),
@@ -193,6 +262,10 @@ ROLE_TABLE_PRIVILEGES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
     },
     "aegis_indexer": {
         "catalog_catalogentry": ("SELECT",),
+        "indexing_directorywork": ("SELECT",),
+        "indexing_indexdeployment": ("SELECT",),
+        "indexing_rootindexstate": ("SELECT",),
+        "indexing_scanrun": ("SELECT",),
         "django_migrations": ("SELECT",),
         "operations_operation": ("SELECT",),
         "operations_job": ("SELECT",),
@@ -234,12 +307,17 @@ ROLE_COLUMN_PRIVILEGES: Final[
     "aegis_web": {
         "operations_operation": {"id": ("UPDATE",)},
     },
-    **{
-        database_role: {
-            "operations_job": dict(_WORKER_JOB_UPDATES),
-            "roots_root": dict(_WORKER_ROOT_READS),
-        }
-        for database_role in WORKER_DATABASE_ROLE_MAP
+    "aegis_operations": {
+        "operations_job": dict(_WORKER_JOB_UPDATES),
+        "roots_root": dict(_WORKER_ROOT_READS),
+    },
+    "aegis_indexer": {
+        "operations_job": dict(_WORKER_JOB_UPDATES),
+        "roots_root": {**_WORKER_ROOT_READS, "slot_id": ("SELECT",)},
+    },
+    "aegis_media": {
+        "operations_job": dict(_WORKER_JOB_UPDATES),
+        "roots_root": dict(_WORKER_ROOT_READS),
     },
 }
 

@@ -122,7 +122,13 @@ def test_render_is_deterministic_and_enforces_role_scoped_long_bind_mounts(
 
     rendered = yaml.safe_load(first_compose)
     services = rendered["services"]
-    assert "migrate" not in services
+    assert services["migrate"]["environment"] == {
+        "AEGIS_MOUNT_MANIFEST": "/run/aegis/mounts.manifest.json",
+        "AEGIS_MOUNT_MANIFEST_SHA256": result.manifest_digest,
+    }
+    assert {mount["target"] for mount in services["migrate"]["volumes"]} == {
+        "/run/aegis/mounts.manifest.json"
+    }
     assert services["web"]["user"] == f"{os.geteuid()}:{os.getegid()}"
     assert services["operations"]["user"] == f"{os.geteuid()}:{os.getegid()}"
     assert services["indexer"]["user"] == f"{os.geteuid()}:{os.getegid()}"
