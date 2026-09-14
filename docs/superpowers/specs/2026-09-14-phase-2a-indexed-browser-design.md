@@ -2,7 +2,7 @@
 
 **Date:** September 14, 2026
 
-**Status:** Written specification awaiting review; product scope approved in conversation. No implementation or benchmark acceptance is claimed.
+**Status:** Written specification approved on September 14, 2026. Implementation planning has started; no application implementation or benchmark acceptance is claimed.
 
 **Parent:** [Complete-v1 Phase 2 delivery design](2026-09-14-phase-2-v1-delivery-design.md)
 
@@ -182,4 +182,4 @@ No acceptance of this package advances thumbnails, document editing, transfers, 
 
 ## 13. Review and next step
 
-Review this focused design together with the Phase 2 umbrella scope. Once approved, create the executable 2A.1 implementation plan with exact files, migrations, test-first tasks, role-privilege changes, and verification commands, then implement it on `main` with scoped commits and regular pushes. The next 2A work packages retain the broader filename/event/progress/delivery obligations before milestone 2A can be accepted.
+The user approved this focused design together with the Phase 2 umbrella scope on September 14, 2026. Create the executable 2A.1 implementation plan with exact files, migrations, test-first tasks, role-privilege changes, and verification commands, then implement it on `main` with scoped commits and regular pushes. The next 2A work packages retain the broader filename/event/progress/delivery obligations before milestone 2A can be accepted.

@@ -2,7 +2,7 @@
 
 **Date:** September 14, 2026
 
-**Status:** Scope and filter/thumbnail behavior approved in conversation; written specification awaiting review. Implementation has not started.
+**Status:** Written specification approved on September 14, 2026, including scope and filter/thumbnail behavior. Implementation planning has started; application implementation has not.
 
 **Canonical status:** [README roadmap](../../../README.md#roadmap)
 
@@ -122,7 +122,7 @@ As of this design checkpoint: seven milestones defined, zero implemented or acce
 
 | Milestone | Design/implementation state | Accepted packages | Acceptance evidence |
 | --- | --- | --- | --- |
-| 2A | [2A.1 indexed-browser specification](2026-09-14-phase-2a-indexed-browser-design.md) written; awaiting review before its implementation plan | 0 | None yet |
+| 2A | [2A.1 indexed-browser specification](2026-09-14-phase-2a-indexed-browser-design.md) approved; implementation plan in preparation | 0 | None yet |
 | 2B | Planned | 0 | None yet |
 | 2C | Planned, including metadata UI and photo/video thumbnails | 0 | None yet |
 | 2D | Planned | 0 | None yet |
@@ -134,4 +134,4 @@ The README retains stable feature IDs and becomes the canonical milestone/status
 
 ## 10. Review boundary
 
-The expanded v1 scope, milestone order, metadata UI, and photo/video thumbnail behavior were approved in conversation. This written specification records that agreement and its implementation constraints. Review the written design before creating the first implementation plan. Subsequent packages refine their subsystem contracts without reopening approved product boundaries; any change to original protection, authorization, egress, or benchmark budgets requires an explicit amendment.
+The expanded v1 scope, milestone order, metadata UI, and photo/video thumbnail behavior were approved in conversation. The user approved this written specification and the focused 2A.1 specification on September 14, 2026; the first implementation plan can now proceed. Subsequent packages refine their subsystem contracts without reopening approved product boundaries; any change to original protection, authorization, egress, or benchmark budgets requires an explicit amendment.

@@ -63,7 +63,7 @@ Every feature pull request must update its row. Implemented and Verified rows li
 
 Phase 1 verification covers login/admin, granted root cards, authorization epochs, job/status primitives, and deployment boundaries only. It does not certify file-content delivery or per-file operations, live scan/disk-pressure metrics, indexing, or hostile-document/media processing; those are later phase gates.
 
-Targets 2A–2G are milestones within the expanded Phase 2. A feature spanning milestones remains Planned/Implemented until all its required behavior passes; design approval alone does not advance its status.
+Targets 2A–2G are milestones within the expanded Phase 2. A feature spanning milestones becomes Verified only when all its required behavior passes; design approval alone does not advance its status.
 
 | ID | Capability | Status | Target | Evidence |
 | --- | --- | --- | --- | --- |
@@ -119,7 +119,7 @@ Targets 2A–2G are milestones within the expanded Phase 2. A feature spanning m
 
 ## Roadmap
 
-The current focus is **Phase 2 design review — Complete v1 application**, starting with the indexed-browser work in milestone 2A. The expanded scope, metadata filters, and photo/video thumbnails are approved; the written specifications precede implementation. The [Phase 1 secure foundation](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md) remains complete.
+The current focus is **Phase 2 implementation planning — Indexed browser**, starting with the indexed-browser work in milestone 2A. The written specifications for the expanded scope and first package are approved, including metadata filters and photo/video thumbnails. Application implementation has not started. The [Phase 1 secure foundation](docs/superpowers/plans/2026-08-31-phase-1-secure-platform-foundation.md) remains complete.
 
 The first focused specification is [2A.1 — Indexed browser](docs/superpowers/specs/2026-09-14-phase-2a-indexed-browser-design.md): catalog, safe checkpointed scans, cursor API, basic metadata filters, virtualized mobile browsing, and early scale measurements. Event-driven reconciliation, broader search, reconnectable progress, and downloads remain required follow-up work within 2A; this first package alone cannot complete the milestone.
 
