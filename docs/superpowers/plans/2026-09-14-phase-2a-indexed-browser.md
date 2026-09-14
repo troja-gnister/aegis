@@ -38,14 +38,14 @@
 
 ## Status and task ledger
 
-Planning baseline: `842ba2a` on `main`, with unchanged application code from the verified Phase 1 foundation; execution begins from the committed plan at `6169402`. This plan defines **18 tasks: 3 complete, 15 remaining**. Tasks 1–3 passed verification and review; Task 4 is next. The ledger is authoritative; checkboxes below record the execution recipe and subsequent evidence, not a second task count.
+Planning baseline: `842ba2a` on `main`, with unchanged application code from the verified Phase 1 foundation; execution begins from the committed plan at `6169402`. This plan defines **18 tasks: 4 complete, 14 remaining**. Tasks 1–4 passed scoped verification and review; Task 5 is next. Task 4's local full-deployment limitation remains documented below, not a green gate. The ledger is authoritative; checkboxes below record the execution recipe and subsequent evidence, not a second task count.
 
 | Task | Independently testable deliverable | Depends on | Status |
 | --- | --- | --- | --- |
 | 1 | Lossless filename/order domain and safe focused verification | Foundation | Complete (`104208f`) |
 | 2 | Catalog schema, constraints, and explicit role grants | 1 | Complete (`a46ea81`) |
 | 3 | Deployment-bound root maintenance schema and configuration | 2 | Complete (`3a11b83`) |
-| 4 | Database-enforced scheduling, claims, renewal, and rescan authority | 3 | Planned |
+| 4 | Database-enforced scheduling, claims, renewal, and rescan authority | 3 | Complete (`0917747`) |
 | 5 | Descriptor-relative, bounded read-only directory reader | 1 | Planned |
 | 6 | Atomic observations, checkpoint finalization, and stale-work rejection | 4, 5 | Planned |
 | 7 | Supervised scan execution and independent worker liveness | 6 | Planned |
@@ -69,11 +69,18 @@ Later 2A plans still own watcher/event ingestion, broader filename/path search, 
 | --- | --- | --- | --- |
 | 1 | `104208f` (initial implementation `7489be9`); documentation checkpoint `1e084c6` | 673 backend tests; 35 filename cases; Ruff and mypy clean (161 files). The unchanged verifier's actual owned-cleanup regression passed at `7489be9`. Independent review and one scoped fix review passed. All four [Linux CI jobs](https://github.com/troja-gnister/aegis/actions/runs/34858091205) passed at `1e084c6`, including deployment and mobile browser regressions. All disposable databases were removed. | Domain and verification tooling only; no catalog schema, browsing API, UI or scale acceptance. |
 | 2 | `a46ea81`; documentation checkpoint `8116b29` | 706 backend tests; 48 focused model/privilege tests; 32 actual-role tests; Ruff and mypy clean (168 files); generated SQL and migration drift checked. Independent specification and code-quality review passed. Same-root/deletion boundaries and pre-existing function/owner/dependency preservation tested using actual PostgreSQL logins. All four [Linux CI jobs](https://github.com/troja-gnister/aegis/actions/runs/34861090070) passed at `8116b29`. All disposable databases removed. | Protected schema only; no scanning, API, UI or scale acceptance. One earlier existing immediate-reclaim test failed once and then passed focused/full reruns; its cause remains unconfirmed and requires follow-up if it recurs. |
-| 3 | `3a11b83` (initial implementation `f38ce0b`) | 728 backend tests; 34 actual-role/ACL tests; 30 focused binding/privilege cases; Ruff and mypy clean (179 files); migration drift and forward/reverse SQL generation checked. Initial Compose build passed; mount tests passed 23 cases with eight Docker Desktop unreadable-bind skips. Independent review and scoped fix review passed. Counter decreases and eager invalidation were demonstrated failing before correction; shared test ACLs and migration-function dependencies are preserved. Owned databases removed. | Configuration/schema only; no scheduling, scan execution, API, UI or scale acceptance. Historical-schema upgrade remains Task 18. Reverse SQL was generated, not separately executed. Platform skips do not prove attester behavior; Linux CI for this checkpoint is pending. |
+| 3 | `3a11b83` (initial implementation `f38ce0b`); documentation checkpoint `07fd4e4` | 728 backend tests; 34 actual-role/ACL tests; 30 focused binding/privilege cases; Ruff and mypy clean (179 files); migration drift and forward/reverse SQL generation checked. Initial Compose build passed; local mount tests passed 23 cases with eight Docker Desktop unreadable-bind skips. Independent review and scoped fix review passed. All four [Linux CI jobs](https://github.com/troja-gnister/aegis/actions/runs/34879625511) passed at `07fd4e4`. Counter decreases and eager invalidation were demonstrated failing before correction; shared test ACLs and migration-function dependencies are preserved. Owned databases removed. | Configuration/schema only; no scheduling, scan execution, API, UI or scale acceptance. Historical-schema upgrade remains Task 18. Reverse SQL was generated, not separately executed. Local platform skips are recorded separately from Linux CI results. |
+| 4 | `0917747` (initial implementation `af01d74`) | Full backend: 794 passed at `af01d74`. After the shared-initialization review fix: 90 covering backend tests and 42 actual-role/fresh installed-wheel tests passed; Ruff and mypy clean (187 files), Django checks and migration drift clean. Actual-login barriers test takeover/revocation and database time after waiting locks. Both manual and periodic paths execute from installed SQL resources. Independent review and scoped fix review passed; owned database/image cleanup verified. | Database boundaries only; no physical reader/pool, scan execution, API, UI or scale acceptance. Request-history composite index is assigned to Task 6. Full local deployment remains failed as detailed below; Linux CI for this checkpoint is pending. |
 
 Task 1's review corrected the recipe's supplementary-Unicode escape ambiguity with a failing collision regression and fixed-width escapes. Raw identity and the proven 1,530-byte maximum key remain intact; no persisted catalog/cursor existed during this pre-release correction.
 
 Task 3's review clarified the database counter invariant: attempts never decrease, and sequences never decrease within one attempt; a new attempt can restart its sequence. Its forward guard migration occupies `0002`, so Task 6's commit-fence migration is `0003`. Existing-table role tests consume the exact privilege maps without duplicating assertions; the shared fixture now restores prior schema/database ACL semantics as well as function ownership.
+
+### Task 4 deployment verification limitation
+
+The full local deployment run reported **242 passed, 2 failed, 8 skipped**. Failures were unchanged deep nested-mount rejection cases for operations/read-only and indexer/read-write. The isolated nested-mount file then reported **20 passed, 1 failed**, in the gateway/read-only case. The eight skips are the existing Docker Desktop unreadable host-bind guard; neither the failures nor skips are counted as passes.
+
+A bounded diagnostic running attestation before any diagnostic path lookup captured one unexpected acceptance: the same container's mountinfo showed only the parent mount, the injected child sentinel was absent, and a second mountinfo read still showed no child. This demonstrates a missing test precondition in that occurrence, not an acceptance of a visible nested mount. The underlying Docker omission and earlier uncaptured failures remain undiagnosed. No attestation code, rejection assertion, retry policy or skip was changed to obtain a pass. Linux CI and subsequent actual-reader/package verification remain necessary; the scoped SQL review does not clear this deployment limitation.
 
 ## File and responsibility map
 
@@ -84,7 +91,7 @@ Task 3's review clarified the database counter invariant: attempts never decreas
 | `backend/aegis_apps/catalog/migrations/` | Catalog constraints and measured indexes; no filesystem migration |
 | `backend/aegis_apps/indexing/{config,models,binding}.py` | Deployment binding, bounded scan policy, durable root/run/directory state |
 | `backend/aegis_apps/indexing/{database,scheduling,checkpoints}.py` | Small typed wrappers around fixed maintenance SQL functions |
-| `backend/aegis_apps/indexing/sql/{schedule,lease,observations,finalize}.sql` | Role-checked, fixed-search-path database transactions and fences |
+| `backend/aegis_apps/indexing/sql/{schedule,lease,start_run,observations,finalize}.sql` | Role-checked, fixed-search-path transactions/fences and trusted shared initialization fragment |
 | `backend/aegis_apps/indexing/{reader,protocol,supervisor,runner}.py` | Read-only FD operations, bounded IPC, reader lifecycle, worker integration |
 | `backend/aegis_apps/indexing/{services,selectors,serializers}.py` | Audited manual requests and safe scan summaries |
 | `backend/aegis_apps/common/database_privileges.py` | Exact schema/column/function allowlists; integrate new SQL without relaxing old ones |
@@ -487,11 +494,11 @@ Add exact table columns and SELECT grants for web/indexer; no runtime DML on the
 
 ## Task 4: Scheduling, lease, and manual-rescan authority
 
-**Files:** Create `backend/aegis_apps/indexing/{database,scheduling,services}.py`, `backend/aegis_apps/indexing/sql/{schedule,lease}.sql`, `backend/tests/integration/indexing/{test_scheduling,test_leases,test_rescan}.py`. Modify `backend/aegis_apps/common/database_privileges.py` and `tests/deployment/test_database_roles.py`.
+**Files:** Create `backend/aegis_apps/indexing/{database,scheduling,services}.py`, `backend/aegis_apps/indexing/sql/{schedule,lease,start_run}.sql`, `backend/tests/integration/__init__.py`, and `backend/tests/integration/indexing/{__init__,test_scheduling,test_leases,test_rescan}.py`. Modify `backend/aegis_apps/common/database_privileges.py`, `backend/tests/unit/common/test_database_privileges.py`, and `tests/deployment/test_database_roles.py`.
 
 **Interfaces:** Produces `ScanLease`, `schedule_root_scan(root_id: UUID, worker_id: str, manifest_identity: str) -> UUID | None`, `claim_directory(run_id: UUID, worker_id: str) -> ScanLease | None`, `renew_directory(lease: ScanLease) -> bool`, and `request_root_scan(actor: User, root_id: UUID, request_id: str) -> UUID`. Initial directory leases last 60 seconds; renewal interval is at most 15 seconds. Database time is authoritative.
 
-- [ ] **Step 1: Write failing actual-login tests.** Extend the existing `RoleDatabase` fixture and helpers in `tests/deployment/test_database_roles.py`; do not duplicate its credential/role teardown. Define `_create_scan_fixture()` there to seed an active bound root/anchor, publish a current indexer heartbeat, and return `(root, worker_id, manifest_digest)`.
+- [x] **Step 1: Write failing actual-login tests.** Extend the existing `RoleDatabase` fixture and helpers in `tests/deployment/test_database_roles.py`; do not duplicate its credential/role teardown. Define `_create_scan_fixture()` there to seed an active bound root/anchor, publish a current indexer heartbeat, and return `(root, worker_id, manifest_digest)`.
 
 ```python
 def test_only_indexer_can_schedule_and_renew(role_database):
@@ -515,9 +522,9 @@ def test_only_indexer_can_schedule_and_renew(role_database):
 
 Test expired/future/malformed leases, stale binding/root/policy epochs, wrong worker, inactive root, missing slot, concurrent scheduling, root-admin versus browse-only grants, ungranted superuser, account deactivation, audit rollback, idempotent replay, and cross-root replay mismatch. A logged-out requester must not stop an already administratively configured periodic scan. Existing actorless operation rejection tests remain unchanged.
 
-- [ ] **Step 2: Verify red.** Run `uv run --locked python scripts/verify.py deployment --test-target tests/deployment/test_database_roles.py::test_only_indexer_can_schedule_and_renew` and the new focused indexing backend tests; expect absent SQL/service failures.
+- [x] **Step 2: Verify red.** Run `uv run --locked python scripts/verify.py deployment --test-target tests/deployment/test_database_roles.py::test_only_indexer_can_schedule_and_renew` and the new focused indexing backend tests; expect absent SQL/service failures.
 
-- [ ] **Step 3: Implement fixed SQL functions and typed wrappers.** Each security-definer function uses PL/pgSQL, an empty search path, actual `session_user` checks, a strict field/size allowlist for lease JSON, parameter validation before casting, fixed error codes, and schema-qualified objects. Register its exact signature and identity arguments in the existing verification maps; revoke public EXECUTE in the installation transaction.
+- [x] **Step 3: Implement fixed SQL functions and typed wrappers.** Each security-definer function uses PL/pgSQL, an empty search path, actual `session_user` checks, a strict field/size allowlist for lease JSON, parameter validation before casting, fixed error codes, and schema-qualified objects. Register its exact signature and identity arguments in the existing verification maps; revoke public EXECUTE in the installation transaction.
 
 ```python
 # database.py — the generic helper is private to this fixed registry.
@@ -548,13 +555,15 @@ def vars_from_lease(lease: ScanLease) -> dict[str, object]:
 
 Lock order is deployment binding in shared mode, root, user only for actor-bound requests, root-index state, scan run, then directory work and directory entry. Schedule/claim must not lock a work row first and then seek its root. Use bounded candidate discovery followed by root-first locking and rechecking; skip busy roots and schedule by due time/last service, so one large root does not monopolize the reader pool. Claim transitions pending/expired work to reading, increments attempt, resets batch sequence and EOF state, and captures the current directory revision. `RootIndexState` serializes one reader per root; a fresh lease for one directory excludes another live directory lease on that root.
 
-Create the synthetic anchor once under its unique root constraint. Runs capture binding/root/policy/reconciliation epochs, enqueue only directory work, and coalesce additional demand. Never create one job per regular file. Schedule the next periodic run after completion/degradation, not from the old start time. Bound retries with backoff rather than a busy loop.
+Create the synthetic anchor once under its unique root constraint. Runs capture binding/root/policy/reconciliation epochs, enqueue only directory work, and coalesce additional demand. Never create one job per regular file. Schedule the next periodic run after completion/degradation, not from the old start time. Bound each directory to three attempts per run, with retry eligibility five then ten seconds after lease expiration, and degrade after exhaustion. These are fixed internal limits, not a new configuration surface.
+
+Keep shared anchor/run/work initialization in the trusted packaged `start_run.sql` fragment, expanded at installation into the two fixed scheduling functions. Preserve separate authorization and manual/periodic due-time handling. No caller-supplied SQL or additional runtime callable function is introduced.
 
 Manual requests take live root/user locks, compare the supplied user epoch and active state, and compute the existing additive permission mask from direct/group grants. Require `ROOT_ADMIN` even for a platform superuser. Record `index.scan.requested` with actor/root/run/request IDs in the same transaction as the idempotency record; no filenames or paths. Replays return the original run ID only after current authorization. Limit new manual requests to 20 per user/root per minute under the same lock; return a safe retry interval, without blocking periodic maintenance.
 
-- [ ] **Step 4: Verify green.** Run all new scheduling/lease/rescan tests and the complete actual-role suite. Add two-connection barriers proving old attempts cannot renew after takeover and binding/root revocation cannot race a valid commit. Keep the original operations authorization/locking suite green.
+- [x] **Step 4: Verify green.** Run all new scheduling/lease/rescan tests and the complete actual-role suite. Add two-connection barriers proving old attempts cannot renew after takeover and binding/root revocation cannot race a valid commit. Keep the original operations authorization/locking suite green.
 
-- [ ] **Step 5: Review and commit.** Inspect SQL caller checks, lock order and grant maps; record evidence and commit `feat: enforce database-scoped scan scheduling and leases`; push `origin main`.
+- [x] **Step 5: Review and commit.** Inspect SQL caller checks, lock order and grant maps; record evidence and commit `feat: enforce database-scoped scan scheduling and leases`; push `origin main`.
 
 ## Task 5: Read-only descriptor-relative directory reader
 
@@ -656,6 +665,8 @@ Add cases for partial committed batches then crash/restart, duplicate batch sequ
 
 - [ ] **Step 3: Implement fenced upserts and bounded reconciliation.** The observation function validates the entire batch before writing: fixed keys, at most configured records, serialized payload at most 1 MiB, valid source names/kinds/states, integer domains, consistent null metadata, and a sequence/hash bound to the current attempt. Store the most recent sequence/hash on `DirectoryWork`; exact replay is an idempotent acknowledgement, a changed payload with that sequence rejects, and a gap rejects. Extend Task 3's model with `last_batch_hash` in this migration and the exact column allowlist.
 
+Also add the composite `ScanRequest` index on actor, root, and creation time, identified during Task 4 review. Keep the existing rate/replay semantics; verify index presence and the recent-request lookup against synthetic historical rows so manual demand does not scan accumulated history while holding the root lock. This is a metadata-only index in the existing model/migration slice, before Task 10 enables the HTTP request path.
+
 ```sql
 -- Core unseen-row predicate, inside the root-first locked finalization function.
 WITH candidates AS (
@@ -744,7 +755,7 @@ Keep one separate supervisor control loop for lease renewal/heartbeat/cancellati
 
 Extend both the Python and database heartbeat allowlists with `scanObservedEntries`, `scanCompletedDirectories`, and `scanDegradedDirectories`, each an integer from zero through PostgreSQL's signed-bigint maximum within the existing 1 KiB metrics payload cap. Test exact parity and reject unknown/boolean/negative values. Leave `scanProgress` absent while no denominator exists and leave disk-pressure fields unclaimed. Per-root API counters come from `RootIndexState`, never a role-wide heartbeat aggregate.
 
-The loop admits at most the configured global reader count (default two, maximum four), one per root, honors two-frame credits, and services active roots fairly. Renewal failure closes the commit gate before any queued batch is applied. Successful EOF transitions to bounded finalization ticks, not a long uninterruptible loop. No-progress timeout applies to observation progress rather than total directory duration; healthy large directories can run longer than 120 seconds.
+The loop admits at most the configured global reader count (default two, maximum four), one per root, honors two-frame credits, and services active roots fairly. Select eligible roots by due time/last service; Task 4's single-root scheduler enforces eligibility and skips busy roots but does not dispatch this global pool. Renewal failure closes the commit gate before any queued batch is applied. Successful EOF transitions to bounded finalization ticks, not a long uninterruptible loop. No-progress timeout applies to observation progress rather than total directory duration; healthy large directories can run longer than 120 seconds.
 
 On stop/timeout, stop accepting observations, close credits, terminate the exact child, wait a bounded grace period, then kill only that child if needed. If it remains unreaped, retain its root slot in `UNREAPED`, publish degraded state and start no replacement for that root. Do not spawn endless retries or claim recovery while a stuck reader persists. On container/process restart, the runtime must reap prior children before admitting replacement readers. The scanner makes no filesystem write in any state.
 
