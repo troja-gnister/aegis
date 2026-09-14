@@ -12,7 +12,7 @@ from aegis_apps.catalog.models import CatalogEntry
 from aegis_apps.identity.models import User
 from aegis_apps.indexing.binding import install_index_binding
 from aegis_apps.indexing.config import ScanPolicy
-from aegis_apps.indexing.models import IndexDeployment, RootIndexState, ScanRun
+from aegis_apps.indexing.models import DirectoryWork, IndexDeployment, RootIndexState, ScanRun
 from aegis_apps.operations.services import create_operation
 from aegis_apps.roots.manifest import MountManifest
 from aegis_apps.roots.models import Root, RootGrant
@@ -132,9 +132,7 @@ def test_binding_is_idempotent_and_changes_fence_work_and_authorization(
     )
     changed = ScanPolicy(7200, 120, 500, 2)
     changed_manifest = _manifest(tmp_path / "changed.json", "archive", "photos")
-    with patch(
-        "aegis_apps.indexing.binding.invalidate_authorization_cache"
-    ) as invalidate:
+    with patch("aegis_apps.indexing.binding.invalidate_authorization_cache") as invalidate:
         with role_database.as_django_role("aegis_migrator"):
             install_index_binding(changed_manifest, changed)
         invalidate.assert_called_once_with(
@@ -211,18 +209,70 @@ def test_binding_change_rolls_back_epochs_and_invalidation(
     manifest = _manifest(tmp_path / "rollback.json", "rollback")
     with role_database.as_django_role("aegis_migrator"):
         install_index_binding(manifest, ScanPolicy.from_environment({}))
-    with (
-        patch("aegis_apps.indexing.binding.invalidate_authorization_cache") as invalidate,
-        pytest.raises(RuntimeError, match="rollback"),
-        role_database.as_django_role("aegis_migrator"),
-        transaction.atomic(),
-    ):
-        install_index_binding(manifest, ScanPolicy(7200, 120, 500, 2))
-        raise RuntimeError("rollback")
+    with patch("aegis_apps.indexing.binding.invalidate_authorization_cache") as invalidate:
+        with (
+            pytest.raises(RuntimeError, match="rollback"),
+            role_database.as_django_role("aegis_migrator"),
+            transaction.atomic(),
+        ):
+            install_index_binding(manifest, ScanPolicy(7200, 120, 500, 2))
+            invalidate.assert_not_called()
+            raise RuntimeError("rollback")
         invalidate.assert_not_called()
     assert IndexDeployment.objects.get(pk=1).epoch == 1
     assert Root.objects.get(pk=root.pk).authorization_epoch == 0
     assert User.objects.get(pk=user.pk).authorization_epoch == 0
+
+
+@pytest.mark.parametrize(
+    ("attempt", "sequence", "allowed"),
+    ((1, 10, False), (2, 9, False), (2, 10, True), (2, 11, True), (3, 10, True), (3, 0, True)),
+)
+def test_directory_counters_fence_same_attempt_but_allow_retry_reset(
+    role_database: RoleDatabase, attempt: int, sequence: int, allowed: bool
+) -> None:
+    root = _root("counter-root")
+    with role_database.as_django_role("aegis_migrator"):
+        run = ScanRun.objects.create(
+            root=root,
+            binding_epoch=1,
+            policy_epoch=1,
+            root_epoch=0,
+            manifest_identity="unconfigured:v1",
+            generation=1,
+            start_epoch=0,
+            state="queued",
+        )
+        work = DirectoryWork.objects.create(
+            run=run,
+            directory=CatalogEntry.objects.get(root=root),
+            parent_revision=0,
+            attempt=2,
+            last_batch_sequence=10,
+        )
+        if allowed:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE indexing_directorywork SET attempt = %s, "
+                    "last_batch_sequence = %s WHERE id = %s",
+                    [attempt, sequence, work.pk],
+                )
+            work.refresh_from_db()
+            assert (work.attempt, work.last_batch_sequence) == (attempt, sequence)
+        else:
+            with (
+                pytest.raises(DatabaseError) as caught,
+                transaction.atomic(),
+                connection.cursor() as cursor,
+            ):
+                cursor.execute(
+                    "UPDATE indexing_directorywork SET attempt = %s, "
+                    "last_batch_sequence = %s WHERE id = %s",
+                    [attempt, sequence, work.pk],
+                )
+            assert getattr(caught.value.__cause__, "sqlstate", None) == "55000"
+            work.refresh_from_db()
+            assert (work.attempt, work.last_batch_sequence) == (2, 10)
 
 
 def test_active_run_must_belong_to_state_root(role_database: RoleDatabase) -> None:

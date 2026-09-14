@@ -21,6 +21,10 @@ from psycopg import sql
 MIGRATOR_ROLE = "aegis_migrator"
 ALL_TEST_ROLES = (MIGRATOR_ROLE, *RUNTIME_DATABASE_ROLES)
 AclEntry = tuple[str, str, bool]
+TEST_OWNED_FUNCTION_SIGNATURES = (
+    *MANAGED_FUNCTION_SIGNATURES.values(),
+    "public.aegis_directory_counter_guard()",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,7 +187,7 @@ def _restore_and_drop_roles(
         cursor.execute("RESET SESSION AUTHORIZATION")
         cursor.execute("RESET ROLE")
 
-        for signature in MANAGED_FUNCTION_SIGNATURES.values():
+        for signature in TEST_OWNED_FUNCTION_SIGNATURES:
             cursor.execute(
                 "SELECT to_regprocedure(%s)",
                 [signature],
@@ -225,7 +229,7 @@ def _restore_and_drop_roles(
             )
         )
 
-        for signature in MANAGED_FUNCTION_SIGNATURES.values():
+        for signature in TEST_OWNED_FUNCTION_SIGNATURES:
             if signature not in original_functions:
                 cursor.execute(f"DROP FUNCTION IF EXISTS {signature}")
 
@@ -383,7 +387,7 @@ def managed_role_database() -> Iterator[RoleDatabase]:
         if set(original_relation_owners) != set(MANAGED_TABLE_COLUMNS) | set(MANAGED_SEQUENCES):
             pytest.fail("managed database relation manifest is incomplete")
 
-        for signature in MANAGED_FUNCTION_SIGNATURES.values():
+        for signature in TEST_OWNED_FUNCTION_SIGNATURES:
             cursor.execute(
                 """
                 SELECT pg_catalog.pg_get_functiondef(oid),
