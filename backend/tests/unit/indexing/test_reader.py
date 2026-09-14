@@ -54,6 +54,19 @@ def test_rejects_invalid_or_unbounded_component_chain(
     assert scan(tmp_path, components) == [ReaderFailure("reader_protocol_error")]
 
 
+def test_4096_raw_component_bytes_pass_validation(tmp_path: Path, topology: None) -> None:
+    # Exactly 17 components and 4,096 raw bytes; separators are not input bytes.
+    components = (b"x" * 255,) * 16 + (b"y" * 16,)
+    # The first child does not exist. Reaching traversal gives source_unavailable,
+    # while incorrect byte validation would return reader_protocol_error.
+    assert scan(tmp_path, components) == [ReaderFailure("source_unavailable")]
+
+
+def test_4097_raw_component_bytes_fail_validation(tmp_path: Path, topology: None) -> None:
+    components = (b"x" * 255,) * 16 + (b"y" * 17,)
+    assert scan(tmp_path, components) == [ReaderFailure("reader_protocol_error")]
+
+
 @pytest.mark.parametrize("count", [0, 99, 2001, True])
 def test_rejects_out_of_range_batch_size(tmp_path: Path, topology: None, count: int) -> None:
     assert scan(tmp_path, count=count) == [ReaderFailure("reader_protocol_error")]

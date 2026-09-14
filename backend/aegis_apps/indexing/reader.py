@@ -145,7 +145,7 @@ def read_directory(
         total = 0
         for raw in components:
             source_name(raw)
-            total += len(raw) + 1
+            total += len(raw)
             if total > MAX_COMPONENT_BYTES:
                 raise ValueError
     except ValueError:
