@@ -65,6 +65,20 @@ def test_order_collisions_do_not_collapse_raw_identity(left: str, right: str, ke
     assert first.order_key == second.order_key == key.encode()
 
 
+def test_supplementary_control_escapes_do_not_collide_with_bmp_followed_by_hex_digits() -> None:
+    supplementary = source_name("\U000e0001".encode())
+    bmp_with_digit = source_name("\ue0001".encode())
+    literal_escape = source_name(b"\\U000e0001")
+    assert supplementary.display != bmp_with_digit.display
+    assert supplementary.display == "\\U000e0001"
+    assert bmp_with_digit.display == "\\ue0001"
+    assert literal_escape.display == "\\\\U000e0001"
+    assert supplementary.raw == "\U000e0001".encode()
+    assert bmp_with_digit.raw == "\ue0001".encode()
+    assert supplementary.order_key != bmp_with_digit.order_key
+    assert supplementary.order_key != literal_escape.order_key
+
+
 components = st.binary(min_size=1, max_size=255).filter(
     lambda raw: b"\0" not in raw and b"/" not in raw and raw not in (b".", b"..")
 )
@@ -87,6 +101,7 @@ def test_supported_byte_components_preserve_identity_with_safe_bounded_display(r
         (b"\x01" * 255, 1530),
         (b"\\" * 255, 510),
         ("\u0130".encode() * 127 + b"a", 382),
+        ("\U000e0001".encode() * 63 + b"aaa", 633),
     ],
 )
 def test_maximum_linux_components_fit_the_stored_key_budget(raw: bytes, length: int) -> None:

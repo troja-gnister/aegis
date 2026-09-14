@@ -16,7 +16,8 @@ def source_name(raw: bytes) -> SourceName:
     display = "".join(
         f"\\x{ord(c) - 0xDC00:02x}" if 0xDC80 <= ord(c) <= 0xDCFF else
         "\\\\" if c == "\\" else
-        f"\\u{ord(c):04x}" if unicodedata.category(c).startswith("C") else c
+        (f"\\U{ord(c):08x}" if ord(c) > 0xFFFF else f"\\u{ord(c):04x}")
+        if unicodedata.category(c).startswith("C") else c
         for c in decoded
     )
     key = unicodedata.normalize("NFC", display.casefold()).encode("utf-8")
