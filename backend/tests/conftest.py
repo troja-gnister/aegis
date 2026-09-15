@@ -1,11 +1,16 @@
+import hashlib
+import json
 import uuid
 from collections.abc import Callable
 from datetime import datetime
+from pathlib import Path
+from typing import Any
 
 import pytest
 from aegis_apps.catalog.domain import DirectoryIdentity, EntryKind, Observation, SourceState
 from aegis_apps.catalog.models import CatalogEntry
 from aegis_apps.catalog.names import source_name
+from aegis_apps.identity.models import User
 from aegis_apps.indexing.checkpoints import BatchResult, FinalizeResult
 from aegis_apps.indexing.database import ScanLease
 from aegis_apps.indexing.protocol import ReaderBatch, ReaderComplete
@@ -154,3 +159,99 @@ class ScanFixture:
 @pytest.fixture
 def scan_fixture(role_database: RoleDatabase) -> ScanFixture:
     return ScanFixture(role_database)
+
+
+class BrowseFixture:
+    """Synthetic catalog and request principal; queries always use the public interface."""
+
+    def __init__(self, root: Root, user: User, factory: Callable[..., CatalogEntry]) -> None:
+        self.root, self.user, self.factory = root, user, factory
+        self.anchor = CatalogEntry.objects.get(root=root, source_parent__isnull=True)
+        self.namespace = "a" * 40
+        self.statements: list[str] = []
+
+    def entry(self, raw: bytes = b"item", **kwargs: Any) -> CatalogEntry:
+        entry = self.factory(root=self.root, raw=raw, **kwargs)
+        assert entry.source_parent is not None
+        CatalogEntry.objects.filter(pk=entry.pk).update(
+            source_parent_revision=entry.source_parent.source_revision,
+        )
+        entry.refresh_from_db()
+        return entry
+
+    def page(self, **kwargs: Any) -> dict[str, Any]:
+        from aegis_apps.catalog.authorization import browse_context
+        from aegis_apps.catalog.filters import FileFilter
+        from aegis_apps.catalog.queries import directory_page
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        options: dict[str, Any] = dict(
+            parent_id=None, filters=FileFilter(), sort="name", order="asc", limit=100, cursor=None,
+        )
+        options.update(kwargs)
+        with (
+            CaptureQueriesContext(connection) as captured,
+            browse_context(self.user, self.root.pk, self.namespace) as context,
+        ):
+            page = directory_page(context, **options)
+        self.statements.extend(query["sql"] for query in captured)
+        return page
+
+    def details(self, entry_id: uuid.UUID) -> dict[str, Any]:
+        from aegis_apps.catalog.queries import entry_details
+
+        return entry_details(self.user, entry_id, self.namespace)
+
+    def seed_ties(self, count: int) -> None:
+        entries = []
+        for index in range(count):
+            name = source_name(f"{index:04d}.txt".encode())
+            entries.append(CatalogEntry(
+                root=self.root, source_parent=self.anchor, logical_parent=self.anchor,
+                source_parent_revision=self.anchor.source_revision,
+                raw_name=name.raw, display_name=name.display, name_key=name.order_key,
+                type_hint=name.type_hint, size=None if index % 5 == 0 else index % 3,
+                mtime_ns=None if index % 7 == 0 else index % 3,
+                kind=EntryKind.DIRECTORY if index % 4 == 0 else EntryKind.FILE,
+            ))
+        CatalogEntry.objects.bulk_create(entries)
+
+    def walk(self, **kwargs: Any) -> list[dict[str, Any]]:
+        pages = [self.page(**kwargs)]
+        while pages[-1]["nextCursor"]:
+            pages.append(self.page(cursor=pages[-1]["nextCursor"], **kwargs))
+            assert len(pages) < 100
+        return pages
+
+
+@pytest.fixture
+def browse_fixture(
+    catalog_root: Root, entry_factory: Callable[..., CatalogEntry],
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> BrowseFixture:
+    from aegis_apps.indexing.models import IndexDeployment
+    from aegis_apps.roots.models import RootGrant
+
+    path = tmp_path / "browse-manifest.json"
+    raw = json.dumps({
+        "version": 1, "generatedAt": "2026-09-15T12:00:00Z", "slots": [{
+            "slotId": catalog_root.slot_id,
+            "containerPath": f"/srv/aegis/roots/{catalog_root.slot_id}",
+            "mode": "read_only", "filesystemId": 100, "rootInode": 200,
+            "expectedIdentity": "remote:synthetic.invalid:/browse",
+            "mountFingerprint": "a" * 64,
+        }],
+    }).encode()
+    path.write_bytes(raw)
+    path.chmod(0o600)
+    digest = hashlib.sha256(raw).hexdigest()
+    monkeypatch.setenv("AEGIS_MOUNT_MANIFEST", str(path))
+    monkeypatch.setenv("AEGIS_MOUNT_MANIFEST_SHA256", digest)
+    IndexDeployment.objects.create(
+        manifest_identity=digest, slot_ids=[catalog_root.slot_id],
+        interval_seconds=3600, idle_timeout_seconds=120, batch_records=500, readers=1,
+    )
+    user = User.objects.create_user(username=f"browse-{uuid.uuid4().hex}")
+    RootGrant.objects.create(root=catalog_root, user=user, permissions=1)
+    return BrowseFixture(catalog_root, user, entry_factory)
