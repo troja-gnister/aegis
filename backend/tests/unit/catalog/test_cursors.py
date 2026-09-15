@@ -92,7 +92,10 @@ def test_cursor_round_trips_every_sort_value_and_numeric_null_sentinel(
 def test_cursor_preserves_maximum_complete_name_key() -> None:
     key = b"n" * 2048
     context = make_context()
-    position = decode_cursor(encode_cursor(context, (1, 0, key, key, ENTRY_ID), "next"), context)
+    token = encode_cursor(context, (1, 0, key, key, ENTRY_ID), "next")
+    assert token.isascii()
+    assert len(token.encode("ascii")) <= 8192
+    position = decode_cursor(token, context)
     assert position.key[2] == key
     assert position.key[3] == key
 
@@ -155,6 +158,25 @@ def test_signature_tampering_is_a_safe_restartable_error() -> None:
 def test_invalid_encoded_cursor_is_a_safe_restartable_error(value: object) -> None:
     with pytest.raises(CursorRestartRequired, match=r"^cursor_restart_required$"):
         decode_cursor(value, make_context())  # type: ignore[arg-type]
+
+
+def test_multibyte_cursor_is_rejected_before_signing_decode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def unexpected_decode(*_args: object, **_kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("signing.loads must not receive a non-ASCII cursor")
+
+    monkeypatch.setattr(signing, "loads", unexpected_decode)
+    value = "\U0001f642" * 2049
+    assert len(value) < 8192
+    assert len(value.encode()) > 8192
+    with pytest.raises(CursorRestartRequired, match=r"^cursor_restart_required$"):
+        decode_cursor(value, make_context())
+    assert calls == 0
 
 
 @pytest.mark.parametrize(

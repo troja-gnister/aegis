@@ -5,13 +5,38 @@ from typing import cast
 
 import pytest
 from aegis_apps.catalog.domain import EntryKind, SourceState
-from aegis_apps.catalog.filters import canonical_filter_bytes, parse_filters
+from aegis_apps.catalog.filters import _ascii_json_size, canonical_filter_bytes, parse_filters
 from hypothesis import given
 from hypothesis import strategies as st
 
 
 def canonical(value: object) -> dict[str, object]:
     return cast(dict[str, object], json.loads(canonical_filter_bytes(parse_filters(value))))
+
+
+def raw_filter_bytes(value: object) -> bytes:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("ascii")
+
+
+def oversized_raw_filter(prefix_character: str) -> dict[str, object]:
+    return {
+        "v": 1,
+        "kind": ["directory"] * 32,
+        "type": ["abcdefghijklmnop"] * 32,
+        "availability": ["inaccessible"] * 32,
+        "prefix": prefix_character * 1200,
+        "size": {"min": "0", "max": "18446744073709551615"},
+        "modified": {
+            "from": "1970-01-01T00:00:00Z",
+            "before": "1970-01-01T00:00:01Z",
+        },
+    }
 
 
 def test_equivalent_multiselects_have_one_cursor_context() -> None:
@@ -242,3 +267,48 @@ def test_normalized_filter_document_is_bounded() -> None:
 
     with pytest.raises(ValueError, match="invalid filters"):
         parse_filters({"v": 1, "prefix": "\x01" * 2048})
+
+
+def test_raw_filter_budget_precedes_duplicate_and_escape_normalization() -> None:
+    value = oversized_raw_filter("\x01")
+    assert len(raw_filter_bytes(value)) == 8849
+    with pytest.raises(ValueError, match="invalid filters"):
+        parse_filters(value)
+
+
+def test_raw_filter_budget_counts_delete_as_an_ascii_json_escape() -> None:
+    value = oversized_raw_filter("\x7f")
+    assert len(raw_filter_bytes(value)) == 8849
+    with pytest.raises(ValueError, match="invalid filters"):
+        parse_filters(value)
+
+
+def test_raw_filter_budget_accepts_exact_8192_byte_document() -> None:
+    empty = {"v": 1, "prefix": ""}
+    remaining = 8192 - len(raw_filter_bytes(empty))
+    prefix = "\x01" * (remaining // 6) + "a" * (remaining % 6)
+    value = {"v": 1, "prefix": prefix}
+    assert len(prefix.encode()) <= 2048
+    assert len(raw_filter_bytes(value)) == 8192
+    assert len(canonical_filter_bytes(parse_filters(value))) == 8192
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        '"\\',
+        "\b\f\n\r\t",
+        "\x00\x01\x1f",
+        "\x7f",
+        "\u00e9",
+        "\U0001f642",
+        {"outer": [None, True, False, -17, '"', {"inner": "\x00\u00e9\U0001f642"}]},
+    ],
+)
+def test_raw_size_accounting_matches_ascii_json_for_every_escape_class(
+    value: object,
+) -> None:
+    expected = len(raw_filter_bytes(value))
+    assert _ascii_json_size(value, expected) == expected
+    with pytest.raises(ValueError, match="invalid filters"):
+        _ascii_json_size(value, expected - 1)

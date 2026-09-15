@@ -225,7 +225,12 @@ def signed_cursor_payload(payload: dict[str, object]) -> str:
 
 
 def unsigned_cursor_payload(value: str) -> object:
-    if not isinstance(value, str) or len(value) > MAX_CURSOR_BYTES or value.startswith("."):
+    if (
+        not isinstance(value, str)
+        or len(value) > MAX_CURSOR_BYTES
+        or not value.isascii()
+        or value.startswith(".")
+    ):
         raise CursorRestartRequired()
     try:
         return signing.loads(value, salt=CURSOR_SALT, max_age=CURSOR_MAX_AGE)

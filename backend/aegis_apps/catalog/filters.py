@@ -70,6 +70,79 @@ def _invalid() -> ValueError:
     return ValueError("invalid filters")
 
 
+def _bounded_sum(total: int, addition: int, limit: int) -> int:
+    if addition > limit - total:
+        raise _invalid()
+    return total + addition
+
+
+def _ascii_json_string_size(value: str, limit: int) -> int:
+    size = 2
+    if size > limit:
+        raise _invalid()
+    for character in value:
+        point = ord(character)
+        if character in ('"', "\\", "\b", "\f", "\n", "\r", "\t"):
+            addition = 2
+        elif point < 0x20 or 0x7E < point <= 0xFFFF:
+            addition = 6
+        elif point > 0xFFFF:
+            addition = 12
+        else:
+            addition = 1
+        size = _bounded_sum(size, addition, limit)
+    return size
+
+
+def _ascii_json_size(value: object, limit: int, *, depth: int = 0) -> int:
+    if depth > 4:
+        raise _invalid()
+    if type(value) is str:
+        return _ascii_json_string_size(value, limit)
+    if value is None:
+        size = 4
+    elif type(value) is bool:
+        size = 4 if value else 5
+    elif type(value) is int:
+        if value.bit_length() > 4 * limit:
+            raise _invalid()
+        try:
+            size = len(str(value))
+        except ValueError:
+            raise _invalid() from None
+    elif type(value) is list:
+        size = 2
+        for index, item in enumerate(value):
+            size = _bounded_sum(size, int(index > 0), limit)
+            size = _bounded_sum(
+                size,
+                _ascii_json_size(item, limit - size, depth=depth + 1),
+                limit,
+            )
+    elif type(value) is dict:
+        size = 2
+        for index, (key, item) in enumerate(value.items()):
+            if type(key) is not str:
+                raise _invalid()
+            size = _bounded_sum(size, int(index > 0), limit)
+            size = _bounded_sum(size, _ascii_json_string_size(key, limit - size), limit)
+            size = _bounded_sum(size, 1, limit)
+            size = _bounded_sum(
+                size,
+                _ascii_json_size(item, limit - size, depth=depth + 1),
+                limit,
+            )
+    else:
+        raise _invalid()
+    if size > limit:
+        raise _invalid()
+    return size
+
+
+def _validate_raw_filter_bytes(value: dict[object, object]) -> None:
+    _ascii_json_size(value, MAX_FILTER_BYTES)
+
+
 def _enum_selection[EnumValue: StrEnum](
     value: object,
     enum_type: type[EnumValue],
@@ -207,6 +280,7 @@ def parse_filters(value: object) -> FileFilter:
         raise _invalid()
     if value["v"] != FILTER_VERSION:
         raise _invalid()
+    _validate_raw_filter_bytes(value)
     filters = FileFilter(
         kind=_enum_selection(value["kind"], EntryKind) if "kind" in value else (),
         type=_type_selection(value["type"]) if "type" in value else (),
