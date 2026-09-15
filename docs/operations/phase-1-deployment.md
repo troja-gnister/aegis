@@ -1,14 +1,16 @@
-# Phase 1 deployment and operation
+# Deployment and operation
 
 The [Phase 1 acceptance report](../verification/phase-1.md) records the verified foundation and its limitations. **Supported original roots must contain no nested filesystem mounts.** Host preflight/artifact guards and runtime attestation enforce this restriction; use the separate-root layout below. Do not bypass a rejection or enable writes to originals.
 
-This is a foundation deployment, not yet a replacement for a working drive or photo library. Login, root visibility, administration, audit, jobs, and isolation are implemented; file indexing, viewers, transfers, and document editing are later roadmap work. See [development verification](../development.md) before deploying a changed build.
+This remains an incremental build, not yet a replacement for a working drive or photo library. Login, root visibility, administration, audit, jobs, and isolation are implemented. The [indexed-browser task ledger](../superpowers/plans/2026-09-14-phase-2a-indexed-browser.md#status-and-task-ledger) records supervised metadata-scanner progress and exact verification limits; browsing, viewers, transfers, and document editing have separate gates. See [development verification](../development.md) before deploying a changed build.
 
 ## Prerequisites
 
 Use Docker with Compose v2 or newer and the locked host tooling from the development guide. Choose a dedicated, non-root host account with read/traverse access to every original root and access to Docker. Phase 1 preflight requires `AEGIS_UID` and `AEGIS_GID` to match that invoking account. Do not run preflight as root or compensate for unreadable roots by adding capabilities.
 
 Backend roles use that UID/GID; the gateway uses `101:101`. Storage sharing/ACLs must permit read/traverse access for both effective container identities. Host preflight alone does not prove gateway access: runtime attestation and readiness must also pass. Do not grant write access to originals to resolve an identity mismatch.
+
+Compose also supplies `AEGIS_UID` and `AEGIS_GID` as backend build arguments to establish ownership of the private indexer-coordination directory. Build and run with the same numeric identity. A fresh named volume inherits this directory ownership; rebuilding an image does not repair ownership of an existing populated volume. If changing identities, stop the affected deployment and arrange an inspected, installation-specific ownership migration, or retain the existing identity. Do not remove the volume, add a privileged application initializer, or change original-root permissions to bypass a mismatch.
 
 Every original is mounted read-only in gateway/operations/indexer/media; web and migrator receive none. Aegis cannot delete, overwrite, move, or rename original files. Duplicate review is future metadata-only work. No writable original mount is permitted, including when importing a legacy `read_write` declaration. Future edits create separate immutable managed versions, never modifications of originals.
 
@@ -133,6 +135,14 @@ Choose the real account name/email before running. The password is read only fro
 
 In administration, create the logical root using an already configured slot, a display name, and read-only mode. Activate it only after the deployment above is ready. Slots cannot be created by submitting an arbitrary path in the browser. A missing/invalid manifest prevents activation. Deactivating a root changes metadata and authorization epochs, never its files; deleting root records is disabled.
 
+## Indexer coordination and restart
+
+Only indexer mounts the project-scoped `indexer-coordination` volume at `/srv/aegis/indexer-coordination`. Its opaque lock files are outside originals; they coordinate physical reader lifetimes and do not replace database leases or authorization fences. One active coordinator owns the configured bounded reader pool, with at most one reader per root. Every indexer using the same deployment/database must share this local coordination volume. Separate lock volumes or arbitrary multi-host failover are not supported deployment topologies.
+
+Readers inherit both their root lock and deployment-admission lock. If the coordinator dies while a reader still has source access, replacement admission remains closed; a stuck orphan can therefore delay the whole replacement coordinator. During ordinary operation, the live coordinator can still service other eligible roots within its pool. Missing, unsupported, or incorrectly owned coordination storage fails closed rather than falling back to the image filesystem.
+
+The indexer uses runtime init and waits for its owned children to be reaped. A termination request, expired lease, or stale heartbeat does not prove a reader has exited. If admission remains blocked, diagnose the original filesystem and container runtime during a controlled maintenance window. Never unlink, replace, truncate, explicitly unlock, or delete coordination files or their volume to force replacement admission. Preserve the deployment's state while investigating; recovery never requires writable originals. Local process/restart verification does not certify prompt termination of uninterruptible kernel I/O.
+
 ## Users, groups, and grants
 
 Create accounts and groups in administration. A staff/superuser flag grants administration privileges, not product-root access. Add a root grant with exactly one user or group principal. For the Phase 1 root shell, permissions `1` means `BROWSE`; grant only what is needed. Other permission bits reserve later capabilities and do not make unimplemented operations available or originals writable.
@@ -173,4 +183,4 @@ Use a reviewed, locked build; rerun preflight/render when mount inputs change, t
 docker compose --project-name aegis-local -f compose.yaml -f compose.mounts.generated.yaml down
 ```
 
-This removes the deployment's containers and networks but retains named volumes, including PostgreSQL and TLS state. Do not add `--volumes`, run a broad volume prune, or target another project's resources. Original roots remain unchanged and usable outside Aegis. Keep protected secrets, config, manifest, and named volumes for restart. The volume-deleting teardown inside the isolated browser-test script is exclusively for its disposable test project and must not be copied here.
+This removes the deployment's containers and networks but retains named volumes, including PostgreSQL, TLS, and indexer-coordination state. Do not add `--volumes`, run a broad volume prune, or target another project's resources. Original roots remain unchanged and usable outside Aegis. Keep protected secrets, config, manifest, and named volumes for restart. The volume-deleting teardown inside the isolated browser-test script is exclusively for its disposable test project and must not be copied here.
