@@ -38,7 +38,7 @@
 
 ## Status and task ledger
 
-Planning baseline: `842ba2a` on `main`, with unchanged application code from the verified Phase 1 foundation; execution begins from the committed plan at `6169402`. This plan defines **18 tasks: 7 complete, 11 remaining**. Tasks 1–7 passed verification and independent review, including Task 7's scoped lifecycle corrections. Task 8 is implementing typed filters and signed cursors; the runtime coordination contract remains recorded below. Task 6 retains the September 15 approved commit-fence boundary below. Task 4's local full-deployment limitation remains documented below, not a green gate. The ledger is authoritative; checkboxes below record the execution recipe and subsequent evidence, not a second task count.
+Planning baseline: `842ba2a` on `main`, with unchanged application code from the verified Phase 1 foundation; execution begins from the committed plan at `6169402`. This plan defines **18 tasks: 7 complete, 11 remaining**. Tasks 1–7 passed verification and independent review, including Task 7's scoped lifecycle corrections. Task 8's typed filters and signed cursors passed focused verification after input-bound corrections and await scoped review; the runtime coordination contract remains recorded below. Task 6 retains the September 15 approved commit-fence boundary below. Task 4's local full-deployment limitation remains documented below, not a green gate. The ledger is authoritative; checkboxes below record the execution recipe and subsequent evidence, not a second task count.
 
 | Task | Independently testable deliverable | Depends on | Status |
 | --- | --- | --- | --- |
@@ -49,7 +49,7 @@ Planning baseline: `842ba2a` on `main`, with unchanged application code from the
 | 5 | Descriptor-relative, bounded read-only directory reader | 1 | Complete (`ddc38b6`) |
 | 6 | Atomic observations, checkpoint finalization, and stale-work rejection | 4, 5 | Complete (`5654fff`) |
 | 7 | Supervised scan execution and independent worker liveness | 6 | Complete (`6022c97`) |
-| 8 | Typed filters and signed cursor contracts | 1, 2 | In progress |
+| 8 | Typed filters and signed cursor contracts | 1, 2 | In progress; byte-limit fixes verified, scoped review pending |
 | 9 | Permission-bound indexed keyset queries and details | 3, 8 | Planned |
 | 10 | List/details/status/rescan HTTP endpoints | 4, 9 | Planned |
 | 11 | Validated browser API and bounded private query window | 10 | Planned |
@@ -870,7 +870,7 @@ def signed_cursor_payload(payload: dict[str, object]) -> str:
 
 def unsigned_cursor_payload(value: str) -> object:
     if (not isinstance(value, str) or len(value) > 8192
-            or value.startswith(".")):
+            or not value.isascii() or value.startswith(".")):
         raise CursorRestartRequired()
     try:
         return signing.loads(value, salt=CURSOR_SALT, max_age=CURSOR_MAX_AGE)
@@ -878,13 +878,17 @@ def unsigned_cursor_payload(value: str) -> object:
         raise CursorRestartRequired() from None
 ```
 
-Include cursor/sort-key version, context digest, typed boundary tuple and travel in the signed payload. Decode with a strict shape and scalar validator; use constant-time comparison for expected context digest. Name boundaries carry the complete binary order key in canonical base64 plus UUID, never a truncated key. Accept only the uncompressed representation emitted by the encoder; reject Django's compressed-object marker before object decoding so the token cap also bounds decoded input. Test a correctly signed compressed token and normalize malformed signed-object errors to `CursorRestartRequired`. A signed cursor is opaque by API convention, not encrypted; include no raw source bytes, absolute paths or secrets.
+Include cursor/sort-key version, context digest, typed boundary tuple and travel in the signed payload. Decode with a strict shape and scalar validator; use constant-time comparison for expected context digest. Name boundaries carry the complete binary order key in canonical base64 plus UUID, never a truncated key. Accept only the uncompressed ASCII representation emitted by the encoder; reject non-ASCII input and Django's compressed-object marker before signing/object decoding so the 8 KiB cap counts bytes and also bounds decoded input. Test correctly signed compressed tokens and multibyte over-cap input, and normalize malformed signed-object errors to `CursorRestartRequired`. A signed cursor is opaque by API convention, not encrypted; include no raw source bytes, absolute paths or secrets.
 
-Canonicalize selections by validating their original count, deduplicating and sorting allowed strings. `kind`/`availability` use the fixed enums; `type` allows lowercase ASCII alphanumerics of 1–16 characters plus the explicit unknown token `__unknown__`. Test that this token does not select the real `.unknown` extension. Empty arrays mean no restriction and normalize away. `size.unknown=true` or `modified.unknown=true` excludes simultaneous bounds. Size decimal bounds are inclusive and within unsigned 64-bit; date bounds must carry an offset, normalize to UTC nanoseconds, and use `[from,before)`. Prefix is literal display-name text, normalized with the same case-fold/NFC rule as name ordering; cap its UTF-8 input at 2 KiB. Escape SQL LIKE metacharacters if a LIKE implementation is used; do not change literal meaning.
+Before semantic normalization, cap the compact deterministic ASCII JSON encoding of the original versioned filter object at 8 KiB, preserving original selections, duplicates and prefix text. Use bounded validation/accounting, not a full temporary encoding of arbitrarily large invalid input. Retain the normalized-output 8 KiB cap too; test exact boundaries and an oversized original document that would shrink below the limit. Canonicalize selections by validating their original count, deduplicating and sorting allowed strings. `kind`/`availability` use the fixed enums; `type` allows lowercase ASCII alphanumerics of 1–16 characters plus the explicit unknown token `__unknown__`. Test that this token does not select the real `.unknown` extension. Empty arrays mean no restriction and normalize away. `size.unknown=true` or `modified.unknown=true` excludes simultaneous bounds. Size decimal bounds are inclusive and within unsigned 64-bit; date bounds must carry an offset, normalize to UTC nanoseconds, and use `[from,before)`. Prefix is literal display-name text, normalized with the same case-fold/NFC rule as name ordering; cap its UTF-8 input at 2 KiB. Escape SQL LIKE metacharacters if a LIKE implementation is used; do not change literal meaning.
 
 - [ ] **Step 4: Verify green.** Run filter/cursor unit/property tests, Ruff and mypy. Verify equivalent filters reuse a digest but authorization, page-size or sorting changes invalidate it. Add boundary tests at 899/901 seconds using the signing clock, not sleeps.
 
 - [ ] **Step 5: Review and commit.** Record schema/expiry/tampering evidence; commit `feat: define bounded metadata filters and signed browse cursors`; push `origin main`.
+
+### Task 8 input-bound review
+
+Initial implementation `fd1737c` passed 142 final focused/property tests and full Ruff/mypy (209 sources). Its 1,167-test full-backend run followed the last production change, before two test-only property additions covered by the final focused run. Independent review identified two material input-bound gaps: a raw 8,849-byte filter document was accepted after normalization reduced it to 7,394 bytes, and cursor input was counted in Unicode characters rather than bytes. Fix round 1 revision `78b05f1` passed 153 complete filter/cursor tests and full Ruff/mypy (209 sources), with clean Django/migration checks and disposable database cleanup. Regressions first reproduced both defects; exact-budget and JSON-escape parity tests cover the bounded raw-size counter, including a DEL-escape mismatch found and corrected during self-review. Cursor tests prove multibyte input is rejected before decoding. The earlier full-backend result is pre-fix evidence, not a post-fix full-suite claim. Scoped review remains pending and the task is not yet accepted. The raw-document encoding and ASCII cursor rules above make the existing byte-bound contract explicit. Query translation, current authorization, HTTP mapping and browser behavior remain subsequent tasks.
 
 ## Task 9: Authorized keyset queries and bounded details
 
