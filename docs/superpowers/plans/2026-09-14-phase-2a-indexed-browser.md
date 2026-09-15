@@ -818,7 +818,7 @@ On stop/timeout, stop accepting observations, close credits, terminate the exact
 
 **Files:** Create `backend/aegis_apps/catalog/{filters,cursors}.py`, `backend/tests/unit/catalog/{test_filters,test_cursors}.py`. No HTTP route is enabled by this task.
 
-**Interfaces:** Produces frozen `FileFilter` with normalized `kind`, `type`, `size`, `modified`, `availability`, `prefix` fields; `parse_filters(value: object) -> FileFilter`; `canonical_filter_bytes(filters: FileFilter) -> bytes`; frozen `CursorContext(user_id, cache_namespace, user_epoch, root_id, root_epoch, parent_id, parent_revision, filter_digest, sort, order, limit)`; `encode_cursor(context, key, travel) -> str` and `decode_cursor(value, context) -> CursorPosition`, whose fields are `key` and `travel`. `key` is a typed tuple of kind rank, null rank, sort value, normalized name key and UUID. `travel` is `next` or `previous`.
+**Interfaces:** Produces frozen `FileFilter` with normalized `kind`, `type`, `size`, `modified`, `availability`, `prefix` fields; `parse_filters(value: object) -> FileFilter`; `canonical_filter_bytes(filters: FileFilter) -> bytes`; frozen `CursorContext(user_id, cache_namespace, user_epoch, root_id, root_epoch, parent_id, parent_revision, filter_digest, sort, order, limit)`; `encode_cursor(context, key, travel) -> str` and `decode_cursor(value, context) -> CursorPosition`, whose fields are `key` and `travel`. `key` is a typed tuple of kind rank, null rank, sort value, normalized name key and UUID. `travel` is `next` or `previous`. Define `CursorRestartRequired(ValueError)` in `cursors.py` with the fixed safe message `cursor_restart_required`, as consumed by Task 9. Directory rank is zero, other kinds one; known rank is zero, null one. Document the nonnull comparison-value types and numeric-null representation for the query handoff, preserving the complete name key and UUID.
 
 - [ ] **Step 1: Write failing validation/context tests.**
 
@@ -856,6 +856,10 @@ from django.core import signing
 CURSOR_SALT = "aegis.catalog.cursor.v1"
 CURSOR_MAX_AGE = 900
 
+class CursorRestartRequired(ValueError):
+    def __init__(self) -> None:
+        super().__init__("cursor_restart_required")
+
 def context_digest(fields: dict[str, object]) -> str:
     raw = json.dumps(fields, sort_keys=True, separators=(",", ":"),
                      ensure_ascii=True, allow_nan=False).encode("ascii")
@@ -865,15 +869,16 @@ def signed_cursor_payload(payload: dict[str, object]) -> str:
     return signing.dumps(payload, salt=CURSOR_SALT, compress=False)
 
 def unsigned_cursor_payload(value: str) -> object:
-    if not isinstance(value, str) or len(value) > 8192:
-        raise ValueError("cursor_restart_required")
+    if (not isinstance(value, str) or len(value) > 8192
+            or value.startswith(".")):
+        raise CursorRestartRequired()
     try:
         return signing.loads(value, salt=CURSOR_SALT, max_age=CURSOR_MAX_AGE)
-    except signing.BadSignature:
-        raise ValueError("cursor_restart_required") from None
+    except (signing.BadSignature, ValueError, RecursionError):
+        raise CursorRestartRequired() from None
 ```
 
-Include cursor/sort-key version, context digest, typed boundary tuple and travel in the signed payload. Decode with a strict shape and scalar validator; use constant-time comparison for expected context digest. Name boundaries carry the complete binary order key in canonical base64 plus UUID, never a truncated key. A signed cursor is opaque by API convention, not encrypted; include no raw source bytes, absolute paths or secrets.
+Include cursor/sort-key version, context digest, typed boundary tuple and travel in the signed payload. Decode with a strict shape and scalar validator; use constant-time comparison for expected context digest. Name boundaries carry the complete binary order key in canonical base64 plus UUID, never a truncated key. Accept only the uncompressed representation emitted by the encoder; reject Django's compressed-object marker before object decoding so the token cap also bounds decoded input. Test a correctly signed compressed token and normalize malformed signed-object errors to `CursorRestartRequired`. A signed cursor is opaque by API convention, not encrypted; include no raw source bytes, absolute paths or secrets.
 
 Canonicalize selections by validating their original count, deduplicating and sorting allowed strings. `kind`/`availability` use the fixed enums; `type` allows lowercase ASCII alphanumerics of 1–16 characters plus the explicit unknown token `__unknown__`. Test that this token does not select the real `.unknown` extension. Empty arrays mean no restriction and normalize away. `size.unknown=true` or `modified.unknown=true` excludes simultaneous bounds. Size decimal bounds are inclusive and within unsigned 64-bit; date bounds must carry an offset, normalize to UTC nanoseconds, and use `[from,before)`. Prefix is literal display-name text, normalized with the same case-fold/NFC rule as name ordering; cap its UTF-8 input at 2 KiB. Escape SQL LIKE metacharacters if a LIKE implementation is used; do not change literal meaning.
 
