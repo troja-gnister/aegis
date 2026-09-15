@@ -50,7 +50,7 @@ Planning baseline: `842ba2a` on `main`, with unchanged application code from the
 | 6 | Atomic observations, checkpoint finalization, and stale-work rejection | 4, 5 | Complete (`5654fff`) |
 | 7 | Supervised scan execution and independent worker liveness | 6 | Complete (`6022c97`) |
 | 8 | Typed filters and signed cursor contracts | 1, 2 | Complete (`78b05f1`) |
-| 9 | Permission-bound indexed keyset queries and details | 3, 8 | In progress |
+| 9 | Permission-bound indexed keyset queries and details | 3, 8 | In review (`89aebce`) |
 | 10 | List/details/status/rescan HTTP endpoints | 4, 9 | Planned |
 | 11 | Validated browser API and bounded private query window | 10 | Planned |
 | 12 | Virtualized mobile file navigation | 11 | Planned |
@@ -948,13 +948,21 @@ Compare the locked user's epoch with the request/session epoch captured before a
 
 Fetch at most `limit+1`, return narrow list projections and direction-aware cursors, and do not promise a snapshot across requests. Return at most 64 nearest ancestor labels plus `ancestorsTruncated`; parent traversal is constrained to the same root, detects cycles, and streams additional availability checks rather than returning an unbounded path. Missing/inaccessible/non-directory ancestors, unknown child `source_parent_revision`, or a marker that differs from the source parent's current revision make descendant availability stale/unavailable; retain authorized last-indexed metadata but never label it a current empty directory. Use the Task 6 revision-marker contract, not only the ancestor's current state, so replacement followed by recovery cannot revive unobserved descendants.
 
+The bounded ancestor contract permits a depth-ordered, cycle-safe label walk capped at 65 candidates for 64 returned labels plus truncation, with SQL recursive aggregation evaluating full source/logical availability. Do not transfer an unbounded path into application memory or stop availability checks at the label cap. Missing valid termination, cycles, and invalid ancestors beyond the returned labels must fail closed; preserve same-root constraints, query counts, and database timeouts. Later measurements must establish deep-chain performance.
+
 For an authorized newly activated root whose synthetic anchor has not yet been created by maintenance, raise `CatalogNotReady`; do not invent an entry UUID, create an anchor during GET, or report an empty successful folder. The separate status endpoint can return `not_indexed` without root-index state. Once scheduling creates the anchor, normal bounded pages are available even while scanning.
 
-Budget at most eight catalog/authorization data statements for an ordinary page; measure session middleware and transaction-control statements separately with a total request budget of 16. Add database statement/lock timeouts with fixed safe error mapping, no raw SQL in responses. The actual scale gate, not `EXPLAIN` alone, decides whether an index/filter combination is acceptable.
+Budget at most eight catalog/authorization data statements for an ordinary page; measure session middleware and transaction-control statements separately with a total request budget of 16. Task 9 measures the direct query invocation and its transaction/timeouts only; Task 10 must measure and enforce the full authenticated HTTP budget on the real endpoint, including session/authentication middleware. An invocation-only count is not request-level evidence. Add database statement/lock timeouts with fixed safe error mapping, no raw SQL in responses. The actual scale gate, not `EXPLAIN` alone, decides whether an index/filter combination is acceptable.
 
 - [ ] **Step 4: Verify green.** Run query/authorization tests with all six sorts, next/previous traversal, filters and revocation barriers; inspect captured SQL. Run actual-role SELECT tests, migration drift, Ruff and mypy.
 
 - [ ] **Step 5: Review and commit.** Record query count, authorization, precision and ordering evidence; commit `feat: query indexed directories with authorized keysets`; push `origin main`.
+
+### Task 9 implementation verification
+
+Implementation `89aebce` passed **85 focused query/authorization tests and 1,265 full-backend tests**, full Ruff, mypy (216 sources), Django checks and migration-drift detection. Actual web-role tests cover shared readers, foundation grant revocation, captured-user epoch changes, binding replacement, candidate-lookup revocation and fixed database timeouts. The six sort directions preserve complete keysets and bounded live/missing branches; measured direct browsing uses seven data statements and 11 statements including transaction/timeouts. This excludes HTTP middleware, whose 16-total gate remains Task 10.
+
+Self-review regressions corrected source-recursion seed aliasing, logical ancestor invalidation, consistent source-name projection, explicit nearest-label ordering and valid terminal-anchor checks. Details return at most 64 nearest labels from 65 bounded candidates; invalid ancestors beyond that cap still affect availability. Six `EXPLAIN ANALYZE` capability tests select the matching indexes after fixture statistics are analyzed with sequential scans disabled; they are not scale or natural-planner performance certification. The initial fixture/static failures and earlier 60/84-test intermediate runs are superseded by the final gates. All owned memory-only verification databases were removed; no preview, original or operator resource was touched. Independent review is pending, so Task 9 remains unaccepted and the task count is unchanged.
 
 ## Task 10: Catalog and scan HTTP endpoints
 
