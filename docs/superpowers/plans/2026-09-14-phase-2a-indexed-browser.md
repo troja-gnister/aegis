@@ -51,7 +51,7 @@ Planning baseline: `842ba2a` on `main`, with unchanged application code from the
 | 7 | Supervised scan execution and independent worker liveness | 6 | Complete (`6022c97`) |
 | 8 | Typed filters and signed cursor contracts | 1, 2 | Complete (`78b05f1`) |
 | 9 | Permission-bound indexed keyset queries and details | 3, 8 | Complete (`6c8b1f3`) |
-| 10 | List/details/status/rescan HTTP endpoints | 4, 9 | Planned |
+| 10 | List/details/status/rescan HTTP endpoints | 4, 9 | In progress |
 | 11 | Validated browser API and bounded private query window | 10 | Planned |
 | 12 | Virtualized mobile file navigation | 11 | Planned |
 | 13 | Filter panel, details, and scan-state interactions | 12 | Planned |
@@ -62,6 +62,14 @@ Planning baseline: `842ba2a` on `main`, with unchanged application code from the
 | 18 | Fresh-checkout acceptance, upgrade runbook, and reconciled roadmap | 1–17 | Planned |
 
 Later 2A plans still own watcher/event ingestion, broader filename/path search, reconnectable events, and authorized downloads/ranges. All 2B–2G milestones remain required. Their task counts have not been assigned, so 18 is not the remaining-task count for the full rewrite.
+
+### Current checkpoint CI limitation
+
+At exact checkpoint `557cf717811d545f9860938a2271387232ceed09`, [CI run 35016614015](https://github.com/troja-gnister/aegis/actions/runs/35016614015) failed overall: backend, deployment, and browser-journey jobs passed, but frontend did not. Frozen dependency installation, lint, and TypeScript checks passed; Vitest reported 42 passed and one failed, and the production build was not reached. The failing test expects an unmounted login response not to restore session data while logout is pending. The same job also logged an unmatched mocked logout request from a separate authentication test.
+
+Read-only diagnosis reproduced a session-query scheduling race under controlled ordering: a pending observer effect uses stale open-session options after logout clears the cache, starts another session request, and caches its response. The unmounted login continuation itself is correctly rejected. No reopening of private screens was demonstrated. The original unmodified CI scheduling was not reproduced locally, so attribution to this exact interleaving remains an inference. A separate test-teardown defect starts the mocked logout request after its handler has been removed.
+
+Repair, deterministic regression coverage, independent review, and fresh CI remain required before advancing the UI. No passing rerun has been substituted for diagnosis, and no frontend code changed in Task 9. Its accepted query-layer tests remain scoped evidence, not an all-green checkpoint. Development has not updated or accessed the user-owned preview or its originals.
 
 ### Completed-task evidence
 
@@ -971,7 +979,7 @@ Correction `6c8b1f3` passed the complete **96-test query/authorization suite**, 
 
 ## Task 10: Catalog and scan HTTP endpoints
 
-**Files:** Create `backend/aegis_apps/catalog/api.py`, `backend/aegis_apps/indexing/{selectors,serializers}.py`, `backend/tests/integration/catalog/test_api.py`, `backend/tests/integration/indexing/test_status_api.py`. Modify `backend/aegis/urls.py`, `backend/aegis_apps/roots/middleware.py`, and the existing common error-response tests where route coverage grows.
+**Files:** Create `backend/aegis_apps/catalog/api.py`, `backend/aegis_apps/indexing/{selectors,serializers}.py`, `backend/tests/integration/catalog/test_api.py`, `backend/tests/integration/indexing/test_status_api.py`. Modify `backend/aegis/urls.py`, `backend/aegis_apps/roots/middleware.py`, `backend/tests/conftest.py` for the specified API fixture, and existing common error-response tests where route coverage grows. A narrow shared revocation helper also changes `backend/aegis_apps/identity/session_policy.py` and its covering identity auth/session tests.
 
 **Interfaces:** Produces `DirectoryListView`, `EntryDetailView`, `IndexStatusView`, `RootScanView` and the four endpoints in the approved spec. `index_status(user: User, root_id: UUID) -> dict[str, object]` produces the wire `IndexStatus` under `BROWSE`; `ROOT_ADMIN` alone authorizes only the rescan request, not metadata reads.
 
@@ -1008,6 +1016,8 @@ path("api/v1/roots/<uuid:root_id>/scans", RootScanView.as_view(), name="root-sca
 Follow `RootListView`: `SessionAuthentication`, `JSONRenderer`, explicit authenticated `User`, generic problem response, no implicit DRF/admin permission fallback. Build the response completely inside the authorized query boundary. Request bodies/parameters have strict count/length checks before JSON parsing, and normalized filters are capped again afterward. Require a valid client-supplied `X-Request-ID` for a rescan and use it consistently as the idempotency/audit request ID. A successful request returns `202 {"scanId": "<opaque UUID>"}` with no root content. Apply CSRF before mutation and return 429 with bounded `Retry-After` for the Task 4 manual-request limit.
 
 Use fixed errors `catalog_not_found`, `catalog_not_ready`, `cursor_restart_required`, `invalid_catalog_query`, `catalog_unavailable`, and `scan_request_denied`; titles are static safe text. Map `CatalogNotReady` to 503 with `Retry-After: 3`, distinct from dependency outage; the UI uses authorized index status to explain not-yet-indexed state. Cursor errors are emitted only after current authorization so they cannot reveal a foreign root. Unknown/unauthorized object bodies/statuses are identical. Extend outer no-store middleware to these exact path families, including resolver/method/unhandled errors, without adding filesystem checks there. Map `CatalogAuthenticationRequired` explicitly to the existing `AUTHENTICATION_REQUIRED` problem and 401 response, invalidating the stale session and private browser context. Test an epoch change after middleware validation but before the locked query; no new cursor may use that stale session's namespace with the newer epoch.
+
+Extract the existing middleware revocation sequence into `identity.session_policy.revoke_session(request)` and reuse it for post-middleware catalog authentication failures. Preserve session flush, an anonymous effective request principal, and the fixed `auth.session.revoked`/`denied` audit event with no actor and request-ID-only metadata. Keep DRF and underlying Django request principals consistent. Do not silently swallow audit/storage failures or write session/audit changes inside an aborted read transaction. Test the existing middleware branches and new catalog failures for actual session removal and exactly one revocation audit event; no new session endpoint or authentication scheme is introduced.
 
 Status reads stored root/run counters and freshness only, never enumerates roots or computes global counts. Stale/mismatched worker/binding state produces unavailable/degraded, not false ready. Do not fake a percentage or implement capacity metrics as zero: storage capacity and byte-delivery progress remain later package work.
 
