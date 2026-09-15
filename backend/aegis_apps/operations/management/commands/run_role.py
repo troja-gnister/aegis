@@ -304,6 +304,11 @@ def run_worker(
     next_heartbeat = monotonic() + heartbeat_seconds
 
     try:
+        if identity.role == "indexer" and not once:
+            from aegis_apps.indexing.runner import run_indexer
+
+            run_indexer(identity, _shutdown_requested)
+            return
         while not _shutdown_requested():
             monotonic_now = monotonic()
             if monotonic_now >= next_heartbeat:

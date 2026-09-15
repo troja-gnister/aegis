@@ -79,6 +79,28 @@ def test_heartbeat_upsert_is_safe_and_does_not_derive_a_hostname() -> None:
     assert updated.metrics == {"scanProgress": 0.75}
 
 
+@pytest.mark.parametrize("key", [
+    "scanObservedEntries", "scanCompletedDirectories", "scanDegradedDirectories",
+])
+@pytest.mark.parametrize("value", [0, 9_223_372_036_854_775_807])
+def test_scan_counter_publication_accepts_bounded_integer(key: str, value: int) -> None:
+    heartbeat = _publish(role="indexer", metrics={key: value})
+    assert heartbeat.metrics == {key: value}
+    assert heartbeat.current_job_id is None
+
+
+@pytest.mark.parametrize("key", [
+    "scanObservedEntries", "scanCompletedDirectories", "scanDegradedDirectories",
+])
+@pytest.mark.parametrize("value", [True, False, -1, 2**63, 1.0, "1", None])
+def test_scan_counter_publication_rejects_noninteger_or_unbounded_value(
+    key: str, value: object,
+) -> None:
+    with pytest.raises(ValueError):
+        _publish(role="indexer", metrics={key: value})
+    assert not WorkerHeartbeat.objects.exists()
+
+
 def test_production_heartbeat_uses_authoritative_database_time() -> None:
     worker_id = str(uuid.uuid4())
     with connection.cursor() as cursor:

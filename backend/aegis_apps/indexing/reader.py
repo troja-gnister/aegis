@@ -2,9 +2,12 @@
 
 import os
 import stat
+import struct
 import sys
 from collections.abc import Iterator
+from contextlib import suppress
 from pathlib import PurePosixPath
+from typing import BinaryIO
 
 from aegisctl.mounts import MAX_MOUNTINFO_BYTES, MountAttestationError, parse_mountinfo
 
@@ -17,10 +20,12 @@ from .protocol import (
     FailureCode,
     ProtocolError,
     ReaderBatch,
+    ReaderChannelState,
     ReaderComplete,
     ReaderFailure,
     ReaderMessage,
     batch_frame_overhead,
+    encode_message,
     observation_encoded_size,
 )
 
@@ -216,3 +221,114 @@ def read_directory(
         if descriptor >= 0:
             os.close(descriptor)
     yield terminal
+
+
+def send_reader_messages(
+    messages: Iterator[ReaderMessage], control: BinaryIO, result: BinaryIO,
+) -> None:
+    """Reserve before writing; never put a third unacknowledged batch in a pipe."""
+    channel = ReaderChannelState()
+    outstanding: set[int] = set()
+
+    def acknowledge() -> None:
+        packet = bytearray()
+        while len(packet) < 8:
+            chunk = control.read(8 - len(packet))
+            if not chunk:
+                raise ProtocolError
+            packet.extend(chunk)
+        sequence = struct.unpack("!Q", packet)[0]
+        channel.acknowledge(sequence)
+        outstanding.remove(sequence)
+
+    try:
+        while True:
+            if len(outstanding) == 2:
+                acknowledge()
+            try:
+                message = next(messages)
+            except StopIteration:
+                raise ProtocolError from None
+            channel.accept(message)
+            if isinstance(message, ReaderBatch):
+                outstanding.add(message.sequence)
+            frame = memoryview(encode_message(message))
+            while frame:
+                written = result.write(frame)
+                if written is None or written <= 0:
+                    raise ProtocolError
+                frame = frame[written:]
+            result.flush()
+            if not isinstance(message, ReaderBatch):
+                break
+        while outstanding:
+            acknowledge()
+    finally:
+        close = getattr(messages, "close", None)
+        if close is not None:
+            close()
+
+
+def _main() -> int:
+    """The supervised child's only entry point; source open happens after arming."""
+    import argparse
+    import base64
+    import ctypes
+    import json
+    import re
+    import signal
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--root", required=True)
+    parser.add_argument("--fingerprint", required=True)
+    parser.add_argument("--parent", required=True, type=int)
+    parser.add_argument("--batch", required=True, type=int)
+    parser.add_argument("--components", required=True)
+    arguments = parser.parse_args()
+    descriptor = -1
+    try:
+        if sys.platform != "linux" or arguments.parent <= 1:
+            raise ValueError
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0 or os.getppid() != arguments.parent:
+            return 1
+        if (not re.fullmatch(r"/srv/aegis/roots/[a-z][a-z0-9-]{0,62}", arguments.root)
+                or not re.fullmatch(r"[0-9a-f]{64}", arguments.fingerprint)
+                or len(arguments.components) > 8192):
+            raise ValueError
+        encoded = json.loads(arguments.components)
+        if not isinstance(encoded, list) or len(encoded) > MAX_COMPONENTS:
+            raise ValueError
+        components = tuple(base64.b64decode(raw, validate=True) for raw in encoded)
+        if sum(map(len, components)) > MAX_COMPONENT_BYTES:
+            raise ValueError
+        for raw in components:
+            source_name(raw)
+        descriptor = os.open(
+            arguments.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+        identity = directory_identity(descriptor)
+        topology = _mount_snapshot(descriptor)
+        if (topology[0] != arguments.root or topology[2] != arguments.fingerprint
+                or directory_identity(descriptor) != identity):
+            raise MountAttestationError("source identity changed")
+        # Manifest device/inode fields describe the host, which Docker Desktop
+        # may translate. The observed mount fingerprint and opened FD bind this
+        # container's source; the library checks descriptor identity throughout.
+        send_reader_messages(
+            read_directory(descriptor, components, arguments.batch),
+            sys.stdin.buffer, sys.stdout.buffer,
+        )
+        return 0
+    except (OSError, ValueError, TypeError, MountAttestationError):
+        with suppress(OSError, ValueError):
+            send_reader_messages(iter((ReaderFailure("source_unavailable"),)),
+                                 sys.stdin.buffer, sys.stdout.buffer)
+        return 1
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

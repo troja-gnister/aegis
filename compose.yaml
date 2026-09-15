@@ -3,6 +3,9 @@ x-backend-image: &backend-image
   build:
     context: .
     dockerfile: docker/backend.Dockerfile
+    args:
+      AEGIS_UID: "${AEGIS_UID:-10001}"
+      AEGIS_GID: "${AEGIS_GID:-10001}"
 
 x-backend-runtime: &backend-runtime
   <<: *backend-image
@@ -147,7 +150,10 @@ services:
 
   indexer:
     <<: *backend-runtime
+    init: true
     command: [python, manage.py, run_role, --role, indexer]
+    volumes:
+      - indexer-coordination:/srv/aegis/indexer-coordination
     environment:
       <<: *backend-environment
       AEGIS_PROCESS_ROLE: indexer
@@ -286,6 +292,7 @@ networks:
     internal: true
 
 volumes:
+  indexer-coordination:
   postgres-data:
   caddy-data:
   caddy-local-data:

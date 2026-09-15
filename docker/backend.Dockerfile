@@ -17,8 +17,11 @@ FROM python:3.13.15-slim-trixie@sha256:881d80734ee05dca6f7f42dcb080975652a53c7ed
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
+ARG AEGIS_UID=10001
+ARG AEGIS_GID=10001
 RUN groupadd --gid 10001 aegis \
-    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin aegis
+    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin aegis \
+    && install -d -o "$AEGIS_UID" -g "$AEGIS_GID" -m 0700 /srv/aegis/indexer-coordination
 WORKDIR /app/backend
 COPY --from=build /app/.venv /app/.venv
 COPY --from=build /app/backend /app/backend

@@ -128,7 +128,7 @@ def test_database_credentials_commands_and_volumes_are_role_scoped() -> None:
         "migrate": set(),
         "web": {"staging"},
         "operations": {"staging"},
-        "indexer": set(),
+        "indexer": {"indexer-coordination"},
         "media": {"derivatives", "quarantine"},
     }
     expected_users = {

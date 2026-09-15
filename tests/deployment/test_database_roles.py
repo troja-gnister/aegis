@@ -1138,6 +1138,39 @@ def test_each_worker_can_publish_only_its_own_heartbeat(
         )
 
 
+@pytest.mark.parametrize("key", [
+    "scanObservedEntries", "scanCompletedDirectories", "scanDegradedDirectories", "unknown",
+])
+@pytest.mark.parametrize("value", [0, 9223372036854775807, True, False, -1, 2**63, 1.0, "1", None])
+def test_scan_heartbeat_counter_python_and_actual_login_parity(
+    role_database: RoleDatabase, key: str, value: object,
+) -> None:
+    from aegis_apps.operations.serializers import validate_heartbeat_metrics
+
+    allowed = key != "unknown" and type(value) is int and 0 <= value <= 9223372036854775807
+    metrics = {key: value}
+    if allowed:
+        assert validate_heartbeat_metrics(metrics) == metrics
+    else:
+        with pytest.raises(ValueError):
+            validate_heartbeat_metrics(metrics)
+    with role_database.connect("aegis_indexer") as caller:
+        if allowed:
+            heartbeat = _publish_heartbeat(
+                caller, function_role="indexer", parameters=_heartbeat_parameters(metrics=metrics),
+            )
+            stored = caller.execute(
+                "SELECT metrics, current_job_id FROM public.operations_workerheartbeat WHERE id=%s",
+                [heartbeat],
+            ).fetchone()
+            assert stored == (metrics, None)
+        else:
+            with pytest.raises(psycopg.errors.InvalidParameterValue):
+                caller.execute(
+                    _heartbeat_statement("indexer"), _heartbeat_parameters(metrics=metrics),
+                )
+
+
 def test_heartbeat_function_rejects_null_malformed_and_mismatched_inputs(
     role_database: RoleDatabase,
 ) -> None:

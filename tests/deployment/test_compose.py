@@ -620,7 +620,7 @@ def test_worker_commands_and_volumes_are_role_scoped() -> None:
     services = rendered_compose()["services"]
     expected = {
         "operations": {"staging"},
-        "indexer": set(),
+        "indexer": {"indexer-coordination"},
         "media": {"derivatives", "quarantine"},
     }
 
@@ -632,6 +632,17 @@ def test_worker_commands_and_volumes_are_role_scoped() -> None:
             "django-secret-key",
             f"db-{role}-password",
         ]
+    assert services["indexer"]["init"] is True
+    assert services["indexer"]["volumes"] == [{
+        "type": "volume", "source": "indexer-coordination",
+        "target": "/srv/aegis/indexer-coordination", "volume": {},
+    }]
+
+
+def test_coordination_image_ownership_uses_configured_uid_gid() -> None:
+    services = rendered_compose(environment={"AEGIS_UID": "501", "AEGIS_GID": "20"})["services"]
+    assert services["indexer"]["user"] == "501:20"
+    assert services["indexer"]["build"]["args"] == {"AEGIS_UID": "501", "AEGIS_GID": "20"}
 
 
 def test_backend_release_identity_is_required_and_propagated_to_web_and_workers() -> None:

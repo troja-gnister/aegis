@@ -136,6 +136,27 @@ def test_startup_orders_role_validation_attestation_schema_heartbeat_then_claim(
     ]
 
 
+def test_continuous_indexer_dispatches_only_after_startup_and_preserves_stop() -> None:
+    from aegis_apps.indexing import runner
+
+    identity = _identity("indexer")
+    worker_command._reset_shutdown()
+
+    def scan(candidate: worker_command.WorkerIdentity, stop_requested: object) -> None:
+        assert candidate is identity
+        worker_command.request_shutdown()
+
+    with (
+        patch.object(worker_command, "_startup", return_value=identity),
+        patch.object(runner, "run_indexer", side_effect=scan) as dispatch,
+        patch.object(worker_command, "_publish") as publication,
+    ):
+        worker_command.run_worker(role="indexer", once=False, worker_id=WORKER_ID)
+    assert dispatch.call_count == 1
+    publication.assert_called_once_with(identity, status=HeartbeatStatus.STOPPING, job_id=None)
+    worker_command._reset_shutdown()
+
+
 @override_settings(
     AEGIS_ENVIRONMENT="production",
     AEGIS_PROCESS_ROLE="operations",

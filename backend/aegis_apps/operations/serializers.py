@@ -22,6 +22,9 @@ _METRIC_KEYS = (
     "scanProgress",
     "diskPressure",
     "diskCapacityBytes",
+    "scanObservedEntries",
+    "scanCompletedDirectories",
+    "scanDegradedDirectories",
 )
 
 

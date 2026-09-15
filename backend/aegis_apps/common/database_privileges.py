@@ -429,7 +429,10 @@ BEGIN
                 'queueAgeSeconds',
                 'scanProgress',
                 'diskPressure',
-                'diskCapacityBytes'
+                'diskCapacityBytes',
+                'scanObservedEntries',
+                'scanCompletedDirectories',
+                'scanDegradedDirectories'
              )
        )
        OR (
@@ -455,13 +458,18 @@ BEGIN
                 OR (p_metrics ->> 'diskPressure')::numeric > 1
             )
        )
-       OR (
-            p_metrics ? 'diskCapacityBytes'
-            AND (
-                pg_catalog.jsonb_typeof(p_metrics -> 'diskCapacityBytes') <> 'number'
-                OR (p_metrics ->> 'diskCapacityBytes') !~ '^[0-9]+$'
-                OR (p_metrics ->> 'diskCapacityBytes')::numeric > 9223372036854775807
-            )
+       OR EXISTS (
+            SELECT 1
+              FROM pg_catalog.jsonb_each(p_metrics) AS metric(key, value)
+             WHERE metric.key IN (
+                'diskCapacityBytes', 'scanObservedEntries',
+                'scanCompletedDirectories', 'scanDegradedDirectories'
+             )
+               AND (
+                pg_catalog.jsonb_typeof(metric.value) <> 'number'
+                OR metric.value::text !~ '^[0-9]+$'
+                OR metric.value::text::numeric > 9223372036854775807
+               )
        ) THEN
         RAISE EXCEPTION 'invalid worker heartbeat'
             USING ERRCODE = '22023';
