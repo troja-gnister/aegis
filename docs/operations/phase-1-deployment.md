@@ -143,6 +143,8 @@ Readers inherit both their root lock and deployment-admission lock. If the coord
 
 The indexer uses runtime init and waits for its owned children to be reaped. A termination request, expired lease, or stale heartbeat does not prove a reader has exited. If admission remains blocked, diagnose the original filesystem and container runtime during a controlled maintenance window. Never unlink, replace, truncate, explicitly unlock, or delete coordination files or their volume to force replacement admission. Preserve the deployment's state while investigating; recovery never requires writable originals. Local process/restart verification does not certify prompt termination of uninterruptible kernel I/O.
 
+Stopping is not the same as settled. A stop request closes admission for new metadata commits and rolls back transactions when cancellation wins before final commit admission. A bounded commit already admitted can still resolve while the worker is stopping; its outcome must resolve before shutdown is complete. No following checkpoint is admitted, and the existing database authorization and lease checks still apply. These are catalog transactions, never original-file writes or deletion operations.
+
 ## Users, groups, and grants
 
 Create accounts and groups in administration. A staff/superuser flag grants administration privileges, not product-root access. Add a root grant with exactly one user or group principal. For the Phase 1 root shell, permissions `1` means `BROWSE`; grant only what is needed. Other permission bits reserve later capabilities and do not make unimplemented operations available or originals writable.
