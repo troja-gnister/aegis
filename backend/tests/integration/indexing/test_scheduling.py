@@ -165,7 +165,7 @@ def test_both_installed_paths_execute_the_shared_initialization_fragment(
     resource_dir = tmp_path / "sql"
     resource_dir.mkdir()
     packaged = files("aegis_apps.indexing").joinpath("sql")
-    for name in ("schedule.sql", "lease.sql", "start_run.sql"):
+    for name in ("schedule.sql", "lease.sql", "start_run.sql", "observations.sql", "finalize.sql"):
         (resource_dir / name).write_text(packaged.joinpath(name).read_text())
     # Inject a fault into the trusted installation resource, not into any runtime input.
     fragment = resource_dir / "start_run.sql"

@@ -72,7 +72,7 @@ BEGIN
     UPDATE public.indexing_directorywork SET state='reading', attempt=attempt+1,
         lease_owner=p_worker_id::uuid,
         lease_expires_at=database_now+pg_catalog.make_interval(secs=>lease_seconds),
-        parent_revision=directory.source_revision, last_batch_sequence=0, observed_count=0,
+        parent_revision=directory.source_revision, last_batch_sequence=0, last_batch_hash=NULL, observed_count=0,
         eof_identity=NULL, error_code=NULL, updated_at=database_now
         WHERE id=work.id RETURNING * INTO work;
     UPDATE public.indexing_scanrun SET state='running' WHERE id=run.id;
@@ -100,6 +100,7 @@ DECLARE
     database_now timestamptz;
     lease_seconds CONSTANT integer := 60;
 BEGIN
+    /* AEGIS_LEASE_FENCE_BEGIN */
     IF session_user <> 'aegis_indexer' THEN
         RAISE EXCEPTION 'scan authority denied' USING ERRCODE = '42501';
     END IF;
@@ -161,6 +162,26 @@ BEGIN
     SELECT * INTO directory FROM public.catalog_catalogentry WHERE id=work.directory_id FOR UPDATE;
     IF NOT FOUND OR directory.root_id <> root.id OR directory.kind <> 'directory'
        OR directory.source_revision <> work.parent_revision THEN RETURN false; END IF;
+    -- Bounded source ancestry, independent of logical organization. A missing
+    -- parent, unknown capture, replacement or cycle cannot reach the root anchor.
+    IF NOT EXISTS (
+        WITH RECURSIVE ancestry AS (
+            SELECT entry.id, entry.source_parent_id, entry.source_parent_revision,
+                   ARRAY[entry.id] AS visited
+              FROM public.catalog_catalogentry AS entry
+             WHERE entry.id=directory.id AND entry.root_id=root.id
+               AND entry.kind='directory' AND entry.source_state='present'
+            UNION ALL
+            SELECT parent.id, parent.source_parent_id, parent.source_parent_revision,
+                   ancestry.visited || parent.id
+              FROM ancestry JOIN public.catalog_catalogentry AS parent
+                ON parent.id=ancestry.source_parent_id AND parent.root_id=root.id
+               AND parent.source_revision=ancestry.source_parent_revision
+             WHERE parent.kind='directory' AND parent.source_state='present'
+               AND NOT parent.id=ANY(ancestry.visited)
+               AND pg_catalog.cardinality(ancestry.visited)<257
+        ) SELECT 1 FROM ancestry WHERE source_parent_id IS NULL
+    ) THEN RETURN false; END IF;
     -- Read time after all potentially waiting locks: an expired lease never revives.
     database_now := pg_catalog.clock_timestamp();
     IF work.lease_expires_at IS NULL OR work.lease_expires_at <= database_now
@@ -170,6 +191,7 @@ BEGIN
            AND h.manifest_identity=deployment.manifest_identity AND h.status IN ('idle','running')
            AND h.last_seen_at <= database_now
            AND h.last_seen_at > database_now - interval '120 seconds') THEN RETURN false; END IF;
+    /* AEGIS_LEASE_FENCE_END */
     UPDATE public.indexing_directorywork SET
         lease_expires_at=database_now+pg_catalog.make_interval(secs=>lease_seconds), updated_at=database_now
         WHERE id=work.id;

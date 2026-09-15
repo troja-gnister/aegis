@@ -65,6 +65,7 @@ EXPECTED_TABLE_COLUMNS = {
         "logical_parent_id",
         "root_id",
         "source_parent_id",
+        "source_parent_revision",
     ),
     "django_migrations": ("id", "app", "name", "applied"),
     "django_admin_log": (
@@ -122,6 +123,7 @@ EXPECTED_TABLE_COLUMNS = {
         "updated_at",
         "directory_id",
         "run_id",
+        "last_batch_hash",
     ),
     "indexing_indexdeployment": (
         "id",
@@ -374,6 +376,10 @@ def test_function_execution_allowlist_is_exact_and_public_is_never_a_grantee() -
             "aegis_schedule_root_scan",
             "aegis_claim_scan_directory",
             "aegis_renew_scan_directory",
+            "aegis_record_scan_batch",
+            "aegis_seal_scan_directory",
+            "aegis_finalize_scan_directory",
+            "aegis_fail_scan_directory",
         ),
         "aegis_media": (
             "aegis_publish_media_heartbeat",

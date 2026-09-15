@@ -16,6 +16,6 @@ INSERT INTO public.indexing_scanrun (
     root_state.reconciliation_epoch, 'queued', database_now, NULL) RETURNING * INTO run;
 INSERT INTO public.indexing_directorywork (
     id, run_id, directory_id, parent_revision, state, attempt, lease_owner, lease_expires_at,
-    available_at, last_batch_sequence, observed_count, eof_identity, error_code, updated_at
+    available_at, last_batch_sequence, last_batch_hash, observed_count, eof_identity, error_code, updated_at
 ) VALUES (pg_catalog.gen_random_uuid(), run.id, anchor_id, anchor_revision, 'pending', 0,
-    NULL, NULL, database_now, 0, 0, NULL, NULL, database_now);
+    NULL, NULL, database_now, 0, NULL, 0, NULL, NULL, database_now);

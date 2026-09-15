@@ -210,6 +210,7 @@ class DirectoryWork(models.Model):
     lease_expires_at = models.DateTimeField(null=True)
     available_at = models.DateTimeField(default=timezone.now)
     last_batch_sequence = models.PositiveIntegerField(default=0)
+    last_batch_hash = models.CharField(max_length=64, null=True)
     observed_count = models.PositiveBigIntegerField(default=0)
     eof_identity = models.JSONField(null=True)
     error_code = models.CharField(max_length=64, null=True)
@@ -258,6 +259,11 @@ class ScanRequest(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
+        indexes: ClassVar[list[models.Index]] = [
+            models.Index(
+                fields=("actor", "root", "created_at"), name="indexing_request_recent_idx",
+            ),
+        ]
         constraints: ClassVar[list[models.BaseConstraint]] = [
             models.UniqueConstraint(
                 fields=("actor", "client_request_id"),

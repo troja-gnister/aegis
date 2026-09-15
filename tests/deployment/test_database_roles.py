@@ -38,6 +38,7 @@ from aegis_apps.operations.models import Job, Operation
 from aegis_apps.operations.services import create_operation, enqueue_job
 from aegis_apps.roots.models import Root, RootGrant
 from django.db import connection, transaction
+from django.db.models.functions import Now
 from django.test import override_settings
 from django.utils import timezone
 from psycopg import sql
@@ -124,6 +125,138 @@ def _scan_scalar(cursor: psycopg.Cursor[Any]) -> Any:
     return row[0]
 
 
+def _checkpoint_fixture(database: RoleDatabase) -> tuple[Root, dict[str, Any], dict[str, Any]]:
+    root, worker, digest = _create_scan_fixture()
+    with database.connect("aegis_indexer") as caller:
+        run_id = _scan_scalar(caller.execute(
+            "SELECT public.aegis_schedule_root_scan(%s,%s,%s)", [root.pk, worker, digest],
+        ))
+        lease = _scan_scalar(caller.execute(
+            "SELECT public.aegis_claim_scan_directory(%s,%s)", [run_id, worker],
+        ))
+    batch = {"sequence": 1, "observations": [{
+        "raw": "c2FmZQ==", "display": "safe", "name_key": "c2FmZQ==", "type_hint": None,
+        "kind": "file", "state": "present", "size": 1, "mtime_ns": 2, "ctime_ns": 3,
+        "device": 4, "inode": 5,
+    }]}
+    return root, lease, batch
+
+
+@pytest.mark.parametrize("role", ["aegis_web", "aegis_operations", "aegis_media"])
+@pytest.mark.parametrize("statement,argument", [
+    ("SELECT public.aegis_record_scan_batch(%s,%s)", Jsonb({})),
+    ("SELECT public.aegis_seal_scan_directory(%s,%s)", Jsonb([1, 1, 1, 1])),
+    ("SELECT public.aegis_finalize_scan_directory(%s,%s)", 1),
+    ("SELECT public.aegis_fail_scan_directory(%s,%s)", "permission_denied"),
+])
+def test_checkpoint_functions_require_actual_indexer_login(
+    role_database: RoleDatabase, role: str, statement: str, argument: Any,
+) -> None:
+    with role_database.connect(role) as caller, pytest.raises(psycopg.errors.InsufficientPrivilege):
+        caller.execute(statement, [Jsonb({}), argument])
+
+
+@pytest.mark.parametrize("field,value", [
+    ("raw", "Li4="), ("raw", "YQAv"), ("raw", "L2E="), ("raw", "c2FmZQ=\n="),
+    ("raw", "c2FmZR=="), ("raw", "a"), ("raw", ""), ("raw", 1),
+    ("name_key", "a"), ("name_key", ""), ("name_key", "eA==\n"),
+    ("display", ""), ("display", "x" * 1531), ("display", 1),
+    ("type_hint", "JPG"), ("type_hint", []), ("kind", "unknown"),
+    ("kind", "special"), ("state", "missing"), ("state", "unsupported"),
+    ("state", "inaccessible"), ("size", None), ("size", -1), ("size", True),
+    ("size", 1.5), ("size", "1"), ("size", 2**63), ("inode", 0),
+    ("device", 2**64), ("mtime_ns", -(2**63)-1),
+    ("root_id", "00000000-0000-0000-0000-000000000000"),
+    ("logical_name", "forged organization"),
+])
+def test_direct_sql_validates_entire_observation_before_any_write(
+    role_database: RoleDatabase, field: str, value: Any,
+) -> None:
+    from aegis_apps.catalog.models import CatalogEntry
+    from aegis_apps.indexing.models import DirectoryWork
+
+    root, lease, batch = _checkpoint_fixture(role_database)
+    valid = dict(batch["observations"][0])
+    batch["observations"].append(dict(valid, raw="YmFk", display="bad", name_key="YmFk"))
+    batch["observations"][1][field] = value
+    with (role_database.connect("aegis_indexer") as caller,
+          pytest.raises(psycopg.errors.InvalidParameterValue)):
+        caller.execute("SELECT public.aegis_record_scan_batch(%s,%s)", [Jsonb(lease), Jsonb(batch)])
+    assert CatalogEntry.objects.filter(root=root).count() == 1
+    assert DirectoryWork.objects.get(pk=lease["work_id"]).last_batch_sequence == 0
+
+
+def test_direct_checkpoint_replay_fail_and_stale_root_keep_metadata(
+    role_database: RoleDatabase,
+) -> None:
+    from aegis_apps.catalog.models import CatalogEntry
+
+    root, lease, batch = _checkpoint_fixture(role_database)
+    with role_database.connect("aegis_indexer") as caller:
+        first = _scan_scalar(caller.execute(
+            "SELECT public.aegis_record_scan_batch(%s,%s)", [Jsonb(lease), Jsonb(batch)],
+        ))
+        assert first == {"observed": 1, "inserted": 1, "changed": 0}
+        assert _scan_scalar(caller.execute(
+            "SELECT public.aegis_record_scan_batch(%s,%s)", [Jsonb(lease), Jsonb(batch)],
+        )) == {"observed": 0, "inserted": 0, "changed": 0}
+        assert _scan_scalar(caller.execute(
+            "SELECT public.aegis_fail_scan_directory(%s,%s)", [Jsonb(lease), "reader_timeout"],
+        )) is True
+        assert _scan_scalar(caller.execute(
+            "SELECT public.aegis_finalize_scan_directory(%s,%s)", [Jsonb(lease), 500],
+        )) is None
+    assert CatalogEntry.objects.get(root=root, raw_name=b"safe").source_state == "present"
+
+
+def test_commit_trigger_has_no_runtime_execution_grant(role_database: RoleDatabase) -> None:
+    for role in ("aegis_web", "aegis_operations", "aegis_indexer", "aegis_media"):
+        with role_database.connect(role) as caller:
+            assert caller.execute(
+                "SELECT pg_catalog.has_function_privilege(current_user,"
+                "'public.aegis_guard_directory_commit()', 'EXECUTE')",
+            ).fetchone() == (False,)
+
+
+@pytest.mark.parametrize("invalid", [
+    None, [], {}, {"sequence": 1, "observations": []},
+    {"sequence": True, "observations": []},
+    {"sequence": 2**31, "observations": []},
+    {"sequence": 1, "observations": {}, "extra": 1},
+    {"sequence": 1, "observations": [None]},
+])
+def test_direct_checkpoint_rejects_malformed_batch_envelopes(
+    role_database: RoleDatabase, invalid: Any,
+) -> None:
+    _, lease, _ = _checkpoint_fixture(role_database)
+    with (role_database.connect("aegis_indexer") as caller,
+          pytest.raises(psycopg.errors.InvalidParameterValue)):
+        caller.execute("SELECT public.aegis_record_scan_batch(%s,%s)",
+                       [Jsonb(lease), Jsonb(invalid)])
+
+
+@pytest.mark.parametrize("identity", [None, {}, [], [1, 1, 1], [True, 1, 1, 1],
+                                      [1, 0, 1, 1], [2**64, 1, 1, 1], [1, 1, 2**63, 1]])
+def test_direct_checkpoint_rejects_malformed_eof_identity(
+    role_database: RoleDatabase, identity: Any,
+) -> None:
+    _, lease, _ = _checkpoint_fixture(role_database)
+    with (role_database.connect("aegis_indexer") as caller,
+          pytest.raises(psycopg.errors.InvalidParameterValue)):
+        caller.execute("SELECT public.aegis_seal_scan_directory(%s,%s)",
+                       [Jsonb(lease), Jsonb(identity)])
+
+
+@pytest.mark.parametrize("limit", [None, 0, -1, 501])
+def test_direct_checkpoint_rejects_unbounded_finalization(
+    role_database: RoleDatabase, limit: int | None,
+) -> None:
+    _, lease, _ = _checkpoint_fixture(role_database)
+    with (role_database.connect("aegis_indexer") as caller,
+          pytest.raises(psycopg.errors.InvalidParameterValue)):
+        caller.execute("SELECT public.aegis_finalize_scan_directory(%s,%s)", [Jsonb(lease), limit])
+
+
 def _create_scan_fixture() -> tuple[Root, str, str]:
     from aegis_apps.catalog.models import CatalogEntry
     from aegis_apps.indexing.models import IndexDeployment
@@ -150,7 +283,7 @@ def _create_scan_fixture() -> tuple[Root, str, str]:
     WorkerHeartbeat.objects.create(
         role="indexer", worker_id=worker_id, release_id="task4-test",
         schema_identity="schema-test", manifest_identity=deployment.manifest_identity,
-        last_seen_at=timezone.now(), status="idle", metrics={},
+        last_seen_at=Now(), status="idle", metrics={},
     )
     return root, worker_id, deployment.manifest_identity
 
@@ -219,7 +352,7 @@ django.setup()
 from aegis_apps.common import database_privileges
 assert '/app/.venv/' in database_privileges.__file__
 wheel_files = {str(path) for path in metadata.files('aegis-platform')}
-for name in ('schedule.sql', 'lease.sql', 'start_run.sql'):
+for name in ('schedule.sql', 'lease.sql', 'start_run.sql', 'observations.sql', 'finalize.sql'):
     assert 'aegis_apps/indexing/sql/' + name in wheel_files
     resource = resources.files('aegis_apps.indexing').joinpath('sql', name)
     assert '/app/.venv/' in str(resource)
@@ -248,6 +381,19 @@ with psycopg.connect(dbname=data['database'], host=data['host'], port=data['port
     assert manual_lease['attempt'] == lease['attempt'] == 1
     assert caller.execute('SELECT public.aegis_renew_scan_directory(%s)',
         [Jsonb(manual_lease)]).fetchone()[0] is True
+    batch = {'sequence': 1, 'observations': [{
+        'raw': 'c2FmZQ==', 'display': 'safe', 'name_key': 'c2FmZQ==', 'type_hint': None,
+        'kind': 'file', 'state': 'present', 'size': 1, 'mtime_ns': 2, 'ctime_ns': 3,
+        'device': 4, 'inode': 5,
+    }]}
+    assert caller.execute('SELECT public.aegis_record_scan_batch(%s,%s)',
+        [Jsonb(lease), Jsonb(batch)]).fetchone()[0] == {'observed': 1, 'inserted': 1, 'changed': 0}
+    assert caller.execute('SELECT public.aegis_seal_scan_directory(%s,%s)',
+        [Jsonb(lease), Jsonb([1, 1, 1, 1])]).fetchone()[0] is True
+    assert caller.execute('SELECT public.aegis_finalize_scan_directory(%s,%s)',
+        [Jsonb(lease), 500]).fetchone()[0] == {'affected': 0, 'complete': True}
+    assert caller.execute('SELECT public.aegis_fail_scan_directory(%s,%s)',
+        [Jsonb(manual_lease), 'reader_timeout']).fetchone()[0] is True
 print('Installed wheel shared initialization: periodic and manual runtime login round trip passed.')
 """
     try:

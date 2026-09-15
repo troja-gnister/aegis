@@ -197,3 +197,10 @@ def test_composite_parents_are_deferred(
         entry_factory(root=catalog_root, raw=b"later", kind="directory", id=new_id)
     entry.refresh_from_db()
     assert entry.source_parent_id == entry.logical_parent_id == new_id
+
+
+def test_unknown_source_parent_revision_is_not_backfilled(
+    catalog_root: Root, entry_factory: Callable[..., CatalogEntry],
+) -> None:
+    entry = entry_factory(root=catalog_root, raw=b"unknown")
+    assert entry.source_parent_revision is None

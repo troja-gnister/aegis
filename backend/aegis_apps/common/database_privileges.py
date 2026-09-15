@@ -34,6 +34,7 @@ MANAGED_TABLE_COLUMNS: Final[dict[str, tuple[str, ...]]] = {
         "catalog_version", "children_version", "observation_epoch",
         "seen_generation", "seen_attempt",
         "observed_at", "logical_parent_id", "root_id", "source_parent_id",
+        "source_parent_revision",
     ),
     "django_migrations": ("id", "app", "name", "applied"),
     "django_admin_log": (
@@ -91,6 +92,7 @@ MANAGED_TABLE_COLUMNS: Final[dict[str, tuple[str, ...]]] = {
         "updated_at",
         "directory_id",
         "run_id",
+        "last_batch_hash",
     ),
     "indexing_indexdeployment": (
         "id",
@@ -348,6 +350,10 @@ ROLE_FUNCTION_PRIVILEGES: Final[dict[str, tuple[str, ...]]] = {
         "aegis_schedule_root_scan",
         "aegis_claim_scan_directory",
         "aegis_renew_scan_directory",
+        "aegis_record_scan_batch",
+        "aegis_seal_scan_directory",
+        "aegis_finalize_scan_directory",
+        "aegis_fail_scan_directory",
     ),
     "aegis_media": (
         "aegis_publish_media_heartbeat",
@@ -820,6 +826,11 @@ $aegis_function$;
 
 
 MANAGED_FUNCTION_SIGNATURES: Final[dict[str, str]] = {
+    "aegis_guard_directory_commit": "public.aegis_guard_directory_commit()",
+    "aegis_record_scan_batch": "public.aegis_record_scan_batch(jsonb,jsonb)",
+    "aegis_seal_scan_directory": "public.aegis_seal_scan_directory(jsonb,jsonb)",
+    "aegis_finalize_scan_directory": "public.aegis_finalize_scan_directory(jsonb,integer)",
+    "aegis_fail_scan_directory": "public.aegis_fail_scan_directory(jsonb,text)",
     "aegis_schedule_root_scan": "public.aegis_schedule_root_scan(uuid,text,text)",
     "aegis_request_root_scan": "public.aegis_request_root_scan(uuid,uuid,bigint,text)",
     "aegis_claim_scan_directory": "public.aegis_claim_scan_directory(uuid,text)",
@@ -834,6 +845,11 @@ MANAGED_FUNCTION_SIGNATURES: Final[dict[str, str]] = {
     ),
 }
 MANAGED_FUNCTION_IDENTITY_ARGUMENTS: Final[dict[str, str]] = {
+    "aegis_guard_directory_commit": "",
+    "aegis_record_scan_batch": "jsonb, jsonb",
+    "aegis_seal_scan_directory": "jsonb, jsonb",
+    "aegis_finalize_scan_directory": "jsonb, integer",
+    "aegis_fail_scan_directory": "jsonb, text",
     "aegis_schedule_root_scan": "uuid, text, text",
     "aegis_request_root_scan": "uuid, uuid, bigint, text",
     "aegis_claim_scan_directory": "uuid, text",
@@ -1019,8 +1035,8 @@ def _verify_role_boundaries(
         )
 
 
-def _scan_function_sql() -> tuple[str, str]:
-    """Expand only the two installation-owned sites from trusted wheel resources."""
+def _scan_function_sql() -> tuple[str, ...]:
+    """Expand fixed run-initialization and lease-fence sites from trusted wheel resources."""
     resources = files("aegis_apps.indexing").joinpath("sql")
     schedule = resources.joinpath("schedule.sql").read_text()
     start_run = resources.joinpath("start_run.sql").read_text().rstrip()
@@ -1034,7 +1050,24 @@ def _scan_function_sql() -> tuple[str, str]:
         schedule = schedule.replace(site, indent(start_run, padding))
     if "/* AEGIS_START_" in schedule:
         raise PrivilegeSynchronizationError("scan SQL installation marker drift")
-    return schedule, resources.joinpath("lease.sql").read_text()
+    lease = resources.joinpath("lease.sql").read_text()
+    begin, end = "/* AEGIS_LEASE_FENCE_BEGIN */", "/* AEGIS_LEASE_FENCE_END */"
+    if lease.count(begin) != 1 or lease.count(end) != 1:
+        raise PrivilegeSynchronizationError("scan SQL fence marker drift")
+    fence = lease.split(begin)[1].split(end)[0]
+    checkpoints = []
+    for filename, expected_counts in (("observations.sql", (1, 0)), ("finalize.sql", (1, 2))):
+        statement = resources.joinpath(filename).read_text()
+        for suffix, expected in zip(("NULL", "FALSE"), expected_counts, strict=True):
+            marker = f"/* AEGIS_CHECKPOINT_FENCE_{suffix} */"
+            if statement.count(marker) != expected:
+                raise PrivilegeSynchronizationError("scan SQL fence marker drift")
+            replacement = fence.replace("RETURN false;", f"RETURN {suffix};")
+            statement = statement.replace(marker, replacement)
+        if "/* AEGIS_CHECKPOINT_" in statement:
+            raise PrivilegeSynchronizationError("scan SQL fence marker drift")
+        checkpoints.append(statement)
+    return schedule, lease, *checkpoints
 
 
 def _install_boundary_functions(cursor: Any) -> None:

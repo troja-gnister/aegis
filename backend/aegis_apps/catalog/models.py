@@ -48,6 +48,7 @@ class CatalogEntry(models.Model):
     device = models.DecimalField(max_digits=20, decimal_places=0, null=True)
     inode = models.DecimalField(max_digits=20, decimal_places=0, null=True)
     source_revision = models.PositiveBigIntegerField(default=0)
+    source_parent_revision = models.PositiveBigIntegerField(null=True)
     catalog_version = models.PositiveBigIntegerField(default=0)
     children_version = models.PositiveBigIntegerField(default=0)
     observation_epoch = models.PositiveBigIntegerField(default=0)

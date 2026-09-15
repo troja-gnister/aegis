@@ -11,6 +11,7 @@ from aegisctl.mounts import MAX_MOUNTINFO_BYTES, MountAttestationError, parse_mo
 from aegis_apps.catalog.domain import DirectoryIdentity, EntryKind, Observation, SourceState
 from aegis_apps.catalog.names import source_name
 
+from .payloads import checkpoint_batch_overhead, checkpoint_observation_size
 from .protocol import (
     MAX_PAYLOAD_BYTES,
     FailureCode,
@@ -160,6 +161,7 @@ def read_directory(
         sequence = 1
         observations: list[Observation] = []
         byte_count = batch_frame_overhead(sequence)
+        checkpoint_bytes = checkpoint_batch_overhead(sequence)
         degraded: FailureCode | None = None
         with os.scandir(descriptor) as entries:
             for entry in entries:
@@ -167,21 +169,28 @@ def read_directory(
                     observation, error = _observe(entry)
                     degraded = degraded or error
                     size = observation_encoded_size(observation)
+                    checkpoint_size = checkpoint_observation_size(observation)
                 except (ValueError, ProtocolError):
                     degraded = degraded or "unsupported_entry"
                     continue
-                if size + batch_frame_overhead(sequence) > MAX_PAYLOAD_BYTES:
+                if (
+                    size + batch_frame_overhead(sequence) > MAX_PAYLOAD_BYTES
+                    or checkpoint_size + checkpoint_batch_overhead(sequence) > MAX_PAYLOAD_BYTES
+                ):
                     degraded = degraded or "unsupported_entry"
                     continue
                 if observations and (
                     len(observations) == batch_records
                     or byte_count + 1 + size > MAX_PAYLOAD_BYTES
+                    or checkpoint_bytes + 2 + checkpoint_size > MAX_PAYLOAD_BYTES
                 ):
                     yield ReaderBatch(sequence, tuple(observations))
                     sequence += 1
                     observations.clear()
                     byte_count = batch_frame_overhead(sequence)
+                    checkpoint_bytes = checkpoint_batch_overhead(sequence)
                 byte_count += size + bool(observations)
+                checkpoint_bytes += checkpoint_size + 2 * bool(observations)
                 observations.append(observation)
         if observations:
             yield ReaderBatch(sequence, tuple(observations))
