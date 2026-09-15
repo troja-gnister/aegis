@@ -59,7 +59,7 @@ Statuses describe implementation, not design approval:
 - **Verified:** the acceptance evidence and applicable phase gate passed.
 - **Deferred:** intentionally outside the v1 roadmap.
 
-Every feature pull request must update its row. Implemented and Verified rows link their pull request, test report, benchmark, or recovery evidence; bundled work does not advance unrelated rows.
+Every feature change must update its row. Implemented and Verified rows link their commit, review, test report, benchmark, or recovery evidence; bundled work does not advance unrelated rows.
 
 Phase 1 verification covers login/admin, granted root cards, authorization epochs, job/status primitives, and deployment boundaries only. It does not certify file-content delivery or per-file operations, live scan/disk-pressure metrics, indexing, or hostile-document/media processing; those are later phase gates.
 
