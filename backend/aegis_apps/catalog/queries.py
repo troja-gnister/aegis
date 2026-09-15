@@ -23,6 +23,7 @@ from .authorization import (
     CatalogNotReady,
     bounded_read,
     browse_context,
+    reject_not_found,
 )
 from .cursors import (
     CursorContext,
@@ -251,11 +252,12 @@ def directory_page(
 
 
 def entry_details(user: User, entry_id: UUID, namespace: str) -> dict[str, object]:
+    requested_epoch = user.authorization_epoch
     with bounded_read():
         try:
             manifest = configured_manifest()
         except ManifestError:
-            raise CatalogNotFound() from None
+            reject_not_found(user, requested_epoch)
         roots = authorized_roots(
             user_id=user.pk, active_manifest_slot_ids=tuple(manifest.slots) if manifest else (),
         ).values("id")
@@ -263,7 +265,7 @@ def entry_details(user: User, entry_id: UUID, namespace: str) -> dict[str, objec
             "root_id", flat=True,
         ).first()
         if root_id is None:
-            raise CatalogNotFound()
+            reject_not_found(user, requested_epoch)
         with browse_context(user, root_id, namespace) as context:
             context.require_active()
             row = _entry(root_id, entry_id)

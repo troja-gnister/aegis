@@ -403,3 +403,67 @@ def test_current_context_is_bound_to_cursor(browse_fixture: Any, changed: str) -
         options["limit"] = 2
     with pytest.raises(CursorRestartRequired):
         browse_fixture.page(**options)
+
+
+@pytest.mark.parametrize("mutation", ["revoked", "inactive"])
+@pytest.mark.parametrize("target", [
+    "details", "unknown_entry", "unknown_root", "inactive_root", "bad_manifest",
+])
+def test_actual_web_invalid_principal_precedes_early_not_found(
+    browse_fixture: Any, role_database: RoleDatabase, monkeypatch: pytest.MonkeyPatch,
+    mutation: str, target: str,
+) -> None:
+    from aegis_apps.catalog.authorization import CatalogAuthenticationRequired, browse_context
+    from aegis_apps.identity.admin_services import set_user_active
+    from aegis_apps.roots.services import remove_grant
+
+    entry = browse_fixture.entry()
+    admin = User.objects.create_superuser(username="early-rejection-admin")
+    # The fixture principal represents middleware's already-validated epoch.
+    # Commit the real foundation mutation before candidate/root resolution starts.
+    captured_epoch = browse_fixture.user.authorization_epoch
+    if mutation == "revoked":
+        grant = RootGrant.objects.get(user=browse_fixture.user)
+        remove_grant(actor=admin, grant_id=grant.pk, request_id="early-rejection-revoke")
+    else:
+        set_user_active(actor=admin, user_id=browse_fixture.user.pk, active=False,
+                        request_id="early-rejection-inactive")
+    assert browse_fixture.user.authorization_epoch == captured_epoch
+    if target == "inactive_root":
+        Root.objects.filter(pk=browse_fixture.root.pk).update(active=False)
+    elif target == "bad_manifest":
+        monkeypatch.setenv("AEGIS_MOUNT_MANIFEST_SHA256", "invalid")
+    with role_database.as_django_role("aegis_web"):
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT session_user")
+            assert cursor.fetchone() == ("aegis_web",)
+        with pytest.raises(CatalogAuthenticationRequired, match=r"^authentication_required$"):
+            if target in ("details", "unknown_entry", "bad_manifest"):
+                browse_fixture.details(uuid.uuid4() if target == "unknown_entry" else entry.pk)
+            else:
+                root_id = uuid.uuid4() if target == "unknown_root" else browse_fixture.root.pk
+                with browse_context(browse_fixture.user, root_id, browse_fixture.namespace):
+                    pytest.fail("invalid principal authorized")
+
+
+def test_actual_web_current_principal_retains_identical_failed_lookup_errors(
+    browse_fixture: Any, role_database: RoleDatabase,
+) -> None:
+    from aegis_apps.catalog.authorization import CatalogNotFound, browse_context
+    from aegis_apps.roots.services import remove_grant
+
+    entry = browse_fixture.entry()
+    admin = User.objects.create_superuser(username="current-rejection-admin")
+    grant = RootGrant.objects.get(user=browse_fixture.user)
+    remove_grant(actor=admin, grant_id=grant.pk, request_id="current-rejection-revoke")
+    browse_fixture.user.refresh_from_db()
+    with role_database.as_django_role("aegis_web"):
+        for entry_id in (entry.pk, uuid.uuid4()):
+            with pytest.raises(CatalogNotFound, match=r"^catalog_not_found$"):
+                browse_fixture.details(entry_id)
+        for root_id in (browse_fixture.root.pk, uuid.uuid4()):
+            with (
+                pytest.raises(CatalogNotFound, match=r"^catalog_not_found$"),
+                browse_context(browse_fixture.user, root_id, browse_fixture.namespace),
+            ):
+                pytest.fail("unauthorized root authorized")

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Never
 from uuid import UUID
 
 from django.contrib.postgres.aggregates import BitOr
@@ -70,6 +71,28 @@ def bounded_read() -> Iterator[None]:
         raise
 
 
+def _lock_current_user(user: User, requested_epoch: int) -> None:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            'SELECT id, is_active, authorization_epoch FROM identity_user '
+            'WHERE id = %s FOR SHARE', [user.pk],
+        )
+        row = cursor.fetchone()
+    if row is None or not row[1] or row[2] != requested_epoch:
+        raise CatalogAuthenticationRequired() from None
+
+
+def reject_not_found(user: User, requested_epoch: int) -> Never:
+    """Terminate a failed lookup after checking its captured principal.
+
+    A candidate-less details lookup has no root to lock. This path may lock only
+    the user because it always exits; it never proceeds to acquire a root lock.
+    Callers remain inside bounded_read so the check is transactional and bounded.
+    """
+    _lock_current_user(user, requested_epoch)
+    raise CatalogNotFound() from None
+
+
 @contextmanager
 def browse_context(user: User, root_id: UUID, namespace: str) -> Iterator[BrowseContext]:
     # Capture before waiting for locks. Never replace the request's identity epoch.
@@ -81,15 +104,9 @@ def browse_context(user: User, root_id: UUID, namespace: str) -> Iterator[Browse
                 'WHERE id = %s FOR SHARE', [root_id],
             )
             root_row = cursor.fetchone()
-            if root_row is None or not root_row[2]:
-                raise CatalogNotFound()
-            cursor.execute(
-                'SELECT id, is_active, authorization_epoch FROM identity_user '
-                'WHERE id = %s FOR SHARE', [user.pk],
-            )
-            user_row = cursor.fetchone()
-        if user_row is None or not user_row[1] or user_row[2] != requested_epoch:
-            raise CatalogAuthenticationRequired()
+        _lock_current_user(user, requested_epoch)
+        if root_row is None or not root_row[2]:
+            raise CatalogNotFound()
         try:
             manifest = configured_manifest()
         except ManifestError:
@@ -111,8 +128,8 @@ def browse_context(user: User, root_id: UUID, namespace: str) -> Iterator[Browse
         context = BrowseContext(
             Root(id=root_row[0], slot_id=root_row[1], active=True,
                  authorization_epoch=root_row[3]),
-            User(id=user_row[0], is_active=True, authorization_epoch=user_row[2]),
-            root_row[3], user_row[2], namespace, connection.connection,
+            User(id=user.pk, is_active=True, authorization_epoch=requested_epoch),
+            root_row[3], requested_epoch, namespace, connection.connection,
         )
         try:
             yield context
