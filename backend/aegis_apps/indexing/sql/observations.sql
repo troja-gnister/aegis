@@ -147,22 +147,18 @@ BEGIN
             ctime_ns=CASE WHEN excluded.source_state='inaccessible' THEN target.ctime_ns ELSE excluded.ctime_ns END,
             device=CASE WHEN excluded.source_state='inaccessible' THEN target.device ELSE excluded.device END,
             inode=CASE WHEN excluded.source_state='inaccessible' THEN target.inode ELSE excluded.inode END,
-            source_revision=target.source_revision + CASE WHEN
-                target.source_state IS DISTINCT FROM excluded.source_state OR
-                target.source_parent_revision IS DISTINCT FROM excluded.source_parent_revision OR
-                (excluded.source_state<>'inaccessible' AND
-                 (target.kind,target.size,target.mtime_ns,target.ctime_ns,target.device,target.inode)
-                 IS DISTINCT FROM
-                 (excluded.kind,excluded.size,excluded.mtime_ns,excluded.ctime_ns,excluded.device,excluded.inode))
-                THEN 1 ELSE 0 END,
-            catalog_version=target.catalog_version + CASE WHEN
-                target.source_state IS DISTINCT FROM excluded.source_state OR
-                target.source_parent_revision IS DISTINCT FROM excluded.source_parent_revision OR
-                (excluded.source_state<>'inaccessible' AND
-                 (target.kind,target.size,target.mtime_ns,target.ctime_ns,target.device,target.inode)
-                 IS DISTINCT FROM
-                 (excluded.kind,excluded.size,excluded.mtime_ns,excluded.ctime_ns,excluded.device,excluded.inode))
-                THEN 1 ELSE 0 END,
+            (source_revision,catalog_version)=(
+                SELECT target.source_revision+source_change.delta,
+                       target.catalog_version+source_change.delta
+                  FROM (SELECT CASE WHEN
+                    target.source_state IS DISTINCT FROM excluded.source_state OR
+                    target.source_parent_revision IS DISTINCT FROM excluded.source_parent_revision OR
+                    (excluded.source_state<>'inaccessible' AND
+                     (target.kind,target.size,target.mtime_ns,target.ctime_ns,target.device,target.inode)
+                     IS DISTINCT FROM
+                     (excluded.kind,excluded.size,excluded.mtime_ns,excluded.ctime_ns,excluded.device,excluded.inode))
+                    THEN 1 ELSE 0 END AS delta) AS source_change
+            ),
             observation_epoch=excluded.observation_epoch, seen_generation=excluded.seen_generation,
             seen_attempt=excluded.seen_attempt, observed_at=excluded.observed_at
         WHERE target.observation_epoch <= run.start_epoch
