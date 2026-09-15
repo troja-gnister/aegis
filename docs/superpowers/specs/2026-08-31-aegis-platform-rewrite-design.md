@@ -224,6 +224,7 @@ Role-scoped Aegis volumes prevent an untrusted processor from reading unrelated 
 | Volume | Writers | Readers | Contents |
 | --- | --- | --- | --- |
 | Staging | web | operations | resumable upload chunks; never served by the gateway |
+| Indexer coordination | indexer | indexer | approved Phase 2A.1 local reader/admission locks outside originals; no removal or replacement while any reader retains source access |
 | Managed versions | operations | gateway and authorized processors | immutable uploaded, copied, or edited versions; append-only and never in-place rewritten or deleted |
 | Derivatives | media and local AI | gateway and authorized processors | thumbnails, PDF pages, transcodes, and extraction artifacts |
 | Models | explicit model-management job | local AI | pinned local model artifacts and manifests |

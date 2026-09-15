@@ -64,7 +64,7 @@ The default root policy schedules an initial scan after activation and another s
 
 ## 5. Safe and checkpointed scanning
 
-Filesystem operations start from the configured read-only root descriptor. Each component is resolved relative to a directory descriptor with no-follow semantics. The reader validates root and directory identity, rejects mount transitions, and does not follow symlinks. Existing host preflight and runtime mount attestation remain mandatory; a matching path prefix is not containment proof.
+Source enumeration starts from the configured read-only root descriptor. Under the September 15 approved runtime adjustment, the supervised child acquires that descriptor from the fixed current-attested slot, checks its mount ID/path, observer-derived fingerprint and read-only leaf-mount state, then uses descriptor-relative no-follow resolution. A browser path never chooses the slot. Host filesystem/inode values are not substituted for container-observed identity on Docker Desktop. The reader validates root and directory stability, rejects mount transitions, and does not follow symlinks. Existing host preflight and runtime mount attestation remain mandatory; a matching path prefix is not containment proof.
 
 Each run captures a scan generation and the root reconciliation epoch. Directory work is durable and claimed with an expiring lease and monotonic attempt token. Only the indexer role can claim or settle this work. No queue row is created for every regular file.
 
@@ -79,6 +79,8 @@ For one directory:
 7. Mark the directory complete and continue through its durable children. Settle the root run only after every directory has a recorded complete or degraded result.
 
 A reader is supervised separately from the control loop and returns observations through the bounded result channel. It receives no database handle and opens no database connection; the supervisor owns database work, lease renewal, heartbeat, and cancellation. Both processes remain inside the indexer's existing trust boundary: process separation is a liveness mechanism, not an additional security sandbox. A stalled reader, lost database connection, shutdown, or expired attempt prevents further commits. If a blocked filesystem call cannot be terminated promptly, mark the root degraded and stop launching replacement readers for that root until the previous reader is reaped; retries must not accumulate hung processes.
+
+The approved coordination volume is local, fixed at `/srv/aegis/indexer-coordination`, and mounted only by indexer. Opaque per-root locks and a deployment-admission lock share inherited open-file descriptions between supervisor and reader; they are never removed/replaced or explicitly unlocked while source access may survive. One coordinator owns the bounded reader pool. A coordinator crash with an uninterruptible child can delay replacement admission until that child's source access ends. Missing/unwritable/unsupported storage fails closed, and all indexers sharing the deployment/database must share it. Independent volumes or arbitrary multi-host failover are not supported by this contract. Owned children are actually reaped; runtime init/reaping and source-access exclusion need separate tests. Only coordination metadata may be created in this volume; original-root writes remain forbidden. Details and implementation status are in the [runtime coordination decision](../plans/2026-09-14-phase-2a-indexed-browser.md#task-7-runtime-coordination-decision).
 
 The reader has a progress timeout, not a small fixed total duration that would make every large folder fail. A directory with 50,000 children may take minutes while continuing to produce bounded batches and renew its lease. The no-progress timeout defaults to 120 seconds, with operator overrides from 30 to 3,600 seconds; a timed-out pass cannot finalize missing entries.
 
@@ -153,7 +155,7 @@ On September 15, 2026, the user explicitly approved stock PostgreSQL with this c
 
 No catalog model/admin route exposes permanent file deletion. SQL cleanup of disposable work records, if introduced, is distinct from content deletion and cannot cascade-delete entries, originals, audit, or future published-version history.
 
-The existing indexer container receives the same read-only original mounts; no writable-original override, Docker socket, privileged mode, new public port, or outbound route is added. Live scan counters extend the existing safe status/heartbeat surface. Audit records root scan requests and safe outcomes with opaque IDs, not raw paths, filename lists, filter text, or credentials.
+The existing indexer container receives the same read-only original mounts, plus the explicitly approved indexer-only coordination volume and runtime init/reaping. No writable-original override, Docker socket, privileged mode, new public port, or outbound route is added. Live scan counters extend the existing safe status/heartbeat surface. Audit records root scan requests and safe outcomes with opaque IDs, not raw paths, filename lists, filter text, or credentials.
 
 ## 11. Scale fixture and measurement
 
