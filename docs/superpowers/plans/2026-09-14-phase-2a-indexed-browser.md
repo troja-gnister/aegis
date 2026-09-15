@@ -38,7 +38,7 @@
 
 ## Status and task ledger
 
-Planning baseline: `842ba2a` on `main`, with unchanged application code from the verified Phase 1 foundation; execution begins from the committed plan at `6169402`. This plan defines **18 tasks: 8 complete, 10 remaining**. Tasks 1–8 passed verification and independent review, including Task 7's lifecycle and Task 8's input-bound corrections. Task 9's permission-bound indexed queries and bounded details are in progress; the runtime coordination contract remains recorded below. Task 6 retains the September 15 approved commit-fence boundary below. Task 4's local full-deployment limitation remains documented below, not a green gate. The ledger is authoritative; checkboxes below record the execution recipe and subsequent evidence, not a second task count.
+Planning baseline: `842ba2a` on `main`, with unchanged application code from the verified Phase 1 foundation; execution begins from the committed plan at `6169402`. This plan defines **18 tasks: 8 complete, 10 remaining**. Tasks 1–8 passed verification and independent review, including Task 7's lifecycle and Task 8's input-bound corrections. Task 9's permission-bound indexed queries and bounded details are paused, incomplete, for local testing; the runtime coordination contract remains recorded below. Task 6 retains the September 15 approved commit-fence boundary below. Task 4's local full-deployment limitation remains documented below, not a green gate. The ledger is authoritative; checkboxes below record the execution recipe and subsequent evidence, not a second task count.
 
 | Task | Independently testable deliverable | Depends on | Status |
 | --- | --- | --- | --- |
@@ -50,7 +50,7 @@ Planning baseline: `842ba2a` on `main`, with unchanged application code from the
 | 6 | Atomic observations, checkpoint finalization, and stale-work rejection | 4, 5 | Complete (`5654fff`) |
 | 7 | Supervised scan execution and independent worker liveness | 6 | Complete (`6022c97`) |
 | 8 | Typed filters and signed cursor contracts | 1, 2 | Complete (`78b05f1`) |
-| 9 | Permission-bound indexed keyset queries and details | 3, 8 | In progress |
+| 9 | Permission-bound indexed keyset queries and details | 3, 8 | Paused; implementation incomplete |
 | 10 | List/details/status/rescan HTTP endpoints | 4, 9 | Planned |
 | 11 | Validated browser API and bounded private query window | 10 | Planned |
 | 12 | Virtualized mobile file navigation | 11 | Planned |
