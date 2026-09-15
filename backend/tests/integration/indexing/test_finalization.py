@@ -24,6 +24,19 @@ def test_failed_directory_keeps_unseen_locations_present(
     assert scan_fixture.finalize(lease).complete is False
 
 
+def test_failure_publishes_root_degradation_without_scheduler_settlement(
+    scan_fixture: ScanFixture,
+) -> None:
+    from aegis_apps.indexing.models import RootIndexState
+
+    lease = scan_fixture.claim()
+    assert scan_fixture.fail(lease, "reader_timeout")
+    state = RootIndexState.objects.get(root=scan_fixture.root)
+    assert state.status == "degraded"
+    assert state.active_run_id == lease.run_id
+    assert state.degraded_directories == 1
+
+
 def test_successful_empty_directory_requires_seal(
     scan_fixture: ScanFixture, entry_factory: Callable[..., CatalogEntry],
 ) -> None:
@@ -115,3 +128,6 @@ def test_changed_eof_identity_degrades_child_without_missing_unseen_rows(
     unseen.refresh_from_db()
     assert unseen.source_state == "present"
     assert DirectoryWork.objects.get(pk=lease.work_id).error_code == "identity_changed"
+    from aegis_apps.indexing.models import RootIndexState
+
+    assert RootIndexState.objects.get(root=scan_fixture.root).status == "degraded"

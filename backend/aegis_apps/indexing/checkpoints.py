@@ -9,7 +9,11 @@ absolute lease-deadline guarantee; they gain no filesystem or table-DML authorit
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
+from threading import Lock
 from typing import Any, Final
 from uuid import UUID
 
@@ -33,6 +37,58 @@ class BatchResult:
 class FinalizeResult:
     affected: int
     complete: bool
+
+
+class CheckpointCancellation:
+    """One attempt's cancellation versus final commit-admission ordering.
+
+    The mutex protects only local state, never SQL or network I/O. Cancellation
+    before admit_commit forces rollback. A commit admitted first may still be
+    in flight; cancellation closes all later admission but must await its outcome.
+    """
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._cancelled = False
+        self._committing = False
+
+    def is_set(self) -> bool:
+        with self._lock:
+            return self._cancelled
+
+    def cancel(self) -> bool:
+        with self._lock:
+            self._cancelled = True
+            return not self._committing
+
+    def check(self) -> None:
+        with self._lock:
+            if self._cancelled:
+                raise RuntimeError("scan cancelled")
+
+    def admit_commit(self) -> None:
+        with self._lock:
+            if self._cancelled:
+                raise RuntimeError("scan cancelled")
+            self._committing = True
+
+    def resolved(self) -> None:
+        with self._lock:
+            self._committing = False
+
+
+_CANCELLATION: ContextVar[CheckpointCancellation | None] = ContextVar(
+    "scan_checkpoint_cancellation", default=None,
+)
+
+
+@contextmanager
+def checkpoint_cancellation(gate: CheckpointCancellation | None) -> Iterator[None]:
+    token = _CANCELLATION.set(gate)
+    try:
+        yield
+    finally:
+        _CANCELLATION.reset(token)
 
 
 _STATEMENTS: Final = {
@@ -62,11 +118,23 @@ def _call(name: str, lease: ScanLease, argument: object) -> Any:
         or connection.connection.info.transaction_status != TransactionStatus.IDLE
     ):
         raise RuntimeError("scan checkpoint requires a top-level transaction")
+    gate = _CANCELLATION.get()
     try:
-        with transaction.atomic(durable=True), connection.cursor() as cursor:
-            cursor.execute("SET CONSTRAINTS public.aegis_guard_directory_commit DEFERRED")
-            cursor.execute(_STATEMENTS[name], parameters)
-            row = cursor.fetchone()
+        if gate is not None:
+            gate.check()
+        with transaction.atomic(durable=True):
+            with connection.cursor() as cursor:
+                if gate is not None:
+                    gate.check()
+                cursor.execute("SET CONSTRAINTS public.aegis_guard_directory_commit DEFERRED")
+                if gate is not None:
+                    gate.check()
+                cursor.execute(_STATEMENTS[name], parameters)
+                row = cursor.fetchone()
+            if gate is not None:
+                # Linearization point, immediately before atomic exits/COMMIT.
+                # No further statement or callback may precede that commit.
+                gate.admit_commit()
     except DatabaseError as error:
         state = getattr(error.__cause__, "sqlstate", None)
         if state == "22023":
@@ -74,6 +142,9 @@ def _call(name: str, lease: ScanLease, argument: object) -> Any:
         if state == "42501":
             raise PermissionError("scan authority denied") from None
         raise RuntimeError("scan checkpoint rejected") from None
+    finally:
+        if gate is not None:
+            gate.resolved()
     value = None if row is None else row[0]
     if isinstance(value, str):
         if len(value) > 4096:

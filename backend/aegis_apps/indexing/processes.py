@@ -15,12 +15,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Full, Queue
 from threading import Event, Thread
-from typing import BinaryIO, cast
+from typing import TYPE_CHECKING, BinaryIO, cast
 from uuid import UUID
 
 from aegisctl.mounts import MAX_MOUNTINFO_BYTES, parse_mountinfo
 
 from .protocol import ProtocolError, ReaderBatch, ReaderMessage, read_message
+
+if TYPE_CHECKING:
+    from .supervisor import ReaderHandle
 
 COORDINATION_PATH = Path("/srv/aegis/indexer-coordination")
 _LOCK_NAME = re.compile(r"(?:deployment|root-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\.lock")
@@ -33,6 +36,14 @@ class CoordinationError(RuntimeError):
 
 class CoordinationBusy(CoordinationError):
     pass
+
+
+class ReaderLaunchFailure(RuntimeError):
+    """An owned physical child exists and must remain in supervisor accounting."""
+
+    def __init__(self, reader: ReaderHandle) -> None:
+        self.reader = reader
+        super().__init__("reader initialization failed")
 
 
 @dataclass(slots=True)
@@ -124,6 +135,7 @@ class ProcessReader:
         self._closed = False
         self._stopped = Event()
         self._queue: Queue[ReaderMessage | ProtocolError] = Queue(maxsize=2)
+        self._receiver: Thread | None = None
         command = [
             sys.executable, "-m", "aegis_apps.indexing.reader",
             "--root", source.path, "--fingerprint", source.fingerprint,
@@ -144,10 +156,15 @@ class ProcessReader:
         except BaseException:
             self._lock.close()
             raise
-        assert self.process.stdin is not None and self.process.stdout is not None
-        os.set_blocking(self.process.stdin.fileno(), False)
-        self._receiver = Thread(target=self._receive, name="scan-results", daemon=True)
-        self._receiver.start()
+        try:
+            assert self.process.stdin is not None and self.process.stdout is not None
+            os.set_blocking(self.process.stdin.fileno(), False)
+            self._receiver = Thread(target=self._receive, name="scan-results", daemon=True)
+            self._receiver.start()
+        except BaseException:
+            # Transfer, never erase, ownership. The supervisor closes credits,
+            # terminates and retains the slot/locks until this exact child reaps.
+            raise ReaderLaunchFailure(self) from None
 
     def _receive(self) -> None:
         assert self.process.stdout is not None
@@ -189,8 +206,8 @@ class ProcessReader:
         if not self._closed:
             self._closed = True
             self._stopped.set()
-            assert self.process.stdin is not None
-            self.process.stdin.close()
+            if self.process.stdin is not None:
+                self.process.stdin.close()
 
     def terminate(self) -> None:
         if self.process.poll() is None:
@@ -203,5 +220,8 @@ class ProcessReader:
     def reaped(self) -> bool:
         if self.process.poll() is None:
             return False
+        if ((self._receiver is None or not self._receiver.is_alive())
+                and self.process.stdout is not None):
+            self.process.stdout.close()
         self._lock.close()
         return True

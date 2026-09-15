@@ -245,3 +245,198 @@ def test_source_preparation_uses_only_granted_root_columns(
         assert captured[0][1] == lease.root_id
     finally:
         runtime.close()
+
+
+@override_settings(AEGIS_PROCESS_ROLE="indexer")
+@pytest.mark.parametrize("operation", ["record", "finalize"])
+def test_cancel_idle_registered_connection_prevents_checkpoint_transaction(
+    scan_fixture: ScanFixture, entry_factory: Callable[..., CatalogEntry],
+    monkeypatch: pytest.MonkeyPatch, operation: str,
+) -> None:
+    from unittest.mock import Mock
+
+    from aegis_apps.indexing import checkpoints
+    from aegis_apps.indexing.config import ScanPolicy
+    from aegis_apps.indexing.runner import ScanRuntime
+    from aegis_apps.operations.management.commands.run_role import WorkerIdentity
+    from psycopg.pq import TransactionStatus
+
+    lease = scan_fixture.claim()
+    unseen = entry_factory(root=scan_fixture.root, raw=b"unseen")
+    if operation == "finalize":
+        assert scan_fixture.seal(lease)
+    name = "record_batch" if operation == "record" else "finalize_directory"
+    original = getattr(checkpoints, name)
+    entered, release = Event(), Event()
+
+    def barrier(*args: object) -> object:
+        assert connection.connection.info.transaction_status == TransactionStatus.IDLE
+        entered.set()
+        assert release.wait(5), "test barrier not released"
+        return original(*args)
+
+    monkeypatch.setattr(checkpoints, name, barrier)
+    identity = WorkerIdentity("indexer", lease.worker_id, "task4-test", "schema-test",
+                              lease.manifest_identity)
+    with scan_fixture.database.as_django_role("aegis_indexer"):
+        runtime = ScanRuntime(identity, ScanPolicy(3600, 120, 500, 2), Mock())
+    try:
+        payload = scan_fixture.batch(b"late") if operation == "record" else 500
+        pending = runtime.execute(lease, operation, payload)
+        assert entered.wait(5)
+        runtime.cancel(lease)
+        # Prove an actual SQL cancel delivered while idle is insufficient by itself.
+        with runtime._mutex:
+            active = runtime._connections[lease.work_id]
+        active.cancel_safe(timeout=1)
+        release.set()
+        with pytest.raises(RuntimeError, match="cancelled"):
+            pending.result(timeout=5)
+        assert not CatalogEntry.objects.filter(root=scan_fixture.root, raw_name=b"late").exists()
+        unseen.refresh_from_db()
+        assert unseen.source_state == "present"
+    finally:
+        release.set()
+        runtime.close()
+
+
+@override_settings(AEGIS_PROCESS_ROLE="indexer")
+def test_unreaped_reader_persists_degraded_root_and_excludes_replacement(
+    scan_fixture: ScanFixture,
+) -> None:
+    from concurrent.futures import Future
+    from unittest.mock import Mock
+
+    from aegis_apps.indexing.config import ScanPolicy
+    from aegis_apps.indexing.models import DirectoryWork, RootIndexState
+    from aegis_apps.indexing.runner import ScanRuntime
+    from aegis_apps.indexing.supervisor import ReaderHandle, ReaderState, ScanSupervisor
+    from aegis_apps.operations.management.commands.run_role import WorkerIdentity
+
+    lease = scan_fixture.claim()
+    reader = Mock(spec=ReaderHandle)
+    reader.receive.return_value = None
+    reader.reaped.return_value = False
+    launched: Future[ReaderHandle] = Future()
+    launched.set_result(reader)
+    published: Future[None] = Future()
+    published.set_result(None)
+    identity = WorkerIdentity("indexer", lease.worker_id, "task4-test", "schema-test",
+                              lease.manifest_identity)
+    with scan_fixture.database.as_django_role("aegis_indexer"):
+        runtime = ScanRuntime(identity, ScanPolicy(3600, 120, 500, 2), Mock())
+    now = [0.0]
+    supervisor = ScanSupervisor(
+        spawn=lambda candidate: launched, execute=runtime.execute, renew=runtime.renew,
+        heartbeat=lambda metrics: published, cancel=runtime.cancel, monotonic=lambda: now[0],
+    )
+    try:
+        supervisor.start(lease)
+        supervisor.tick()
+        supervisor.stop()
+        now[0] = 6
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            supervisor.tick()
+            if DirectoryWork.objects.get(pk=lease.work_id).state == "degraded":
+                break
+            time.sleep(.01)
+        state = RootIndexState.objects.get(root=scan_fixture.root)
+        assert state.status == "degraded"
+        assert state.active_run_id == lease.run_id
+        assert supervisor.states[lease.root_id] == ReaderState.UNREAPED
+        assert supervisor.has_unreaped_reader(lease.root_id)
+        with pytest.raises(RuntimeError, match="slot unavailable"):
+            supervisor.start(replace(lease, attempt=2))
+    finally:
+        reader.reaped.return_value = True
+        runtime.close()
+
+
+@override_settings(AEGIS_PROCESS_ROLE="indexer")
+@pytest.mark.parametrize("operation", ["record", "finalize"])
+@pytest.mark.parametrize("boundary", ["after_setup", "after_mutation", "commit_admitted"])
+def test_cancel_and_final_commit_admission_have_explicit_order(
+    scan_fixture: ScanFixture, entry_factory: Callable[..., CatalogEntry],
+    monkeypatch: pytest.MonkeyPatch, operation: str, boundary: str,
+) -> None:
+    from unittest.mock import Mock, patch
+
+    from aegis_apps.indexing import checkpoints
+    from aegis_apps.indexing.config import ScanPolicy
+    from aegis_apps.indexing.runner import ScanRuntime
+    from aegis_apps.operations.management.commands.run_role import WorkerIdentity
+    from django.db import connections
+
+    lease = scan_fixture.claim()
+    unseen = entry_factory(root=scan_fixture.root, raw=b"unseen")
+    if operation == "finalize":
+        assert scan_fixture.seal(lease)
+    name = "record_batch" if operation == "record" else "finalize_directory"
+    original = getattr(checkpoints, name)
+    entered, release = Event(), Event()
+
+    def wait_at_boundary() -> None:
+        entered.set()
+        assert release.wait(5), "test barrier not released"
+
+    def wrapped(*args: object) -> object:
+        actual_commit = connection.commit
+
+        def commit() -> None:
+            wait_at_boundary()
+            actual_commit()
+
+        def statement(execute: Callable[..., object], sql: str, params: object,
+                      many: bool, context: object) -> object:
+            result = execute(sql, params, many, context)
+            if ((boundary == "after_setup" and sql.startswith("SET CONSTRAINTS"))
+                    or (boundary == "after_mutation" and sql.startswith("SELECT public."))):
+                wait_at_boundary()
+            return result
+
+        if boundary == "commit_admitted":
+            with patch.object(connections["default"], "commit", side_effect=commit):
+                return original(*args)
+        with connection.execute_wrapper(statement):
+            return original(*args)
+
+    monkeypatch.setattr(checkpoints, name, wrapped)
+    identity = WorkerIdentity("indexer", lease.worker_id, "task4-test", "schema-test",
+                              lease.manifest_identity)
+    with scan_fixture.database.as_django_role("aegis_indexer"):
+        runtime = ScanRuntime(identity, ScanPolicy(3600, 120, 500, 2), Mock())
+
+    def control_probe() -> int:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+            return int(cursor.fetchone()[0])
+
+    try:
+        pending = runtime.execute(
+            lease, operation, scan_fixture.batch(b"late") if operation == "record" else 500,
+        )
+        assert entered.wait(5)
+        started = time.monotonic()
+        runtime.cancel(lease)
+        assert time.monotonic() - started < .2, "cancel blocked on transaction I/O"
+        assert runtime.controls.submit(control_probe).result(timeout=2) == 1
+        assert not pending.done(), "stop must wait for the in-flight outcome"
+        release.set()
+        if boundary == "commit_admitted":
+            pending.result(timeout=5)
+        else:
+            with pytest.raises(RuntimeError, match="cancelled"):
+                pending.result(timeout=5)
+        published = boundary == "commit_admitted"
+        assert CatalogEntry.objects.filter(root=scan_fixture.root, raw_name=b"late").exists() == (
+            published and operation == "record"
+        )
+        unseen.refresh_from_db()
+        assert unseen.source_state == ("missing" if published and operation == "finalize"
+                                       else "present")
+        with pytest.raises(RuntimeError, match="cancelled"):
+            runtime.execute(lease, operation, 500).result(timeout=5)
+    finally:
+        release.set()
+        runtime.close()

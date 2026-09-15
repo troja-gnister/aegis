@@ -198,7 +198,7 @@ settings.AEGIS_ENVIRONMENT = 'development'
 from django.db import connection
 from aegis_apps.indexing import runner
 from aegis_apps.indexing.models import DirectoryWork, RootIndexState
-from aegis_apps.indexing.processes import Coordination, CoordinationError
+from aegis_apps.indexing.processes import Coordination, CoordinationError, ReaderLaunchFailure
 from aegis_apps.operations.management.commands import run_role
 from aegis_apps.operations.models import WorkerHeartbeat
 children, errors, evidence, shared = [], [], {}, {}
@@ -213,8 +213,18 @@ if mode == 'database':
         return original_record(lease, batch)
     checkpoints.record_batch = blocked_record
 original_reader = runner.ProcessReader
+if mode == 'setup':
+    from aegis_apps.indexing import processes
+    class BrokenReceiver(threading.Thread):
+        def start(self):
+            raise RuntimeError('owned synthetic receiver exhaustion')
+    processes.Thread = BrokenReceiver
 def spawn(source, coordination, root):
-    child = original_reader(source, coordination, root)
+    try:
+        child = original_reader(source, coordination, root)
+    except ReaderLaunchFailure as error:
+        children.append(error.reader)
+        raise
     children.append(child)
     if str(root) == data['roots'][0]['id']:
         shared['large_child'] = child
@@ -289,7 +299,8 @@ def observe():
                 evidence['counts'] = [large.observed_entries, small.observed_entries]
                 run_role.request_shutdown()
                 return
-            if mode != 'healthy' and large is not None and large.status == 'degraded':
+            if (mode != 'healthy' and large is not None and large.status == 'degraded'
+                    and (mode != 'setup' or len(children) == 2)):
                 run_role.request_shutdown()
                 return
             time.sleep(.2)
@@ -320,8 +331,10 @@ finally:
 assert not errors, errors
 assert len(children) == 2 and all(child.reaped() for child in children), evidence
 for child in children:
-    child._receiver.join(timeout=1)
-    assert not child._receiver.is_alive(), 'abandoned result receiver leaked'
+    if child._receiver is not None:
+        if child._receiver.ident is not None:
+            child._receiver.join(timeout=1)
+        assert not child._receiver.is_alive(), 'abandoned result receiver leaked'
 replacement = Coordination()
 replacement.close()
 evidence['replacement_after_reap'] = True
@@ -457,7 +470,9 @@ def test_minute_plus_scan_keeps_lease_heartbeat_and_second_root_progress(
 
 
 @pytest.mark.django_db(transaction=True)
-@pytest.mark.parametrize("mode", ["sigterm", "kill", "pause", "database", "manifest", "schema"])
+@pytest.mark.parametrize("mode", [
+    "sigterm", "kill", "pause", "database", "manifest", "schema", "setup",
+])
 def test_actual_runtime_interruption_never_finalizes_missing(
     tmp_path: Path, role_database: RoleDatabase, indexer_image: str, mode: str,
 ) -> None:

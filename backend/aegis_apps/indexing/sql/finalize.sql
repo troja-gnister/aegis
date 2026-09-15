@@ -44,7 +44,8 @@ BEGIN
          (p_identity->>2)::numeric,(p_identity->>3)::numeric)) THEN
         UPDATE public.indexing_directorywork SET state='degraded',
             error_code=COALESCE(error_code,'identity_changed'), updated_at=database_now WHERE id=work.id;
-        UPDATE public.indexing_rootindexstate SET degraded_directories=degraded_directories+1,
+        UPDATE public.indexing_rootindexstate SET status='degraded',
+            degraded_directories=degraded_directories+1,
             updated_at=database_now WHERE root_id=root.id;
         RETURN false;
     END IF;
@@ -134,7 +135,8 @@ BEGIN
     END IF;
     UPDATE public.indexing_directorywork SET state='degraded', error_code=p_code,
         eof_identity=NULL, updated_at=database_now WHERE id=work.id;
-    UPDATE public.indexing_rootindexstate SET degraded_directories=degraded_directories+1,
+    UPDATE public.indexing_rootindexstate SET status='degraded',
+        degraded_directories=degraded_directories+1,
         updated_at=database_now WHERE root_id=root.id;
     RETURN true;
 END;

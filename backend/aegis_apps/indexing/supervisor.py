@@ -11,6 +11,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol
 from uuid import UUID
 
+from .processes import ReaderLaunchFailure
 from .protocol import (
     ReaderBatch,
     ReaderChannelState,
@@ -194,6 +195,13 @@ class ScanSupervisor:
         if slot.reader is None and not slot.launch_failed and slot.launch.done():
             try:
                 slot.reader = slot.launch.result()
+            except ReaderLaunchFailure as error:
+                slot.reader = error.reader
+                if slot.state in (ReaderState.STOPPING, ReaderState.UNREAPED):
+                    slot.reader.close_credits()
+                    slot.reader.terminate()
+                else:
+                    self._stop_slot(slot, "source_unavailable")
             except UnsupportedTraversal:
                 slot.launch_failed = True
                 self._stop_slot(slot, "unsupported_entry")

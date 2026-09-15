@@ -370,6 +370,52 @@ def test_failed_launch_settles_without_claiming_a_physical_reader(
     assert [name for name, _ in control.operations].count("fail") == 1
 
 
+@pytest.mark.parametrize("stopped_while_launching", [False, True])
+def test_partial_launch_failure_retains_unreapable_reader(
+    supervisor_fixture: SupervisorFixture, stopped_while_launching: bool,
+) -> None:
+    from aegis_apps.indexing.processes import ReaderLaunchFailure
+
+    control = supervisor_fixture
+    reader = FakeReader()
+    reader.reapable = False
+    failed: Future[ReaderHandle] = Future()
+    control.supervisor._spawn = lambda lease: failed
+    control.supervisor.start(control.lease)
+    if stopped_while_launching:
+        control.supervisor.stop()
+    failed.set_exception(ReaderLaunchFailure(reader))
+    control.tick()
+    assert reader.closed and reader.terminated
+    control.advance(6)
+    assert control.supervisor.states[control.lease.root_id] == ReaderState.UNREAPED
+    assert control.supervisor.has_unreaped_reader(control.lease.root_id)
+    with pytest.raises(RuntimeError, match="slot unavailable"):
+        control.supervisor.start(control.lease)
+    reader.reapable = True
+    control.tick()
+    control.tick()
+    assert control.supervisor.states == {}
+
+
+def test_stopping_waits_for_admitted_commit_without_late_credit(
+    supervisor_fixture: SupervisorFixture,
+) -> None:
+    control = supervisor_fixture
+    control.pending = Future()
+    reader = control.start()
+    reader.send(batch())
+    control.tick()
+    control.supervisor.stop()
+    control.advance(16)
+    assert control.supervisor.states[control.lease.root_id] == ReaderState.STOPPING
+    assert control.heartbeats and reader.acknowledged == []
+    control.pending.set_result(BatchResult(1, 1, 0))
+    control.tick()
+    assert control.supervisor.states == {}
+    assert reader.acknowledged == []
+
+
 def test_actual_sender_has_only_two_unacknowledged_pipe_batches() -> None:
     child = r'''
 import sys

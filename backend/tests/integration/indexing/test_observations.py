@@ -19,14 +19,18 @@ if TYPE_CHECKING:
 pytestmark = [pytest.mark.integration, pytest.mark.django_db(transaction=True)]
 
 
+@pytest.mark.parametrize("supervised", [False, True])
 def test_observation_replay_is_atomic_and_does_not_double_progress(
-    scan_fixture: ScanFixture,
+    scan_fixture: ScanFixture, supervised: bool,
 ) -> None:
+    from aegis_apps.indexing.checkpoints import CheckpointCancellation, checkpoint_cancellation
+
     lease = scan_fixture.claim()
     batch = scan_fixture.batch(b"photo.jpg")
-    first = scan_fixture.record(lease, batch)
+    with checkpoint_cancellation(CheckpointCancellation() if supervised else None):
+        first = scan_fixture.record(lease, batch)
+        replay = scan_fixture.record(lease, batch)
     assert (first.observed, first.inserted, first.changed) == (1, 1, 0)
-    replay = scan_fixture.record(lease, batch)
     assert (replay.observed, replay.inserted, replay.changed) == (0, 0, 0)
     assert CatalogEntry.objects.filter(root=scan_fixture.root, raw_name=b"photo.jpg").count() == 1
     assert DirectoryWork.objects.get(pk=lease.work_id).observed_count == 1

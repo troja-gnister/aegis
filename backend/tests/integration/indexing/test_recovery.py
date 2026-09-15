@@ -200,11 +200,15 @@ def _checkpoint_call(
 
 @pytest.mark.parametrize("operation", ["record", "seal", "finalize", "fail"])
 @pytest.mark.parametrize("outer", ["atomic", "autocommit_disabled", "raw_begin"])
+@pytest.mark.parametrize("supervised", [False, True])
 def test_checkpoint_wrappers_refuse_caller_owned_transactions(
-    scan_fixture: ScanFixture, operation: str, outer: str,
+    scan_fixture: ScanFixture, operation: str, outer: str, supervised: bool,
 ) -> None:
+    from aegis_apps.indexing.checkpoints import CheckpointCancellation, checkpoint_cancellation
+
     lease = scan_fixture.claim()
-    with scan_fixture.database.as_django_role("aegis_indexer"):
+    with (scan_fixture.database.as_django_role("aegis_indexer"),
+          checkpoint_cancellation(CheckpointCancellation() if supervised else None)):
         if outer == "atomic":
             with transaction.atomic(), pytest.raises(RuntimeError, match="top-level"):
                 _checkpoint_call(scan_fixture, lease, operation)
@@ -290,10 +294,15 @@ def test_checkpoint_wrapper_owns_transaction_and_returns_after_visibility(
 
 
 @pytest.mark.parametrize("operation", ["record", "seal", "seal_replay", "finalize", "fail"])
+@pytest.mark.parametrize("supervised", [False, True])
 def test_wrapper_expiry_rejects_commit_including_terminal_transitions(
     scan_fixture: ScanFixture, entry_factory: Callable[..., CatalogEntry], operation: str,
+    supervised: bool,
 ) -> None:
-    _assert_wrapper_expiry_rollback(scan_fixture, entry_factory, operation)
+    from aegis_apps.indexing.checkpoints import CheckpointCancellation, checkpoint_cancellation
+
+    with checkpoint_cancellation(CheckpointCancellation() if supervised else None):
+        _assert_wrapper_expiry_rollback(scan_fixture, entry_factory, operation)
 
 
 def _assert_wrapper_expiry_rollback(

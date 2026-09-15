@@ -7,7 +7,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from copy import deepcopy
-from threading import BoundedSemaphore, Event, Lock
+from threading import BoundedSemaphore, Lock
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -15,6 +15,7 @@ from django.db import connection
 
 from aegis_apps.common.database_privileges import require_runtime_database_login
 
+from .checkpoints import CheckpointCancellation, checkpoint_cancellation
 from .config import ScanPolicy
 from .database import ScanLease, claim_directory, renew_directory
 from .processes import Coordination, ProcessReader, ReaderSource
@@ -123,25 +124,25 @@ class ScanRuntime:
         # These persistent launcher threads must outlive their PDEATHSIG children.
         self.launches = DatabaseLane(policy.readers)
         self._cancel_pool = ThreadPoolExecutor(max_workers=policy.readers)
-        self._gates: dict[UUID, Event] = {}
+        self._gates: dict[UUID, CheckpointCancellation] = {}
         self._connections: dict[UUID, Any] = {}
         self._mutex = Lock()
         self._service: dict[UUID, int] = {}
         self._turn = 0
 
-    def _gate(self, lease: ScanLease) -> Event:
+    def _gate(self, lease: ScanLease) -> CheckpointCancellation:
         with self._mutex:
-            return self._gates.setdefault(lease.work_id, Event())
+            return self._gates.setdefault(lease.work_id, CheckpointCancellation())
 
     def forget(self, lease: ScanLease) -> None:
         with self._mutex:
             self._gates.pop(lease.work_id, None)
 
     def cancel(self, lease: ScanLease) -> None:
-        self._gate(lease).set()
+        interrupt = self._gate(lease).cancel()
         with self._mutex:
             active = self._connections.get(lease.work_id)
-        if active is not None:
+        if active is not None and interrupt:
             self._cancel_pool.submit(active.cancel_safe, timeout=1)
 
     def execute(self, lease: ScanLease, operation: str, payload: object) -> Future[Any]:
@@ -155,15 +156,16 @@ class ScanRuntime:
                     raise RuntimeError("scan cancelled")
                 self._connections[lease.work_id] = connection.connection
             try:
-                if operation == "record" and isinstance(payload, ReaderBatch):
-                    return record_batch(lease, payload)
-                if operation == "seal" and isinstance(payload, ReaderComplete):
-                    return seal_directory(lease, payload)
-                if operation == "finalize" and payload == 500:
-                    return finalize_directory(lease, 500)
-                if operation == "fail" and isinstance(payload, str):
-                    return fail_directory(lease, payload)
-                raise ValueError("invalid scan mutation")
+                with checkpoint_cancellation(None if operation == "fail" else gate):
+                    if operation == "record" and isinstance(payload, ReaderBatch):
+                        return record_batch(lease, payload)
+                    if operation == "seal" and isinstance(payload, ReaderComplete):
+                        return seal_directory(lease, payload)
+                    if operation == "finalize" and payload == 500:
+                        return finalize_directory(lease, 500)
+                    if operation == "fail" and isinstance(payload, str):
+                        return fail_directory(lease, payload)
+                    raise ValueError("invalid scan mutation")
             finally:
                 with self._mutex:
                     self._connections.pop(lease.work_id, None)
