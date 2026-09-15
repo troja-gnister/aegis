@@ -38,7 +38,7 @@
 
 ## Status and task ledger
 
-Planning baseline: `842ba2a` on `main`, with unchanged application code from the verified Phase 1 foundation; execution begins from the committed plan at `6169402`. This plan defines **18 tasks: 8 complete, 10 remaining**. Tasks 1–8 passed verification and independent review, including Task 7's lifecycle and Task 8's input-bound corrections. Task 9's permission-bound indexed queries and bounded details are paused, incomplete, for local testing; the runtime coordination contract remains recorded below. Task 6 retains the September 15 approved commit-fence boundary below. Task 4's local full-deployment limitation remains documented below, not a green gate. The ledger is authoritative; checkboxes below record the execution recipe and subsequent evidence, not a second task count.
+Planning baseline: `842ba2a` on `main`, with unchanged application code from the verified Phase 1 foundation; execution begins from the committed plan at `6169402`. This plan defines **18 tasks: 8 complete, 10 remaining**. Tasks 1–8 passed verification and independent review, including Task 7's lifecycle and Task 8's input-bound corrections. Task 9's permission-bound indexed queries and bounded details are in progress following the local-testing pause; the runtime coordination contract remains recorded below. Task 6 retains the September 15 approved commit-fence boundary below. Task 4's local full-deployment limitation remains documented below, not a green gate. The ledger is authoritative; checkboxes below record the execution recipe and subsequent evidence, not a second task count.
 
 | Task | Independently testable deliverable | Depends on | Status |
 | --- | --- | --- | --- |
@@ -50,7 +50,7 @@ Planning baseline: `842ba2a` on `main`, with unchanged application code from the
 | 6 | Atomic observations, checkpoint finalization, and stale-work rejection | 4, 5 | Complete (`5654fff`) |
 | 7 | Supervised scan execution and independent worker liveness | 6 | Complete (`6022c97`) |
 | 8 | Typed filters and signed cursor contracts | 1, 2 | Complete (`78b05f1`) |
-| 9 | Permission-bound indexed keyset queries and details | 3, 8 | Paused; implementation incomplete |
+| 9 | Permission-bound indexed keyset queries and details | 3, 8 | In progress |
 | 10 | List/details/status/rescan HTTP endpoints | 4, 9 | Planned |
 | 11 | Validated browser API and bounded private query window | 10 | Planned |
 | 12 | Virtualized mobile file navigation | 11 | Planned |
@@ -241,6 +241,8 @@ export type BrowseInput = {
 ```
 
 Whole-number sizes, nanosecond timestamps, counters, and versions are decimal strings; the frontend uses `BigInt` for comparisons and never coerces them into an unsafe `number`. Root-shell epoch encoding is unchanged; new cursor contexts use server-side integers. Details return at most 64 nearest ancestor labels with an explicit truncation flag and a usable parent link, never an unbounded complete path.
+
+Availability filters select persisted source observations (the UI label is **Last indexed state**); `sourceState` is a conservative returned availability projection. Invalid physical revision ancestry or logical navigation ancestry changes otherwise-present summaries to `inaccessible`, with `indexStatus.state=unavailable` for an affected requested directory. Thus a last-indexed `present` match can display as inaccessible. Explicit `missing` selects observed tombstones only. Display and ancestor labels use source-derived safe names matching name-key ordering and literal prefix matching; stored logical-name overrides remain preserved for later coherent organization support.
 
 ### Verification rhythm
 
@@ -1153,7 +1155,7 @@ export function statusPollInterval(state: IndexStatus["state"], visible: boolean
 }
 ```
 
-Use a modal native dialog on mobile and the same semantics on larger screens: grouped kind/type/availability choices, prefix text, decimal size inputs, date range with an explicit displayed local timezone, Apply/Cancel and clear-all. Use static common extension options plus a validated literal extension input; no global facet query or count is needed. Maintain at most 32 selections per field and the shared request bounds. Date inputs map local day boundaries to offset-qualified instants without pretending modification time is capture time; reject invalid local times rather than silently shifting them.
+Use a modal native dialog on mobile and the same semantics on larger screens: grouped kind/type/availability choices, prefix text, decimal size inputs, date range with an explicit displayed local timezone, Apply/Cancel and clear-all. Label availability **Last indexed state**, explaining that an ancestor change can make a matching entry currently unavailable; do not imply this filter selects effective current availability. Use static common extension options plus a validated literal extension input; no global facet query or count is needed. Maintain at most 32 selections per field and the shared request bounds. Date inputs map local day boundaries to offset-qualified instants without pretending modification time is capture time; reject invalid local times rather than silently shifting them.
 
 Opening creates a fresh bounded draft from applied state. Apply validates once, closes the panel, resets the cursor and loads page one; Cancel/Escape discard changes. Chips are removable native buttons with full accessible labels. Return focus to Filters after closing. Use a live region for loading/results changes without announcing an exact count or moving focus on every row load.
 

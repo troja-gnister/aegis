@@ -37,6 +37,8 @@ The current worker only executes `foundation.probe` synchronously. This package 
 
 Source ancestry and logical ancestry are distinct fields. In this package their default projections match, but filesystem resolution uses only source-parent/raw-name fields. Future logical renames and moves set explicit overrides; scanner updates must never overwrite such overrides or infer a filesystem rename from them. Human metadata and derived assets attach through stable opaque IDs and explicit revisions, not display-name strings.
 
+This package displays source-derived safe names, including ancestor labels, consistently with its source-derived name ordering and literal prefix matching. Stored logical-name overrides are preserved but not displayed until managed organization supplies coherent display, ordering, and filtering together.
+
 Database constraints enforce same-root parent relationships, one root anchor, unique exact source location within a directory, valid kinds/states, and nonnegative versions/counters. A changed source at an existing location increments the source revision and catalog version. Normalized names are sort/search keys, never uniqueness or source-identity keys. Case-adjacent and normalization-equivalent names must remain distinct when the source filesystem permits them.
 
 The first package does not guess cross-directory rename identity from an inode alone: a disappearance/reappearance can produce a missing location and a new location. Later focused reconciliation may correlate a move only with unambiguous evidence. Hard links are separate locations, and there is no speculative content hashing during the initial metadata scan.
@@ -120,6 +122,8 @@ Use narrow list projections and compound indexes beginning with root/directory/v
 ## 8. Basic filter contract
 
 The first package supports root/current directory, entry kind, extension-derived type, file size range, modified-date range, source availability, and a literal filename prefix within the current directory. Default results omit missing tombstones; an explicit availability filter can inspect indexed missing/inaccessible locations without claiming bytes are available.
+
+Availability filtering selects the persisted source observation and is labeled **Last indexed state**. Returned summaries conservatively show an otherwise-present entry as inaccessible when its physical revision ancestry or logical navigation ancestry is invalid; an affected directory reports unavailable status while retaining metadata. An entry can therefore match last-indexed `present` while currently displaying `inaccessible`. An explicit `missing` filter selects observed tombstones, not descendants whose individual missing state has not been established. Do not scan or post-filter an entire folder to derive effective-availability membership; such filtering requires separate query design and performance evidence.
 
 Accept a versioned typed schema with allowlisted fields. Multi-select values within a field are OR; different fields combine with AND. The unknown extension-derived type uses the reserved token `__unknown__`, distinct from every lowercase alphanumeric extension, including `.unknown`. Size bounds are inclusive; date ranges use an inclusive lower and exclusive upper bound with an explicit offset/time zone. Missing values do not match a numeric/date range; finding missing values requires the corresponding explicit state. Filename text is literal, not a regex, wildcard program, or arbitrary field expression.
 
