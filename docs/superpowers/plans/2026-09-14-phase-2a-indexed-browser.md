@@ -51,7 +51,7 @@ Planning baseline: `842ba2a` on `main`, with unchanged application code from the
 | 7 | Supervised scan execution and independent worker liveness | 6 | Complete (`6022c97`) |
 | 8 | Typed filters and signed cursor contracts | 1, 2 | Complete (`78b05f1`) |
 | 9 | Permission-bound indexed keyset queries and details | 3, 8 | Complete (`6c8b1f3`) |
-| 10 | List/details/status/rescan HTTP endpoints | 4, 9 | In progress |
+| 10 | List/details/status/rescan HTTP endpoints | 4, 9 | In review (`bccbca0`) |
 | 11 | Validated browser API and bounded private query window | 10 | Planned |
 | 12 | Virtualized mobile file navigation | 11 | Planned |
 | 13 | Filter panel, details, and scan-state interactions | 12 | Planned |
@@ -70,6 +70,8 @@ At exact checkpoint `557cf717811d545f9860938a2271387232ceed09`, [CI run 35016614
 Read-only diagnosis reproduced a session-query scheduling race under controlled ordering: a pending observer effect uses stale open-session options after logout clears the cache, starts another session request, and caches its response. The unmounted login continuation itself is correctly rejected. No reopening of private screens was demonstrated. The original unmodified CI scheduling was not reproduced locally, so attribution to this exact interleaving remains an inference. A separate test-teardown defect starts the mocked logout request after its handler has been removed.
 
 Repair, deterministic regression coverage, independent review, and fresh CI remain required before advancing the UI. No passing rerun has been substituted for diagnosis, and no frontend code changed in Task 9. Its accepted query-layer tests remain scoped evidence, not an all-green checkpoint. Development has not updated or accessed the user-owned preview or its originals.
+
+All four jobs subsequently passed at documentation-only checkpoint `afbac672dd8792fca9352542609a7f6df0ced8bb` in [run 35114924945](https://github.com/troja-gnister/aegis/actions/runs/35114924945). That checkpoint contains no frontend repair or Task 10 implementation; its passing run does not close the reproduced cache-race defect.
 
 ### Completed-task evidence
 
@@ -983,7 +985,7 @@ Correction `6c8b1f3` passed the complete **96-test query/authorization suite**, 
 
 **Interfaces:** Produces `DirectoryListView`, `EntryDetailView`, `IndexStatusView`, `RootScanView` and the four endpoints in the approved spec. `index_status(user: User, root_id: UUID) -> dict[str, object]` produces the wire `IndexStatus` under `BROWSE`; `ROOT_ADMIN` alone authorizes only the rescan request, not metadata reads.
 
-- [ ] **Step 1: Write failing HTTP tests.**
+- [x] **Step 1: Write failing HTTP tests.**
 
 ```python
 def test_browse_is_private_and_never_enumerates_source(api_catalog, monkeypatch):
@@ -1001,9 +1003,9 @@ def test_browse_is_private_and_never_enumerates_source(api_catalog, monkeypatch)
 
 Define `api_catalog` in `backend/tests/conftest.py` with a protected temporary manifest, synthetic direct/group fixtures, and `Client(enforce_csrf_checks=True)` logging in through the existing authentication endpoint. Do not disable the real session policy. Test anonymous 401, indistinguishable 404s, stale/malformed cursor 409, bad filters/limits/duplicate parameters 400, CSRF failure 403, wrong method 405, schema/database outage 503, generic 500, and `private,no-store` for every framework/error path. Reject delete/move/rename actions, absolute-path inputs and content/delivery parameters.
 
-- [ ] **Step 2: Verify red.** Run `uv run --locked python scripts/verify.py backend --test-target backend/tests/integration/catalog/test_api.py --test-target backend/tests/integration/indexing/test_status_api.py`.
+- [x] **Step 2: Verify red.** Run `uv run --locked python scripts/verify.py backend --test-target backend/tests/integration/catalog/test_api.py --test-target backend/tests/integration/indexing/test_status_api.py`.
 
-- [ ] **Step 3: Implement thin views and no-store coverage.**
+- [x] **Step 3: Implement thin views and no-store coverage.**
 
 ```python
 # aegis/urls.py additions; use Django's UUID converters.
@@ -1021,9 +1023,17 @@ Extract the existing middleware revocation sequence into `identity.session_polic
 
 Status reads stored root/run counters and freshness only, never enumerates roots or computes global counts. Stale/mismatched worker/binding state produces unavailable/degraded, not false ready. Do not fake a percentage or implement capacity metrics as zero: storage capacity and byte-delivery progress remain later package work.
 
-- [ ] **Step 4: Verify green.** Run focused API/status tests, all existing auth/root APIs, role privileges, Ruff/mypy and migration checks. Assert successful bodies stay at most 1 MiB at the maximum page/name bounds.
+- [x] **Step 4: Verify green.** Run focused API/status tests, all existing auth/root APIs, role privileges, Ruff/mypy and migration checks. Assert successful bodies stay at most 1 MiB at the maximum page/name bounds.
 
 - [ ] **Step 5: Review and commit.** Record HTTP status/cache/CSRF/permission evidence; commit `feat: expose private catalog and scan status APIs`; push `origin main`.
+
+### Task 10 implementation verification
+
+Initial implementation `bccbca0` passed **52 focused API/status tests, 223 covering tests, and 1,328 full-backend tests**. Full Ruff, mypy (221 sources), Django checks, migration drift, and whitespace checks passed. The covering run includes existing authentication/session, root/operation, query, rescan, and database-privilege cases. Independent review remains required; Task 10 is not yet counted complete.
+
+The ordinary authenticated folder request measured **13 total SQL statements**: one session-store read, one Django principal read, seven catalog/authorization data statements, and four transaction/timeout statements. The session read is separate from the eight principal/catalog data statements; it is included in the 16-statement full-request budget. Actual web-role HTTP fixtures exercise session login, authorization, private no-store errors, CSRF, scan idempotency/rate limits, exact decimal values, maximum-page response size, and post-middleware revocation with actual session removal and one audit event. The status endpoint reads stored counters and compatible worker/binding state; no source enumeration or content delivery is introduced.
+
+An initial fixture exceeded a signed counter bound; correcting it produced the intended 45-test failing transport baseline. Later test corrections supplied valid CSRF before wrong-method checks and respected the raw-name bound. An earlier covering run reported **220 passed, three failed** alongside adjacent request timestamps jumping from `2026-09-15T20:29:20.044Z` to `2026-09-15T21:26:52.154Z`. That discontinuity is observed; its explanation as a common cause of expired heartbeat/throttle windows is an inference, not a diagnosed host mechanism. Three focused checks, the unchanged 223-test covering run, and the final full suite subsequently passed without weakened assertions/timeouts. Every owned disposable database was removed; preview/original/operator resources remained untouched. Physical 1M/50K acceptance remains later work.
 
 ## Task 11: Validated browser API and bounded private pages
 
