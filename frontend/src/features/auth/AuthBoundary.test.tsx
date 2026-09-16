@@ -1,13 +1,13 @@
-import {QueryClient, QueryClientProvider} from "@tanstack/react-query";
+import {QueryClient, QueryClientProvider, QueryObserver} from "@tanstack/react-query";
 import {act, fireEvent, render, screen, waitFor} from "@testing-library/react";
 import {http, HttpResponse} from "msw";
 import {MemoryRouter, Route, Routes, useLocation, useNavigate} from "react-router";
-import {afterEach, describe, expect, it} from "vitest";
+import {afterEach, describe, expect, it, vi} from "vitest";
 import {server} from "../../test/server";
 import {AuthBoundary} from "./AuthBoundary";
 import {LogoutButton} from "./LogoutButton";
 import {purgePrivateBrowserState} from "./cache";
-import {SESSION_QUERY_KEY} from "./session";
+import {beginSignOut, completeSignOut, SESSION_QUERY_KEY, useSessionAccess} from "./session";
 
 const SESSION = {
   user: {id: "1e999c0b-8138-4dd5-80ea-e651f689eaa1", username: "alice"},
@@ -20,6 +20,7 @@ function LocationProbe() {
   const navigate = useNavigate();
   return <>
     <output aria-label="Current route">{useLocation().pathname}</output>
+    <output aria-label="Session access">{useSessionAccess()}</output>
     <button onClick={() => navigate(-1)}>Back</button>
   </>;
 }
@@ -67,6 +68,56 @@ afterEach(async () => {
 });
 
 describe("AuthBoundary", () => {
+  it.each(["pending", "confirmed", "unconfirmed"] as const)(
+    "does not refetch or restore the session from retained open options when logout is %s",
+    async (logoutState) => {
+      let sessionCalls = 0;
+      server.use(http.get("/api/v1/auth/session", () => {
+        sessionCalls += 1;
+        return HttpResponse.json(SESSION);
+      }));
+      // Observe the real hook's options without replacing the observer behavior.
+      const setOptions = vi.spyOn(QueryObserver.prototype, "setOptions");
+      try {
+        const client = renderBoundary();
+        await screen.findByText("Private family archive");
+        const observer = setOptions.mock.contexts.at(-1);
+        const retainedOptions = setOptions.mock.calls.at(-1)?.[0];
+        if (!(observer instanceof QueryObserver) || !retainedOptions) {
+          throw new Error("Missing AuthBoundary observer");
+        }
+        expect(sessionCalls).toBe(1);
+        expect(client.getQueryData(SESSION_QUERY_KEY)).toEqual(SESSION);
+        client.setQueryData(["private", "root"], "secret");
+
+        await act(async () => {
+          const generation = beginSignOut();
+          const cleanup = purgePrivateBrowserState(client);
+          expect(client.getQueryData(SESSION_QUERY_KEY)).toBeUndefined();
+          expect(client.getQueryData(["private", "root"])).toBeUndefined();
+          if (logoutState !== "pending") {
+            completeSignOut(generation, logoutState === "confirmed");
+          }
+          // Replay the pending useQuery passive effect before the closed-access
+          // render removes its observer. These are production AuthBoundary options.
+          observer.setOptions(retainedOptions);
+          // If a regression starts a request, settle its actual query promise
+          // before checking the cache or letting strict MSW teardown run.
+          await observer.getCurrentQuery().promise;
+          await cleanup;
+        });
+
+        expect.soft(sessionCalls).toBe(1);
+        expect.soft(client.getQueryData(SESSION_QUERY_KEY)).toBeUndefined();
+        expect(client.getQueryData(["private", "root"])).toBeUndefined();
+        expect(screen.queryByText("Private family archive")).not.toBeInTheDocument();
+        expect(screen.getByRole("heading", {name: "Sign in"})).toBeVisible();
+      } finally {
+        setOptions.mockRestore();
+      }
+    },
+  );
+
   it("never trusts a cached session while mount revalidation is still pending", async () => {
     let release = () => {};
     let requested = false;
@@ -105,14 +156,18 @@ describe("AuthBoundary", () => {
     await waitFor(() => expect(client.getQueryData(["private", "root"])).toBeUndefined());
     expect(await screen.findByRole("heading", {name: "Sign in"})).toBeVisible();
     expect(screen.queryByText("Private family archive")).not.toBeInTheDocument();
+    await waitFor(() => expect(revoked).toBe(true));
+    await waitFor(() => expect(screen.getByLabelText("Session access")).toHaveTextContent("unconfirmed"));
   });
 
   it("closes private content and clears caches before a delayed logout response", async () => {
     let release = () => {};
+    let requested = false;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     server.use(
       http.get("/api/v1/auth/session", () => HttpResponse.json(SESSION)),
       http.post("/api/v1/auth/logout", async () => {
+        requested = true;
         await gate;
         return HttpResponse.error();
       }),
@@ -130,8 +185,11 @@ describe("AuthBoundary", () => {
       fireEvent.click(screen.getByRole("button", {name: "Back"}));
       expect(screen.queryByText("Private family archive")).not.toBeInTheDocument();
       expect(screen.getByRole("heading", {name: "Sign in"})).toBeVisible();
+      await waitFor(() => expect(requested).toBe(true));
+      expect(screen.getByLabelText("Session access")).toHaveTextContent("signing_out");
     } finally {
       release();
+      await waitFor(() => expect(screen.getByLabelText("Session access")).toHaveTextContent("unconfirmed"));
     }
   });
 
@@ -228,6 +286,7 @@ describe("AuthBoundary", () => {
     expect(await screen.findByRole("heading", {name: "Sign in"})).toBeVisible();
     expect(screen.getByLabelText("Current route")).toHaveTextContent("/login");
     expect(queryClient.getQueryData(["private", "root"])).toBeUndefined();
-    expect(logoutCsrf).toBe("csrf-test-token");
+    await waitFor(() => expect(logoutCsrf).toBe("csrf-test-token"));
+    await waitFor(() => expect(screen.getByLabelText("Session access")).toHaveTextContent("closed"));
   });
 });

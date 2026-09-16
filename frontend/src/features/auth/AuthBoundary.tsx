@@ -7,7 +7,7 @@ import {
 import {Navigate} from "react-router";
 import {fetchSession} from "./api";
 import {activateCacheNamespace, purgePrivateBrowserState} from "./cache";
-import {AuthSessionContext, SESSION_QUERY_KEY, useSessionAccess} from "./session";
+import {AuthSessionContext, isSessionAccessOpen, SESSION_QUERY_KEY, useSessionAccess} from "./session";
 
 function PrivateContentSkeleton() {
   return (
@@ -26,7 +26,8 @@ export function AuthBoundary({children}: PropsWithChildren) {
     retry: false,
     staleTime: 0,
     refetchOnMount: "always",
-    enabled: sessionAccess === "open",
+    // Pending observer effects must consult current authority after a logout purge.
+    enabled: isSessionAccessOpen,
   });
   const [readyNamespace, setReadyNamespace] = useState<string | null>(null);
   const [anonymous, setAnonymous] = useState(false);

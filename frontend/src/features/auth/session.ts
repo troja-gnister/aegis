@@ -8,6 +8,10 @@ let sessionAccess: SessionAccess = "open";
 let accessGeneration = 0;
 const accessListeners = new Set<() => void>();
 
+export function isSessionAccessOpen(): boolean {
+  return sessionAccess === "open";
+}
+
 function setAccess(value: SessionAccess) {
   sessionAccess = value;
   for (const listener of accessListeners) listener();
