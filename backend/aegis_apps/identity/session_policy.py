@@ -79,6 +79,20 @@ def cache_namespace(*, session: SessionBase, user: User) -> str:
     return salted_hmac("aegis.auth.cache-namespace", value).hexdigest()
 
 
+def revoke_session(request: HttpRequest) -> None:
+    """Flush one invalid browser session and record its opaque revocation."""
+    request.session.flush()
+    request.user = AnonymousUser()
+    request_id = getattr(request, "request_id", "")
+    record_event(
+        event_type="auth.session.revoked",
+        outcome="denied",
+        actor=None,
+        request_id=request_id,
+        metadata={"request_id": request_id},
+    )
+
+
 class SessionPolicyMiddleware:
     def __init__(self, get_response: Callable[[HttpRequest], HttpResponse]) -> None:
         self.get_response = get_response
@@ -93,16 +107,7 @@ class SessionPolicyMiddleware:
                 now=now,
             )
             if not current:
-                request.session.flush()
-                request.user = AnonymousUser()
-                request_id = getattr(request, "request_id", "")
-                record_event(
-                    event_type="auth.session.revoked",
-                    outcome="denied",
-                    actor=None,
-                    request_id=request_id,
-                    metadata={"request_id": request_id},
-                )
+                revoke_session(request)
             elif isinstance(user, User):
                 last_seen_at = _aware_datetime(request.session.get(LAST_SEEN_AT))
                 if (
@@ -111,13 +116,5 @@ class SessionPolicyMiddleware:
                 ):
                     request.session[LAST_SEEN_AT] = now.astimezone(UTC).isoformat()
         elif SESSION_KEY in request.session:
-            request.session.flush()
-            request_id = getattr(request, "request_id", "")
-            record_event(
-                event_type="auth.session.revoked",
-                outcome="denied",
-                actor=None,
-                request_id=request_id,
-                metadata={"request_id": request_id},
-            )
+            revoke_session(request)
         return self.get_response(request)

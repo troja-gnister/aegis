@@ -2,6 +2,7 @@ import hashlib
 import json
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from aegis_apps.indexing.checkpoints import BatchResult, FinalizeResult
 from aegis_apps.indexing.database import ScanLease
 from aegis_apps.indexing.protocol import ReaderBatch, ReaderComplete
 from aegis_apps.roots.models import Root
+from django.test import Client
 
 from tests.support.database_roles import RoleDatabase
 
@@ -255,3 +257,101 @@ def browse_fixture(
     user = User.objects.create_user(username=f"browse-{uuid.uuid4().hex}")
     RootGrant.objects.create(root=catalog_root, user=user, permissions=1)
     return BrowseFixture(catalog_root, user, entry_factory)
+
+
+@dataclass(slots=True)
+class ApiCatalog:
+    root: Root
+    user: User
+    group_user: User
+    admin_user: User
+    client: Client
+    group_client: Client
+    admin_client: Client
+    database: RoleDatabase
+    anchor: CatalogEntry
+    file: CatalogEntry
+
+    def get(self, path: str, **kwargs: Any) -> Any:
+        with self.database.as_django_role("aegis_web"):
+            return self.client.get(path, **kwargs)
+
+    def post(self, path: str, data: object = None, **kwargs: Any) -> Any:
+        with self.database.as_django_role("aegis_web"):
+            return self.client.post(path, data=data, **kwargs)
+
+
+@pytest.fixture
+def api_catalog(
+    browse_fixture: BrowseFixture,
+    role_database: RoleDatabase,
+) -> ApiCatalog:
+    """Protected synthetic catalog with real session login and direct/group grants."""
+    from aegis_apps.indexing.models import RootIndexState
+    from aegis_apps.roots.models import RootGrant
+    from aegis_apps.roots.permissions import Permission
+    from django.contrib.auth.models import Group
+    from django.utils import timezone
+
+    password = "task10-real-login-password"
+    browse_fixture.user.set_password(password)
+    browse_fixture.user.save(update_fields=("password",))
+    direct_grant = RootGrant.objects.get(root=browse_fixture.root, user=browse_fixture.user)
+    direct_grant.permissions = int(Permission.BROWSE | Permission.ROOT_ADMIN)
+    direct_grant.save(update_fields=("permissions",))
+    group_user = User.objects.create_user(
+        username=f"api-group-{uuid.uuid4().hex}", password=password,
+    )
+    group = Group.objects.create(name=f"api-group-{uuid.uuid4().hex}")
+    group_user.groups.add(group)
+    group_user.refresh_from_db()
+    RootGrant.objects.create(root=browse_fixture.root, group=group, permissions=Permission.BROWSE)
+    admin_user = User.objects.create_user(
+        username=f"api-admin-{uuid.uuid4().hex}", password=password,
+    )
+    RootGrant.objects.create(
+        root=browse_fixture.root,
+        user=admin_user,
+        permissions=Permission.ROOT_ADMIN,
+    )
+    browse_fixture.user.refresh_from_db()
+    file = browse_fixture.entry(b"safe-file.unknown", size=2**63 + 17, mtime_ns=2**62 + 9)
+    RootIndexState.objects.create(
+        root=browse_fixture.root,
+        binding_epoch=1,
+        policy_epoch=1,
+        next_generation=8,
+        due_at=timezone.now(),
+        status="ready",
+        observed_entries=2**60 + 3,
+        completed_directories=2**60 + 4,
+        degraded_directories=0,
+        last_completed_at=timezone.now(),
+    )
+
+    def login(user: User) -> Client:
+        client = Client(enforce_csrf_checks=True)
+        with role_database.as_django_role("aegis_web"):
+            csrf = client.get("/api/v1/auth/csrf")
+            assert csrf.status_code == 200
+            response = client.post(
+                "/api/v1/auth/login",
+                {"username": user.username, "password": password},
+                content_type="application/json",
+                headers={"X-CSRFToken": csrf.json()["csrfToken"]},
+            )
+        assert response.status_code == 200
+        return client
+
+    return ApiCatalog(
+        root=browse_fixture.root,
+        user=browse_fixture.user,
+        group_user=group_user,
+        admin_user=admin_user,
+        client=login(browse_fixture.user),
+        group_client=login(group_user),
+        admin_client=login(admin_user),
+        database=role_database,
+        anchor=browse_fixture.anchor,
+        file=file,
+    )
