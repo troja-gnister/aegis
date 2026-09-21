@@ -82,7 +82,7 @@ async function createBrowseQueryFixture() {
   clients.add(queryClient);
   await activateCacheNamespace(queryClient, NAMESPACE);
   let foreign = false;
-  let duplicateFromPage: number | null = null;
+  const duplicateSources = new Map<number, number>();
   let cursorGeneration = 0;
   server.use(http.get(`/api/v1/roots/${ROOT_ID}/entries`, ({request}) => {
     const cursor = new URL(request.url).searchParams.get("cursor");
@@ -92,7 +92,8 @@ async function createBrowseQueryFixture() {
       foreign ? FOREIGN_ROOT_ID : ROOT_ID,
       cursorGeneration,
     );
-    if (duplicateFromPage !== null) page.entries[0]!.id = entryId(duplicateFromPage, 0);
+    const duplicateSource = duplicateSources.get(pageNumber);
+    if (duplicateSource !== undefined) page.entries[0]!.id = entryId(duplicateSource, 0);
     return HttpResponse.json(page);
   }));
   const observer = new InfiniteQueryObserver(queryClient, directoryQueryOptions(input));
@@ -103,9 +104,12 @@ async function createBrowseQueryFixture() {
     async fetchPrevious() { return observer.fetchPreviousPage(); },
     async refetch() { return observer.refetch(); },
     pages: () => observer.getCurrentResult().data?.pages ?? [],
+    pageParams: () => observer.getCurrentResult().data?.pageParams ?? [],
     entryIds: () => (observer.getCurrentResult().data?.pages ?? []).flatMap((page) => page.entries.map((entry) => entry.id)),
     respondWithForeignRoot() { foreign = true; },
-    respondWithDuplicateFrom(pageNumber: number | null) { duplicateFromPage = pageNumber; },
+    overlapPage(pageNumber: number, sourcePage: number) {
+      duplicateSources.set(pageNumber, sourcePage);
+    },
     renewCursors() { cursorGeneration += 1; },
     dispose() { unsubscribe(); },
   };
@@ -131,30 +135,65 @@ describe("directoryQueryOptions", () => {
     }
   });
 
-  it("fetches previous pages and rejects duplicates inside the retained window", async () => {
+  it("deduplicates cross-page overlap when appending and preserves page metadata", async () => {
     const setup = await createBrowseQueryFixture();
     try {
-      for (let page = 1; page < 7; page += 1) await setup.fetchNext();
-      const newestFirstId = setup.pages()[0]!.entries[0]!.id;
-      await setup.fetchPrevious();
-      expect(setup.pages()[0]!.entries[0]!.id).not.toBe(newestFirstId);
-      setup.respondWithDuplicateFrom(5);
+      await setup.fetchNext();
+      setup.overlapPage(2, 0);
       const result = await setup.fetchNext();
-      expect(result.error).toMatchObject({status: 502});
+
+      expect(result.error).toBeNull();
+      expect(setup.pages()).toHaveLength(3);
+      expect(setup.entryIds()).toHaveLength(299);
+      expect(new Set(setup.entryIds()).size).toBe(299);
+      expect(setup.pageParams()).toEqual([null, "cursor:0:1", "cursor:0:2"]);
+      expect(setup.pages()[2]).toMatchObject({
+        nextCursor: "cursor:0:3",
+        previousCursor: "cursor:0:1",
+        directoryVersion: "1",
+      });
     } finally {
       setup.dispose();
     }
   });
 
-  it("refetches retained page parameters without mistaking them for new duplicates", async () => {
+  it("deduplicates cross-page overlap when prepending", async () => {
+    const setup = await createBrowseQueryFixture();
+    try {
+      for (let page = 1; page < 7; page += 1) await setup.fetchNext();
+      setup.overlapPage(1, 2);
+      const result = await setup.fetchPrevious();
+
+      expect(result.error).toBeNull();
+      expect(setup.pages()).toHaveLength(5);
+      expect(setup.entryIds()).toHaveLength(499);
+      expect(new Set(setup.entryIds()).size).toBe(499);
+      expect(setup.pages()[0]).toMatchObject({
+        nextCursor: "cursor:0:2",
+        previousCursor: "cursor:0:0",
+      });
+    } finally {
+      setup.dispose();
+    }
+  });
+
+  it("deduplicates replacement refetches with renewed cursors", async () => {
     const setup = await createBrowseQueryFixture();
     try {
       await setup.fetchNext();
       await setup.fetchNext();
+      setup.overlapPage(1, 0);
       setup.renewCursors();
       const result = await setup.refetch();
+
       expect(result.error).toBeNull();
       expect(setup.pages()).toHaveLength(3);
+      expect(setup.entryIds()).toHaveLength(299);
+      expect(new Set(setup.entryIds()).size).toBe(299);
+      expect(setup.pages()[1]).toMatchObject({
+        nextCursor: "cursor:1:2",
+        previousCursor: "cursor:1:0",
+      });
     } finally {
       setup.dispose();
     }
@@ -164,18 +203,37 @@ describe("directoryQueryOptions", () => {
     const setup = await createBrowseQueryFixture();
     try {
       for (let page = 1; page < 5; page += 1) await setup.fetchNext();
-      setup.respondWithDuplicateFrom(0);
+      setup.overlapPage(5, 0);
       const appended = await setup.fetchNext();
       expect(appended.error).toBeNull();
       expect(setup.pages()).toHaveLength(5);
 
-      setup.respondWithDuplicateFrom(null);
       await setup.fetchNext();
-      setup.respondWithDuplicateFrom(6);
+      setup.overlapPage(1, 6);
       const prepended = await setup.fetchPrevious();
       expect(prepended.error).toBeNull();
       expect(setup.pages()).toHaveLength(5);
       expect(new Set(setup.entryIds()).size).toBe(setup.entryIds().length);
+    } finally {
+      setup.dispose();
+    }
+  });
+
+  it("restores a retained duplicate when the earlier visible copy is evicted", async () => {
+    const setup = await createBrowseQueryFixture();
+    try {
+      setup.overlapPage(1, 0);
+      await setup.fetchNext();
+      expect(setup.entryIds()).toHaveLength(199);
+      expect(setup.pages()[1]!.entries).toHaveLength(99);
+
+      for (let page = 2; page < 6; page += 1) await setup.fetchNext();
+
+      expect(setup.pages()).toHaveLength(5);
+      expect(setup.pages()[0]!.entries).toHaveLength(100);
+      expect(setup.entryIds()).toContain(entryId(0, 0));
+      expect(setup.entryIds()).toHaveLength(500);
+      expect(new Set(setup.entryIds()).size).toBe(500);
     } finally {
       setup.dispose();
     }

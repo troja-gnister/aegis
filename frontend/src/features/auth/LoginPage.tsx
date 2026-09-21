@@ -75,12 +75,12 @@ export function LoginPage() {
       openSessionAfterLogin();
       navigate("/roots", {replace: true});
     } catch (error) {
-      if (isCurrent()) {
-        if (error instanceof PrivateStateCleanupError) {
+      if (error instanceof PrivateStateCleanupError) {
+        if (isSessionTransitionCurrent(generation)) {
           completeSignOut(generation, false, false);
-        } else {
-          setErrorMessage(loginErrorMessage(error));
         }
+      } else if (isCurrent()) {
+        setErrorMessage(loginErrorMessage(error));
       }
     } finally {
       if (mounted.current && attempt.current === currentAttempt) setSubmitting(false);

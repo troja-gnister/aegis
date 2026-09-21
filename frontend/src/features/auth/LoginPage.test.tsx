@@ -9,7 +9,12 @@ import {LoginPage} from "./LoginPage";
 import {AuthBoundary} from "./AuthBoundary";
 import {LogoutButton} from "./LogoutButton";
 import {purgePrivateBrowserState, registerPrivateStateCleanup} from "./cache";
-import {SESSION_QUERY_KEY, useAuthSession} from "./session";
+import {
+  isSessionAccessOpen,
+  openSessionAfterLogin,
+  SESSION_QUERY_KEY,
+  useAuthSession,
+} from "./session";
 
 const SESSION = {
   user: {id: "6b824aeb-a9b7-4685-b359-cf22a437076d", username: "alice"},
@@ -31,10 +36,10 @@ function LocationProbe() {
   </>;
 }
 
-function renderLogin() {
+function renderLoginView() {
   const queryClient = new QueryClient({defaultOptions: {queries: {retry: false}}});
   clients.add(queryClient);
-  render(
+  const view = render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter initialEntries={["/login"]}>
         <LocationProbe />
@@ -45,7 +50,11 @@ function renderLogin() {
       </MemoryRouter>
     </QueryClientProvider>,
   );
-  return queryClient;
+  return {queryClient, ...view};
+}
+
+function renderLogin() {
+  return renderLoginView().queryClient;
 }
 
 function PrivateSession() {
@@ -117,7 +126,106 @@ function submitCredentials() {
   fireEvent.click(screen.getByRole("button", {name: "Sign in"}));
 }
 
+function deferredFailingCleanup(privateMessage: string) {
+  let cleanupStarted = () => {};
+  const started = new Promise<void>((resolve) => { cleanupStarted = resolve; });
+  let releaseBrowserCleanup = () => {};
+  const browserCleanupGate = new Promise<void>((resolve) => {
+    releaseBrowserCleanup = resolve;
+  });
+  let browserCleanupFinished = () => {};
+  const browserFinished = new Promise<void>((resolve) => {
+    browserCleanupFinished = resolve;
+  });
+  const cachesDescriptor = Object.getOwnPropertyDescriptor(window, "caches");
+  Object.defineProperty(window, "caches", {
+    configurable: true,
+    value: {
+      keys: async () => {
+        await browserCleanupGate;
+        return ["aegis-login-cleanup"];
+      },
+      delete: async () => {
+        browserCleanupFinished();
+        return true;
+      },
+    },
+  });
+  const unregister = registerPrivateStateCleanup(() => {
+    cleanupStarted();
+    throw new Error(privateMessage);
+  });
+  return {
+    started,
+    browserFinished,
+    release: releaseBrowserCleanup,
+    restore() {
+      unregister();
+      if (cachesDescriptor) Object.defineProperty(window, "caches", cachesDescriptor);
+      else Reflect.deleteProperty(window, "caches");
+    },
+  };
+}
+
 describe("LoginPage", () => {
+  it("keeps cleanup failure closed after the submitting form unmounts", async () => {
+    server.use(
+      http.post("/api/v1/auth/login", () => HttpResponse.json({user: SESSION.user})),
+    );
+    const cleanup = deferredFailingCleanup("private unmounted cleanup detail");
+    const {unmount} = renderLoginView();
+    try {
+      submitCredentials();
+      await cleanup.started;
+      unmount();
+
+      await act(async () => {
+        cleanup.release();
+        await cleanup.browserFinished;
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+      });
+
+      await waitFor(() => expect(isSessionAccessOpen()).toBe(false));
+      renderLogin();
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Private browser data could not be fully cleared. Close this tab before signing in again.",
+      );
+      expect(screen.getByRole("button", {name: "Sign in"})).toBeDisabled();
+      expect(screen.queryByText("private unmounted cleanup detail")).not.toBeInTheDocument();
+    } finally {
+      cleanup.release();
+      cleanup.restore();
+    }
+  });
+
+  it("does not let an unmounted cleanup failure close a newer auth transition", async () => {
+    server.use(
+      http.post("/api/v1/auth/login", () => HttpResponse.json({user: SESSION.user})),
+    );
+    const cleanup = deferredFailingCleanup("private obsolete cleanup detail");
+    const {unmount} = renderLoginView();
+    try {
+      submitCredentials();
+      await cleanup.started;
+      unmount();
+      openSessionAfterLogin();
+
+      await act(async () => {
+        cleanup.release();
+        await cleanup.browserFinished;
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+      });
+
+      expect(isSessionAccessOpen()).toBe(true);
+      renderLogin();
+      expect(screen.getByRole("button", {name: "Sign in"})).toBeEnabled();
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    } finally {
+      cleanup.release();
+      cleanup.restore();
+    }
+  });
+
   it("blocks sign-in with a truthful safe message when private cleanup fails", async () => {
     server.use(
       http.post("/api/v1/auth/login", () => HttpResponse.json({user: SESSION.user})),

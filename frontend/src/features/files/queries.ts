@@ -54,40 +54,22 @@ function captureQueryAuthority(namespace: string, signal: AbortSignal): PrivateS
   return authority;
 }
 
-const pageWindowIds = new WeakMap<AbortSignal, Set<string>>();
-
-function retainedPagesForDirectionalFetch(
-  queryClient: QueryClient,
-  queryKey: readonly unknown[],
-): DirectoryPage[] {
-  const retained = queryClient.getQueryData<InfiniteData<DirectoryPage>>(queryKey);
-  if (!retained) return [];
-  const direction = queryClient.getQueryState(queryKey)?.fetchMeta?.fetchMore?.direction;
-  if (direction === "forward") {
-    return retained.pages.length < 5 ? retained.pages : retained.pages.slice(1);
-  }
-  if (direction === "backward") {
-    return retained.pages.length < 5 ? retained.pages : retained.pages.slice(0, -1);
-  }
-  return [];
-}
-
-function rejectsWindowDuplicate(
-  queryClient: QueryClient,
-  queryKey: readonly unknown[],
-  signal: AbortSignal,
-  page: DirectoryPage,
-): void {
-  let ids = pageWindowIds.get(signal);
-  if (!ids) {
-    ids = new Set(
-      retainedPagesForDirectionalFetch(queryClient, queryKey)
-        .flatMap((item) => item.entries.map((entry) => entry.id)),
-    );
-    pageWindowIds.set(signal, ids);
-  }
-  if (page.entries.some((entry) => ids.has(entry.id))) throw genericApiProblem(502);
-  for (const entry of page.entries) ids.add(entry.id);
+function deduplicateWindow(
+  data: InfiniteData<DirectoryPage>,
+): InfiniteData<DirectoryPage> {
+  const ids = new Set<string>();
+  let changed = false;
+  const pages = data.pages.map((page) => {
+    const entries = page.entries.filter((entry) => {
+      if (ids.has(entry.id)) return false;
+      ids.add(entry.id);
+      return true;
+    });
+    if (entries.length === page.entries.length) return page;
+    changed = true;
+    return {...page, entries};
+  });
+  return changed ? {...data, pages} : data;
 }
 
 export function directoryQueryOptions(input: BrowseInput) {
@@ -104,7 +86,6 @@ export function directoryQueryOptions(input: BrowseInput) {
       try {
         const page = await fetchDirectory({...stableInput, cursor: pageParam}, signal);
         assertQueryAuthority(authority, input.namespace, signal);
-        rejectsWindowDuplicate(client, queryKey, signal, page);
         return page;
       } catch (error) {
         return handleCatalogFailure(
@@ -114,6 +95,7 @@ export function directoryQueryOptions(input: BrowseInput) {
     },
     getNextPageParam: (page) => page.nextCursor ?? undefined,
     getPreviousPageParam: (page) => page.previousCursor ?? undefined,
+    select: deduplicateWindow,
     maxPages: 5,
     gcTime: 0,
     staleTime: 5000,
