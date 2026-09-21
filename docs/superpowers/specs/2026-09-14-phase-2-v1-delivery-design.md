@@ -122,7 +122,7 @@ As of this implementation checkpoint: seven milestones defined, zero accepted. T
 
 | Milestone | Design/implementation state | Accepted packages | Acceptance evidence |
 | --- | --- | --- | --- |
-| 2A | [2A.1 specification](2026-09-14-phase-2a-indexed-browser-design.md) approved; [18-task plan](../plans/2026-09-14-phase-2a-indexed-browser.md) has indexed queries and HTTP endpoints accepted; browser data/UI delivery is next | 0 | No package acceptance yet |
+| 2A | [2A.1 specification](2026-09-14-phase-2a-indexed-browser-design.md) approved; [18-task plan](../plans/2026-09-14-phase-2a-indexed-browser.md) has indexed queries and HTTP endpoints accepted; bounded browser data layer in progress | 0 | No package acceptance yet |
 | 2B | Planned | 0 | None yet |
 | 2C | Planned, including metadata UI and photo/video thumbnails | 0 | None yet |
 | 2D | Planned | 0 | None yet |
