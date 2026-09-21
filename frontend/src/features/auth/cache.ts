@@ -3,7 +3,41 @@ import {clearCsrfToken} from "./api";
 
 export const AEGIS_DATABASE_NAMES = [] as const;
 const trackedObjectUrls = new Set<string>();
+const privateStateCleanups = new Set<() => void>();
 let activeCacheNamespace: string | null = null;
+let privateStateGeneration = 0;
+
+export type PrivateStateSnapshot = Readonly<{
+  generation: number;
+  namespace: string | null;
+}>;
+
+export function registerPrivateStateCleanup(cleanup: () => void): () => void {
+  privateStateCleanups.add(cleanup);
+  return () => privateStateCleanups.delete(cleanup);
+}
+
+export function capturePrivateState(): PrivateStateSnapshot {
+  return {generation: privateStateGeneration, namespace: activeCacheNamespace};
+}
+
+export function isPrivateStateCurrent(
+  snapshot: PrivateStateSnapshot,
+  namespace = snapshot.namespace,
+): boolean {
+  return snapshot.generation === privateStateGeneration &&
+    namespace !== null && activeCacheNamespace === namespace;
+}
+
+function clearRegisteredPrivateState(): void {
+  for (const cleanup of [...privateStateCleanups]) {
+    try {
+      cleanup();
+    } catch {
+      // One owner cannot keep other private state alive.
+    }
+  }
+}
 
 export function createTrackedObjectUrl(value: Blob | MediaSource): string {
   const url = URL.createObjectURL(value);
@@ -67,6 +101,8 @@ async function unregisterAegisServiceWorkers(): Promise<void> {
 }
 
 export async function purgePrivateBrowserState(queryClient: QueryClient): Promise<void> {
+  privateStateGeneration += 1;
+  clearRegisteredPrivateState();
   queryClient.clear();
   clearCsrfToken();
   activeCacheNamespace = null;
@@ -85,10 +121,12 @@ export async function activateCacheNamespace(
   isCurrent: () => boolean = () => true,
 ): Promise<boolean> {
   if (!isCurrent()) return false;
+  const namespaceChanged = activeCacheNamespace !== namespace;
   const changed = activeCacheNamespace !== null && activeCacheNamespace !== namespace;
   if (changed) await purgePrivateBrowserState(queryClient);
   // Browser cleanup can finish after another transition owns the namespace.
   if (!isCurrent()) return false;
   activeCacheNamespace = namespace;
+  if (namespaceChanged) privateStateGeneration += 1;
   return changed;
 }

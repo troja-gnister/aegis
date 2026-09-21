@@ -79,4 +79,17 @@ describe("apiRequest", () => {
       status: 502,
     });
   });
+
+  it("bounds successful bodies without forwarding the local byte cap", async () => {
+    server.use(
+      http.get("/api/v1/bounded-success", ({request}) => {
+        expect(request.headers.get("maxResponseBytes")).toBeNull();
+        return HttpResponse.json({value: "x".repeat(65)});
+      }),
+    );
+
+    await expect(
+      apiRequest("/api/v1/bounded-success", {maxResponseBytes: 64}),
+    ).rejects.toMatchObject({status: 502, type: "request_failed"});
+  });
 });

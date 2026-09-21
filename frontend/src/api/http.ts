@@ -10,6 +10,7 @@ export type ApiRequestInit = Omit<
 > & {
   body?: unknown;
   csrfToken?: string;
+  maxResponseBytes?: number;
 };
 
 function validatedApiPath(path: string): string {
@@ -26,7 +27,10 @@ function validatedApiPath(path: string): string {
   return `${resolved.pathname}${resolved.search}`;
 }
 
-async function readBoundedText(response: Response): Promise<string | null> {
+async function readBoundedText(
+  response: Response,
+  maximumBytes = MAX_PROBLEM_BYTES,
+): Promise<string | null> {
   if (!response.body) return "";
 
   const reader = response.body.getReader();
@@ -37,7 +41,7 @@ async function readBoundedText(response: Response): Promise<string | null> {
       const {done, value} = await reader.read();
       if (done) break;
       total += value.byteLength;
-      if (total > MAX_PROBLEM_BYTES) {
+      if (total > maximumBytes) {
         void reader.cancel().catch(() => undefined);
         return null;
       }
@@ -114,7 +118,7 @@ export async function apiRequest<T>(
   init: ApiRequestInit = {},
 ): Promise<T> {
   const url = validatedApiPath(path);
-  const {body, csrfToken, ...requestInit} = init;
+  const {body, csrfToken, maxResponseBytes, ...requestInit} = init;
   const method = (requestInit.method ?? "GET").toUpperCase();
   const headers = new Headers(requestInit.headers);
   headers.delete("Authorization");
@@ -146,5 +150,18 @@ export async function apiRequest<T>(
   }
   if (!response.ok) throw await parseBoundedProblem(response);
   if (response.status === 204) return undefined as T;
+  if (maxResponseBytes !== undefined) {
+    if (!Number.isSafeInteger(maxResponseBytes) || maxResponseBytes < 1) {
+      throw new Error("Successful response byte cap must be a positive safe integer");
+    }
+    try {
+      const text = await readBoundedText(response, maxResponseBytes);
+      if (text === null) throw genericApiProblem(502);
+      return JSON.parse(text) as T;
+    } catch (error) {
+      if (error instanceof ApiProblem) throw error;
+      throw genericApiProblem(502);
+    }
+  }
   return (await response.json()) as T;
 }

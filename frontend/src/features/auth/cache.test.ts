@@ -1,6 +1,13 @@
 import {QueryClient} from "@tanstack/react-query";
 import {afterEach, describe, expect, it, vi} from "vitest";
-import {activateCacheNamespace, createTrackedObjectUrl, purgePrivateBrowserState} from "./cache";
+import {
+  activateCacheNamespace,
+  capturePrivateState,
+  createTrackedObjectUrl,
+  isPrivateStateCurrent,
+  purgePrivateBrowserState,
+  registerPrivateStateCleanup,
+} from "./cache";
 
 const originalCaches = Object.getOwnPropertyDescriptor(window, "caches");
 const originalServiceWorker = Object.getOwnPropertyDescriptor(
@@ -20,6 +27,38 @@ afterEach(() => {
 });
 
 describe("purgePrivateBrowserState", () => {
+  it("keeps in-flight ownership current when the same namespace is reactivated", async () => {
+    const queryClient = new QueryClient();
+    await activateCacheNamespace(queryClient, "stable-account");
+    const snapshot = capturePrivateState();
+
+    await activateCacheNamespace(queryClient, "stable-account");
+
+    expect(isPrivateStateCurrent(snapshot, "stable-account")).toBe(true);
+    await purgePrivateBrowserState(queryClient);
+  });
+
+  it("runs registered private cleanup synchronously and supports owner disposal", async () => {
+    const queryClient = new QueryClient();
+    const cleanup = vi.fn();
+    const unsubscribe = registerPrivateStateCleanup(cleanup);
+    let release = () => {};
+    const gate = new Promise<string[]>((resolve) => { release = () => resolve([]); });
+    Object.defineProperty(window, "caches", {
+      configurable: true,
+      value: {keys: () => gate},
+    });
+
+    const pending = purgePrivateBrowserState(queryClient);
+    expect(cleanup).toHaveBeenCalledOnce();
+    release();
+    await pending;
+
+    unsubscribe();
+    await purgePrivateBrowserState(queryClient);
+    expect(cleanup).toHaveBeenCalledOnce();
+  });
+
   it("does not let obsolete namespace cleanup replace a newer account namespace", async () => {
     const client = new QueryClient();
     await purgePrivateBrowserState(client);
