@@ -67,8 +67,11 @@ def _active_scan_is_current(
         row["active_run__manifest_identity"],
         row["active_run__state"],
     )
-    if actual != expected:
-        return False
+    return actual == expected
+
+
+def _compatible_indexer_is_fresh(deployment: IndexDeployment) -> bool:
+    """Require a live indexer using this release, schema, and manifest."""
     freshness = timedelta(seconds=float(settings.AEGIS_WORKER_HEARTBEAT_FRESH_SECONDS))
     return WorkerHeartbeat.objects.filter(
         role="indexer",
@@ -101,5 +104,7 @@ def index_status(user: User, root_id: UUID) -> dict[str, object]:
                 root_id=root_id,
                 root_epoch=context.root_epoch,
             )
+        if compatible and stored_state in ("queued", "scanning", "ready"):
+            compatible = _compatible_indexer_is_fresh(deployment)
         state = stored_state if compatible else "unavailable"
         return index_status_payload(row, state=state)

@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 
+import pytest
 from aegis_apps.common.middleware import RequestContextMiddleware
 from aegis_apps.common.request_context import request_id_var
 from django.http import HttpRequest, HttpResponse
@@ -10,11 +11,17 @@ from django.test import Client, RequestFactory, override_settings
 from django.urls import path
 
 
-def _raise_error(_request: HttpRequest) -> HttpResponse:
+def _raise_error(_request: HttpRequest, **_kwargs: object) -> HttpResponse:
     raise RuntimeError("private exception text")
 
 
-urlpatterns = [path("test/error", _raise_error)]
+urlpatterns = [
+    path("test/error", _raise_error),
+    path("api/v1/roots/<uuid:root_id>/entries", _raise_error),
+    path("api/v1/entries/<uuid:entry_id>", _raise_error),
+    path("api/v1/roots/<uuid:root_id>/index-status", _raise_error),
+    path("api/v1/roots/<uuid:root_id>/scans", _raise_error),
+]
 
 
 def test_untrusted_request_id_is_replaced() -> None:
@@ -39,6 +46,28 @@ def test_request_id_is_returned_on_converted_error_response() -> None:
 
     assert response.status_code == 500
     assert response.headers["X-Request-ID"] == "error_req-1234"
+
+
+@pytest.mark.parametrize(
+    "path_value",
+    (
+        "/api/v1/roots/00000000-0000-0000-0000-000000000001/entries",
+        "/api/v1/entries/00000000-0000-0000-0000-000000000002",
+        "/api/v1/roots/00000000-0000-0000-0000-000000000003/index-status",
+        "/api/v1/roots/00000000-0000-0000-0000-000000000004/scans",
+    ),
+)
+@override_settings(ROOT_URLCONF=__name__)
+def test_catalog_converted_errors_preserve_request_id_and_private_no_store(
+    path_value: str,
+) -> None:
+    client = Client(raise_request_exception=False)
+
+    response = client.get(path_value, headers={"X-Request-ID": "catalog_error-1234"})
+
+    assert response.status_code == 500
+    assert response.headers["X-Request-ID"] == "catalog_error-1234"
+    assert response.headers["Cache-Control"] == "private, no-store"
 
 
 def test_request_context_resets_after_sequential_request() -> None:

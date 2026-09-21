@@ -8,9 +8,11 @@ from typing import Any, TypedDict
 from uuid import UUID
 
 from django.contrib.auth.models import AnonymousUser
+from django.db import OperationalError
 from django.http import HttpRequest
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_protect
+from psycopg import OperationalError as PsycopgOperationalError
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.renderers import JSONRenderer
 from rest_framework.request import Request
@@ -54,6 +56,7 @@ _ALLOWED_DIRECTORY_PARAMETERS = frozenset(
 )
 _INTEGER = re.compile(r"[1-9][0-9]{0,2}\Z", re.ASCII)
 _MAX_QUERY_STRING_BYTES = 32_768
+_POSTGRES_UNAVAILABLE_SQLSTATES = frozenset(("57P01", "57P02", "57P03", "57P04"))
 
 
 class DirectoryInput(TypedDict):
@@ -74,6 +77,27 @@ def _response(data: Any = None, *, status: int = 200) -> Response:
 def _user(request: Request) -> User | None:
     user = request.user
     return user if isinstance(user, User) and user.is_authenticated else None
+
+
+def _database_is_unavailable(error: Exception) -> bool:
+    """Recognize driver connection (08*) and PostgreSQL shutdown failures.
+
+    Psycopg connection failures that happen before PostgreSQL supplies an SQLSTATE
+    are represented by its base OperationalError with a null ``sqlstate``.
+    """
+    if not isinstance(error, OperationalError):
+        return False
+    cause = error.__cause__
+    if not isinstance(cause, PsycopgOperationalError):
+        return False
+    sqlstate = cause.sqlstate
+    return sqlstate is None or (
+        isinstance(sqlstate, str)
+        and (
+            sqlstate.startswith("08")
+            or sqlstate in _POSTGRES_UNAVAILABLE_SQLSTATES
+        )
+    )
 
 
 def _revoke_stale_request(request: Request) -> Response:
@@ -183,7 +207,9 @@ class CatalogAPIView(APIView):
             return response
         if isinstance(error, CursorRestartRequired):
             return _response(CURSOR_RESTART_REQUIRED, status=409)
-        if isinstance(error, (CatalogUnavailable, SchemaCompatibilityError)):
+        if isinstance(error, (CatalogUnavailable, SchemaCompatibilityError)) or (
+            _database_is_unavailable(error)
+        ):
             return _response(CATALOG_UNAVAILABLE, status=503)
         if isinstance(error, ValueError):
             return _response(INVALID_CATALOG_QUERY, status=400)

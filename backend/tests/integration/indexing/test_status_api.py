@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timedelta
 from typing import Any
 from unittest.mock import patch
 
@@ -11,6 +12,7 @@ from aegis_apps.indexing.database import ScanRequestThrottled
 from aegis_apps.indexing.models import IndexDeployment, RootIndexState, ScanRequest, ScanRun
 from aegis_apps.operations.models import WorkerHeartbeat
 from aegis_apps.operations.selectors import SchemaCompatibilityError, current_schema_identity
+from aegis_apps.roots.models import Root
 from django.conf import settings
 from django.db import connection
 from django.test import Client
@@ -34,8 +36,34 @@ def _csrf(api_catalog: Any) -> str:
     return value
 
 
+def _create_indexer_heartbeat(
+    api_catalog: Any,
+    *,
+    last_seen_at: datetime | None = None,
+    release_id: str | None = None,
+    schema_identity: str | None = None,
+    manifest_identity: str | None = None,
+) -> WorkerHeartbeat:
+    deployment = IndexDeployment.objects.get(pk=1)
+    return WorkerHeartbeat.objects.create(
+        role="indexer",
+        worker_id=str(uuid.uuid4()),
+        release_id=release_id or settings.AEGIS_RELEASE_ID,
+        schema_identity=schema_identity or current_schema_identity(),
+        manifest_identity=manifest_identity or deployment.manifest_identity,
+        last_seen_at=last_seen_at or timezone.now(),
+        current_job_id=None,
+        status="running",
+        metrics={},
+    )
+
+
 def test_index_status_is_browse_authorized_stored_and_precision_safe(api_catalog: Any) -> None:
-    with api_catalog.database.as_django_role("aegis_web"):
+    _create_indexer_heartbeat(api_catalog)
+    with (
+        api_catalog.database.as_django_role("aegis_web"),
+        CaptureQueriesContext(connection) as captured,
+    ):
         response = api_catalog.group_client.get(_status_path(api_catalog.root.pk))
 
     assert response.status_code == 200
@@ -61,6 +89,52 @@ def test_index_status_is_browse_authorized_stored_and_precision_safe(api_catalog
         "updatedAt",
         "lastCompletedAt",
     }
+    assert len(captured) <= 16
+
+
+@pytest.mark.parametrize(
+    "worker_state",
+    ("missing", "stale", "wrong_release", "wrong_schema", "wrong_manifest"),
+)
+def test_ready_index_status_requires_a_fresh_compatible_indexer(
+    api_catalog: Any,
+    worker_state: str,
+) -> None:
+    if worker_state == "stale":
+        _create_indexer_heartbeat(
+            api_catalog,
+            last_seen_at=timezone.now() - timedelta(minutes=10),
+        )
+    elif worker_state == "wrong_release":
+        _create_indexer_heartbeat(api_catalog, release_id="wrong-release")
+    elif worker_state == "wrong_schema":
+        _create_indexer_heartbeat(api_catalog, schema_identity="wrong-schema")
+    elif worker_state == "wrong_manifest":
+        _create_indexer_heartbeat(api_catalog, manifest_identity="0" * 64)
+
+    response = api_catalog.get(_status_path(api_catalog.root.pk))
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "unavailable"
+    assert response.headers["Cache-Control"] == "private, no-store"
+
+
+def test_ready_index_status_rejects_pending_schema(api_catalog: Any) -> None:
+    _create_indexer_heartbeat(api_catalog)
+
+    with patch(
+        "aegis_apps.indexing.selectors.current_schema_identity",
+        side_effect=SchemaCompatibilityError("migrations pending"),
+    ):
+        response = api_catalog.get(_status_path(api_catalog.root.pk))
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "type": "catalog_unavailable",
+        "title": "Catalog unavailable",
+    }
+    assert b"migrations pending" not in response.content
+    assert response.headers["Cache-Control"] == "private, no-store"
 
 
 def test_index_status_mismatched_binding_and_invalid_active_run_are_unavailable(
@@ -128,9 +202,15 @@ def test_active_status_requires_a_fresh_compatible_stored_indexer(api_catalog: A
 
 
 def test_index_status_unknown_and_unauthorized_match_catalog_not_found(api_catalog: Any) -> None:
-    unknown = api_catalog.get(_status_path(uuid.uuid4()))
+    foreign_root = Root.objects.create(
+        slot_id=f"status-foreign-{uuid.uuid4().hex}",
+        display_name="Foreign status root",
+        mode=Root.Mode.READ_ONLY,
+        active=True,
+    )
     with api_catalog.database.as_django_role("aegis_web"):
-        unauthorized = api_catalog.group_client.get(_status_path(uuid.uuid4()))
+        unknown = api_catalog.group_client.get(_status_path(uuid.uuid4()))
+        unauthorized = api_catalog.group_client.get(_status_path(foreign_root.pk))
 
     assert unknown.status_code == unauthorized.status_code == 404
     assert unknown.content == unauthorized.content

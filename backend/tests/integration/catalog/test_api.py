@@ -3,20 +3,24 @@ from __future__ import annotations
 import contextlib
 import json
 import uuid
+from datetime import timedelta
 from typing import Any
 from unittest.mock import patch
 
+import psycopg
 import pytest
 from aegis_apps.audit.models import AuditEvent
 from aegis_apps.catalog.authorization import CatalogNotReady, CatalogUnavailable
 from aegis_apps.catalog.models import CatalogEntry
 from aegis_apps.catalog.names import source_name
 from aegis_apps.identity.models import User
+from aegis_apps.identity.session_policy import LAST_SEEN_AT
 from aegis_apps.roots.models import Root
 from django.contrib.sessions.models import Session
-from django.db import connection
+from django.db import DataError, IntegrityError, OperationalError, ProgrammingError, connection
 from django.test import Client
 from django.test.utils import CaptureQueriesContext
+from django.utils import timezone
 
 pytestmark = [pytest.mark.integration, pytest.mark.django_db(transaction=True)]
 
@@ -31,6 +35,12 @@ def _root_path(root_id: uuid.UUID) -> str:
 
 def _assert_private(response: Any) -> None:
     assert response.headers["Cache-Control"] == "private, no-store"
+
+
+def _django_operational_error(cause: psycopg.OperationalError) -> OperationalError:
+    error = OperationalError("private database detail")
+    error.__cause__ = cause
+    return error
 
 
 def test_browse_is_private_and_never_enumerates_source(
@@ -181,6 +191,60 @@ def test_not_ready_and_database_outage_are_distinct_private_problems(
     assert unavailable.json()["type"] == "catalog_unavailable"
     _assert_private(not_ready)
     _assert_private(unavailable)
+
+
+@pytest.mark.parametrize(
+    "driver_error",
+    (
+        psycopg.OperationalError("connection failed"),
+        psycopg.errors.ConnectionFailure("connection lost"),
+        psycopg.errors.AdminShutdown("administrator shutdown"),
+    ),
+)
+def test_driver_availability_errors_after_authentication_are_fixed_503(
+    api_catalog: Any,
+    driver_error: psycopg.OperationalError,
+) -> None:
+    api_catalog.client.raise_request_exception = False
+    with patch(
+        "aegis_apps.catalog.queries.directory_page",
+        side_effect=_django_operational_error(driver_error),
+    ):
+        response = api_catalog.get(_root_path(api_catalog.root.pk))
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "type": "catalog_unavailable",
+        "title": "Catalog unavailable",
+    }
+    assert b"private database detail" not in response.content
+    assert bytes(str(driver_error), "utf-8") not in response.content
+    _assert_private(response)
+
+
+@pytest.mark.parametrize(
+    "database_error",
+    (
+        ProgrammingError("private programming detail"),
+        IntegrityError("private integrity detail"),
+        DataError("private data detail"),
+        _django_operational_error(psycopg.errors.DeadlockDetected("private deadlock")),
+    ),
+)
+def test_unrelated_database_errors_remain_generic_500(
+    api_catalog: Any,
+    database_error: Exception,
+) -> None:
+    api_catalog.client.raise_request_exception = False
+    with patch(
+        "aegis_apps.catalog.queries.directory_page",
+        side_effect=database_error,
+    ):
+        response = api_catalog.get(_root_path(api_catalog.root.pk))
+
+    assert response.status_code == 500
+    assert b"private" not in response.content
+    _assert_private(response)
 
 
 def test_framework_method_resolver_and_unhandled_errors_are_never_cached(
@@ -409,6 +473,36 @@ def test_authenticated_http_browse_stays_within_middleware_inclusive_budget(
     ]
     assert len(data) <= 8
     assert any("django_session" in sql for sql in statements)
+    assert any("identity_user" in sql for sql in statements)
+
+
+def test_activity_refresh_http_browse_stays_within_middleware_inclusive_budget(
+    api_catalog: Any,
+) -> None:
+    session = api_catalog.client.session
+    session[LAST_SEEN_AT] = (timezone.now() - timedelta(minutes=2)).isoformat()
+    session.save()
+
+    with (
+        api_catalog.database.as_django_role("aegis_web"),
+        CaptureQueriesContext(connection) as captured,
+    ):
+        response = api_catalog.client.get(_root_path(api_catalog.root.pk))
+
+    assert response.status_code == 200
+    statements = [query["sql"] for query in captured]
+    assert len(statements) <= 16
+    data = [
+        sql for sql in statements
+        if not sql.startswith(("BEGIN", "COMMIT", "SET LOCAL"))
+        and "django_session" not in sql
+    ]
+    session_updates = [
+        sql for sql in statements
+        if sql.lstrip().startswith("UPDATE") and "django_session" in sql
+    ]
+    assert len(data) <= 8
+    assert len(session_updates) == 1
     assert any("identity_user" in sql for sql in statements)
 
 
