@@ -51,7 +51,7 @@ Planning baseline: `842ba2a` on `main`, with unchanged application code from the
 | 7 | Supervised scan execution and independent worker liveness | 6 | Complete (`6022c97`) |
 | 8 | Typed filters and signed cursor contracts | 1, 2 | Complete (`78b05f1`) |
 | 9 | Permission-bound indexed keyset queries and details | 3, 8 | Complete (`6c8b1f3`) |
-| 10 | List/details/status/rescan HTTP endpoints | 4, 9 | In review (`bccbca0`) |
+| 10 | List/details/status/rescan HTTP endpoints | 4, 9 | Review fixes (`bccbca0`) |
 | 11 | Validated browser API and bounded private query window | 10 | Planned |
 | 12 | Virtualized mobile file navigation | 11 | Planned |
 | 13 | Filter panel, details, and scan-state interactions | 12 | Planned |
@@ -72,6 +72,8 @@ Read-only diagnosis reproduced a session-query scheduling race under controlled 
 Repair, deterministic regression coverage, independent review, and fresh CI remain required before advancing the UI. No passing rerun has been substituted for diagnosis, and no frontend code changed in Task 9. Its accepted query-layer tests remain scoped evidence, not an all-green checkpoint. Development has not updated or accessed the user-owned preview or its originals.
 
 All four jobs subsequently passed at documentation-only checkpoint `afbac672dd8792fca9352542609a7f6df0ced8bb` in [run 35114924945](https://github.com/troja-gnister/aegis/actions/runs/35114924945). That checkpoint contains no frontend repair or Task 10 implementation; its passing run does not close the reproduced cache-race defect.
+
+Repair `1a0994a` passed independent specification and quality review with no findings. It evaluates current session authority when the query observer decides whether to fetch and settles application logout transitions before test teardown. Three deterministic regressions using production observer options first reproduced the cache write, then passed for pending, confirmed, and unconfirmed sign-out. All 22 authentication tests and 46 frontend tests, lint, TypeScript, and the production build passed on Node 24.20. Existing login/logout assertions remain; exact-head CI is still pending. This acceptance covers the demonstrated observer-options race, not every possible explicit-refetch or browser scheduling scenario.
 
 ### Completed-task evidence
 
@@ -1029,11 +1031,13 @@ Status reads stored root/run counters and freshness only, never enumerates roots
 
 ### Task 10 implementation verification
 
-Initial implementation `bccbca0` passed **52 focused API/status tests, 223 covering tests, and 1,328 full-backend tests**. Full Ruff, mypy (221 sources), Django checks, migration drift, and whitespace checks passed. The covering run includes existing authentication/session, root/operation, query, rescan, and database-privilege cases. Independent review remains required; Task 10 is not yet counted complete.
+Initial implementation `bccbca0` passed **52 focused API/status tests, 223 covering tests, and 1,328 full-backend tests**. Full Ruff, mypy (221 sources), Django checks, migration drift, and whitespace checks passed. The covering run includes existing authentication/session, root/operation, query, rescan, and database-privilege cases. Independent review found two required corrections; Task 10 is not yet counted complete and these results are pre-fix evidence.
 
 The ordinary authenticated folder request measured **13 total SQL statements**: one session-store read, one Django principal read, seven catalog/authorization data statements, and four transaction/timeout statements. The session read is separate from the eight principal/catalog data statements; it is included in the 16-statement full-request budget. Actual web-role HTTP fixtures exercise session login, authorization, private no-store errors, CSRF, scan idempotency/rate limits, exact decimal values, maximum-page response size, and post-middleware revocation with actual session removal and one audit event. The status endpoint reads stored counters and compatible worker/binding state; no source enumeration or content delivery is introduced.
 
 An initial fixture exceeded a signed counter bound; correcting it produced the intended 45-test failing transport baseline. Later test corrections supplied valid CSRF before wrong-method checks and respected the raw-name bound. An earlier covering run reported **220 passed, three failed** alongside adjacent request timestamps jumping from `2026-09-15T20:29:20.044Z` to `2026-09-15T21:26:52.154Z`. That discontinuity is observed; its explanation as a common cause of expired heartbeat/throttle windows is an inference, not a diagnosed host mechanism. Three focused checks, the unchanged 223-test covering run, and the final full suite subsequently passed without weakened assertions/timeouts. Every owned disposable database was removed; preview/original/operator resources remained untouched. Physical 1M/50K acceptance remains later work.
+
+Review requires worker/schema availability to govern a persisted `ready` status, not only active scans, and narrowly recognized database connection/shutdown failures after authentication to return the fixed 503 problem instead of 500. Arbitrary programming failures must remain generic 500s. The first fix round also corrects two minor coverage gaps: comparing a real ungranted root with an unknown root, and extending common converted-error tests with request-ID/no-store assertions for the new route families. Activity-refresh session persistence will be measured explicitly within the unchanged 16-statement request budget. The initial review remains failed until these corrections pass scoped verification and fresh review.
 
 ## Task 11: Validated browser API and bounded private pages
 
