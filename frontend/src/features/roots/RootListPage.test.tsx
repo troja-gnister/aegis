@@ -4,6 +4,7 @@ import {http, HttpResponse} from "msw";
 import {MemoryRouter, Route, Routes, useLocation} from "react-router";
 import {describe, expect, it} from "vitest";
 import {AuthSessionContext} from "../auth/session";
+import {registerPrivateStateCleanup} from "../auth/cache";
 import type {SessionResponse} from "../auth/types";
 import {server} from "../../test/server";
 import {RootListPage} from "./RootListPage";
@@ -87,6 +88,29 @@ describe("RootListPage", () => {
     expect(await screen.findByRole("heading", {name: "Sign in"})).toBeVisible();
     expect(screen.getByLabelText("Current route")).toHaveTextContent("/login");
     expect(queryClient.getQueryData(["private", "stale-root"])).toBeUndefined();
+  });
+
+  it("still routes to login when an owner reports incomplete private cleanup", async () => {
+    server.use(
+      http.get("/api/v1/roots", () =>
+        HttpResponse.json(
+          {type: "authentication_required", title: "Authentication required"},
+          {status: 401},
+        ),
+      ),
+    );
+    const unregister = registerPrivateStateCleanup(() => {
+      throw new Error("private root cleanup detail");
+    });
+    try {
+      renderRootList();
+
+      expect(await screen.findByRole("heading", {name: "Sign in"})).toBeVisible();
+      expect(screen.getByLabelText("Current route")).toHaveTextContent("/login");
+      expect(screen.queryByText("private root cleanup detail")).not.toBeInTheDocument();
+    } finally {
+      unregister();
+    }
   });
 
   it("opens the Phase 2 explanation with keyboard-native activation", async () => {

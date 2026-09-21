@@ -356,6 +356,7 @@ export async function fetchEntry(id: string, signal: AbortSignal): Promise<Entry
     signal,
   );
   const result = validatedEntryDetails(response);
+  if (result.id !== id) invalidResponse();
   assertAuthority(snapshot, signal);
   return result;
 }

@@ -17,11 +17,10 @@ export function LogoutButton() {
     // Start with this session's CSRF authority, then immediately remove private
     // content. A server error may arrive after revocation has already happened.
     const request = logoutSession().then(() => true, () => false);
-    const cleanup = purgePrivateBrowserState(queryClient);
+    const cleanup = purgePrivateBrowserState(queryClient).then(() => true, () => false);
     navigate("/login", {replace: true});
-    const confirmed = await request;
-    completeSignOut(generation, confirmed);
-    await cleanup;
+    const [confirmed, cleanupSucceeded] = await Promise.all([request, cleanup]);
+    completeSignOut(generation, confirmed, cleanupSucceeded);
   };
 
   return (

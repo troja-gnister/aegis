@@ -3,9 +3,14 @@ import {useEffect, useRef, useState, type FormEvent} from "react";
 import {useNavigate} from "react-router";
 import {ApiProblem} from "../../api/problem";
 import {fetchSession, loginWithCredentials} from "./api";
-import {activateCacheNamespace, purgePrivateBrowserState} from "./cache";
+import {
+  activateCacheNamespace,
+  PrivateStateCleanupError,
+  purgePrivateBrowserState,
+} from "./cache";
 import {
   beginSignIn,
+  completeSignOut,
   isSessionTransitionCurrent,
   openSessionAfterLogin,
   SESSION_QUERY_KEY,
@@ -30,6 +35,7 @@ export function LoginPage() {
   const navigate = useNavigate();
   const sessionAccess = useSessionAccess();
   const logoutPending = sessionAccess === "signing_out";
+  const cleanupFailed = sessionAccess === "cleanup_failed";
   const [submitting, setSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const mounted = useRef(false);
@@ -45,7 +51,7 @@ export function LoginPage() {
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (submitting || logoutPending) return;
+    if (submitting || logoutPending || cleanupFailed) return;
     const currentAttempt = ++attempt.current;
     const generation = beginSignIn();
     // A response may outlive this form or a newer sign-in/sign-out transition.
@@ -69,7 +75,13 @@ export function LoginPage() {
       openSessionAfterLogin();
       navigate("/roots", {replace: true});
     } catch (error) {
-      if (isCurrent()) setErrorMessage(loginErrorMessage(error));
+      if (isCurrent()) {
+        if (error instanceof PrivateStateCleanupError) {
+          completeSignOut(generation, false, false);
+        } else {
+          setErrorMessage(loginErrorMessage(error));
+        }
+      }
     } finally {
       if (mounted.current && attempt.current === currentAttempt) setSubmitting(false);
     }
@@ -85,6 +97,11 @@ export function LoginPage() {
         {sessionAccess === "unconfirmed" ? (
           <p role="alert">Local data was cleared. Server sign-out could not be confirmed.</p>
         ) : null}
+        {cleanupFailed ? (
+          <p role="alert">
+            Private browser data could not be fully cleared. Close this tab before signing in again.
+          </p>
+        ) : null}
         <form onSubmit={submit} noValidate>
           <label htmlFor="username">Username</label>
           <input
@@ -94,7 +111,7 @@ export function LoginPage() {
             autoComplete="username"
             required
             maxLength={150}
-            disabled={submitting || logoutPending}
+            disabled={submitting || logoutPending || cleanupFailed}
           />
           <label htmlFor="password">Password</label>
           <input
@@ -104,10 +121,10 @@ export function LoginPage() {
             autoComplete="current-password"
             required
             maxLength={512}
-            disabled={submitting || logoutPending}
+            disabled={submitting || logoutPending || cleanupFailed}
           />
           {errorMessage ? <p role="alert">{errorMessage}</p> : null}
-          <button type="submit" disabled={submitting || logoutPending}>
+          <button type="submit" disabled={submitting || logoutPending || cleanupFailed}>
             {submitting ? "Signing in…" : "Sign in"}
           </button>
         </form>

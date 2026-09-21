@@ -3,7 +3,7 @@ import type {SessionResponse} from "./types";
 
 export const SESSION_QUERY_KEY = ["auth", "session"] as const;
 
-type SessionAccess = "open" | "signing_out" | "closed" | "unconfirmed";
+type SessionAccess = "open" | "signing_out" | "closed" | "unconfirmed" | "cleanup_failed";
 let sessionAccess: SessionAccess = "open";
 let accessGeneration = 0;
 const accessListeners = new Set<() => void>();
@@ -23,13 +23,21 @@ export function beginSignOut(): number {
   return accessGeneration;
 }
 
-export function completeSignOut(generation: number, confirmed: boolean): void {
+export function completeSignOut(
+  generation: number,
+  confirmed: boolean,
+  cleanupSucceeded = true,
+): void {
   if (generation !== accessGeneration) return;
-  setAccess(confirmed ? "closed" : "unconfirmed");
+  setAccess(cleanupSucceeded ? (confirmed ? "closed" : "unconfirmed") : "cleanup_failed");
 }
 
 export function beginSignIn(): number {
   accessGeneration += 1;
+  return accessGeneration;
+}
+
+export function captureSessionTransition(): number {
   return accessGeneration;
 }
 

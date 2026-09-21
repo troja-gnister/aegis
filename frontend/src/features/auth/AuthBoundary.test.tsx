@@ -6,8 +6,15 @@ import {afterEach, describe, expect, it, vi} from "vitest";
 import {server} from "../../test/server";
 import {AuthBoundary} from "./AuthBoundary";
 import {LogoutButton} from "./LogoutButton";
-import {purgePrivateBrowserState} from "./cache";
-import {beginSignOut, completeSignOut, SESSION_QUERY_KEY, useSessionAccess} from "./session";
+import {purgePrivateBrowserState, registerPrivateStateCleanup} from "./cache";
+import {
+  beginSignOut,
+  completeSignOut,
+  isSessionAccessOpen,
+  openSessionAfterLogin,
+  SESSION_QUERY_KEY,
+  useSessionAccess,
+} from "./session";
 
 const SESSION = {
   user: {id: "1e999c0b-8138-4dd5-80ea-e651f689eaa1", username: "alice"},
@@ -68,6 +75,29 @@ afterEach(async () => {
 });
 
 describe("AuthBoundary", () => {
+  it("keeps access closed with a distinct cleanup-failed state", async () => {
+    const unregister = registerPrivateStateCleanup(() => {
+      throw new Error("private cleanup detail");
+    });
+    try {
+      renderBoundary();
+      expect(await screen.findByRole("heading", {name: "Sign in"})).toBeVisible();
+      expect(screen.getByLabelText("Session access")).toHaveTextContent("cleanup_failed");
+      expect(screen.queryByText("private cleanup detail")).not.toBeInTheDocument();
+    } finally {
+      unregister();
+    }
+  });
+
+  it("does not let an obsolete cleanup failure close a newer session", () => {
+    const obsoleteGeneration = beginSignOut();
+    openSessionAfterLogin();
+
+    completeSignOut(obsoleteGeneration, true, false);
+
+    expect(isSessionAccessOpen()).toBe(true);
+  });
+
   it.each(["pending", "confirmed", "unconfirmed"] as const)(
     "does not refetch or restore the session from retained open options when logout is %s",
     async (logoutState) => {
@@ -193,6 +223,45 @@ describe("AuthBoundary", () => {
     }
   });
 
+  it("keeps sign-out pending until deferred private cleanup reports failure", async () => {
+    server.use(
+      http.get("/api/v1/auth/session", () => HttpResponse.json(SESSION)),
+      http.post("/api/v1/auth/logout", () => new HttpResponse(null, {status: 204})),
+    );
+    renderBoundary({withLogout: true});
+    await screen.findByText("Private family archive");
+
+    let releaseCleanup = () => {};
+    const cleanupGate = new Promise<void>((resolve) => { releaseCleanup = resolve; });
+    const cachesDescriptor = Object.getOwnPropertyDescriptor(window, "caches");
+    Object.defineProperty(window, "caches", {
+      configurable: true,
+      value: {keys: async () => {
+        await cleanupGate;
+        return [];
+      }},
+    });
+    const unregister = registerPrivateStateCleanup(() => {
+      throw new Error("private cleanup detail");
+    });
+
+    try {
+      fireEvent.click(screen.getByRole("button", {name: "Sign out"}));
+      expect(await screen.findByRole("heading", {name: "Sign in"})).toBeVisible();
+      expect(screen.getByLabelText("Session access")).toHaveTextContent("signing_out");
+      releaseCleanup();
+      await waitFor(() =>
+        expect(screen.getByLabelText("Session access")).toHaveTextContent("cleanup_failed"),
+      );
+      expect(screen.queryByText("private cleanup detail")).not.toBeInTheDocument();
+    } finally {
+      releaseCleanup();
+      unregister();
+      if (cachesDescriptor) Object.defineProperty(window, "caches", cachesDescriptor);
+      else Reflect.deleteProperty(window, "caches");
+    }
+  });
+
   it("never flashes private content while the initial session is checking", async () => {
     let releaseSession: () => void = () => undefined;
     const gate = new Promise<void>((resolve) => {
@@ -266,6 +335,31 @@ describe("AuthBoundary", () => {
       expect(queryClient.getQueryData(["private", "old-account"])).toBeUndefined(),
     );
     expect(await screen.findByText("Private family archive")).toBeVisible();
+  });
+
+  it("keeps access closed when namespace activation reports incomplete cleanup", async () => {
+    let namespace = SESSION.cacheNamespace;
+    server.use(
+      http.get("/api/v1/auth/session", () =>
+        HttpResponse.json({...SESSION, cacheNamespace: namespace}),
+      ),
+    );
+    renderBoundary();
+    expect(await screen.findByText("Private family archive")).toBeVisible();
+    const unregister = registerPrivateStateCleanup(() => {
+      throw new Error("private activation cleanup detail");
+    });
+    namespace = "namespace-b".repeat(4);
+
+    try {
+      act(() => window.dispatchEvent(persistedPageShow()));
+
+      expect(await screen.findByRole("heading", {name: "Sign in"})).toBeVisible();
+      expect(screen.getByLabelText("Session access")).toHaveTextContent("cleanup_failed");
+      expect(screen.queryByText("private activation cleanup detail")).not.toBeInTheDocument();
+    } finally {
+      unregister();
+    }
   });
 
   it("logs out with CSRF, purges cached state, and replaces history", async () => {

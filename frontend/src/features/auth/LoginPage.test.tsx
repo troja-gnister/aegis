@@ -8,7 +8,7 @@ import {clearCsrfToken} from "./api";
 import {LoginPage} from "./LoginPage";
 import {AuthBoundary} from "./AuthBoundary";
 import {LogoutButton} from "./LogoutButton";
-import {purgePrivateBrowserState} from "./cache";
+import {purgePrivateBrowserState, registerPrivateStateCleanup} from "./cache";
 import {SESSION_QUERY_KEY, useAuthSession} from "./session";
 
 const SESSION = {
@@ -118,6 +118,28 @@ function submitCredentials() {
 }
 
 describe("LoginPage", () => {
+  it("blocks sign-in with a truthful safe message when private cleanup fails", async () => {
+    server.use(
+      http.post("/api/v1/auth/login", () => HttpResponse.json({user: SESSION.user})),
+    );
+    const unregister = registerPrivateStateCleanup(() => {
+      throw new Error("private cleanup source path");
+    });
+    try {
+      renderLogin();
+      submitCredentials();
+
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "Private browser data could not be fully cleared. Close this tab before signing in again.",
+      );
+      expect(screen.getByRole("button", {name: "Sign in"})).toBeDisabled();
+      expect(screen.queryByText("private cleanup source path")).not.toBeInTheDocument();
+      expect(screen.getByLabelText("Current route")).toHaveTextContent("/login");
+    } finally {
+      unregister();
+    }
+  });
+
   it.each(["login", "session"] as const)(
     "does not commit an unmounted %s response even without a newer auth transition",
     async (stage) => {

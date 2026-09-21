@@ -3,7 +3,7 @@ import {useEffect, useState} from "react";
 import {useNavigate} from "react-router";
 import {ApiProblem} from "../../api/problem";
 import {purgePrivateBrowserState} from "../auth/cache";
-import {useAuthSession} from "../auth/session";
+import {beginSignOut, completeSignOut, useAuthSession} from "../auth/session";
 import {fetchRoots} from "./api";
 import {RootCard} from "./RootCard";
 
@@ -27,7 +27,11 @@ export function RootListPage() {
       return;
     }
     setSessionExpiring(true);
-    void purgePrivateBrowserState(queryClient).then(() => {
+    const generation = beginSignOut();
+    void purgePrivateBrowserState(queryClient).then(
+      () => completeSignOut(generation, true),
+      () => completeSignOut(generation, true, false),
+    ).then(() => {
       navigate("/login", {replace: true, state: {reason: "session"}});
     });
   }, [navigate, queryClient, rootsQuery.error, sessionExpiring]);

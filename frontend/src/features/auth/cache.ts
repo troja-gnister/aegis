@@ -12,6 +12,13 @@ export type PrivateStateSnapshot = Readonly<{
   namespace: string | null;
 }>;
 
+export class PrivateStateCleanupError extends Error {
+  constructor() {
+    super("Private browser state cleanup failed");
+    this.name = "PrivateStateCleanupError";
+  }
+}
+
 export function registerPrivateStateCleanup(cleanup: () => void): () => void {
   privateStateCleanups.add(cleanup);
   return () => privateStateCleanups.delete(cleanup);
@@ -29,14 +36,16 @@ export function isPrivateStateCurrent(
     namespace !== null && activeCacheNamespace === namespace;
 }
 
-function clearRegisteredPrivateState(): void {
+function clearRegisteredPrivateState(): boolean {
+  let failed = false;
   for (const cleanup of [...privateStateCleanups]) {
     try {
       cleanup();
     } catch {
-      // One owner cannot keep other private state alive.
+      failed = true;
     }
   }
+  return failed;
 }
 
 export function createTrackedObjectUrl(value: Blob | MediaSource): string {
@@ -102,7 +111,7 @@ async function unregisterAegisServiceWorkers(): Promise<void> {
 
 export async function purgePrivateBrowserState(queryClient: QueryClient): Promise<void> {
   privateStateGeneration += 1;
-  clearRegisteredPrivateState();
+  const ownerCleanupFailed = clearRegisteredPrivateState();
   queryClient.clear();
   clearCsrfToken();
   activeCacheNamespace = null;
@@ -113,6 +122,7 @@ export async function purgePrivateBrowserState(queryClient: QueryClient): Promis
     Promise.all(AEGIS_DATABASE_NAMES.map(deleteIndexedDatabase)),
     unregisterAegisServiceWorkers(),
   ]);
+  if (ownerCleanupFailed) throw new PrivateStateCleanupError();
 }
 
 export async function activateCacheNamespace(

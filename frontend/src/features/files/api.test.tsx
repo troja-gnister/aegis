@@ -232,6 +232,20 @@ describe("file API guards", () => {
     await expect(fetchIndexStatus(ROOT_ID, new AbortController().signal)).rejects.toMatchObject({status: 502});
     await expect(requestScan(ROOT_ID, "request_12345678", "csrf-token")).rejects.toMatchObject({status: 502});
   });
+
+  it("rejects valid details for an entry other than the requested ID", async () => {
+    const otherId = "44444444-4444-4444-8444-444444444444";
+    server.use(http.get(`/api/v1/entries/${ENTRY_ID}`, () => HttpResponse.json({
+      ...summary(otherId),
+      parentId: DIRECTORY_ID,
+      ancestors: [],
+      ancestorsTruncated: false,
+    })));
+
+    await expect(fetchEntry(ENTRY_ID, new AbortController().signal)).rejects.toMatchObject({
+      status: 502,
+    });
+  });
 });
 
 afterEach(async () => {

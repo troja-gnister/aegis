@@ -1,4 +1,8 @@
-import {registerPrivateStateCleanup} from "../auth/cache";
+import {
+  capturePrivateState,
+  isPrivateStateCurrent,
+  registerPrivateStateCleanup,
+} from "../auth/cache";
 import type {FileFilters} from "./types";
 
 const MAX_NAVIGATION_RECORDS = 32;
@@ -48,6 +52,8 @@ export function clearFileNavigationRoot(namespace: string, rootId: string): void
 
 export function createFileNavigation(namespace: string): FileNavigation {
   const records = new Map<string, FileNavigationRecord>();
+  const authority = capturePrivateState();
+  const isOwnerCurrent = () => isPrivateStateCurrent(authority, namespace);
   let disposed = false;
   const clear = () => records.clear();
   const unregisterCleanup = registerPrivateStateCleanup(clear);
@@ -55,7 +61,7 @@ export function createFileNavigation(namespace: string): FileNavigation {
   const navigation: FileNavigation = {
     get size() { return records.size; },
     remember(key, record) {
-      if (disposed) return;
+      if (disposed || !isOwnerCurrent()) return;
       const copy = clonedRecord(record);
       const storedBytes = encoder.encode(key).byteLength + encoder.encode(JSON.stringify(copy)).byteLength;
       if (storedBytes > MAX_NAVIGATION_RECORD_BYTES) {
@@ -70,7 +76,7 @@ export function createFileNavigation(namespace: string): FileNavigation {
       }
     },
     recall(key) {
-      if (disposed) return undefined;
+      if (disposed || !isOwnerCurrent()) return undefined;
       const record = records.get(key);
       if (!record) return undefined;
       records.delete(key);
@@ -78,6 +84,7 @@ export function createFileNavigation(namespace: string): FileNavigation {
       return clonedRecord(record);
     },
     clearRoot(rootId) {
+      if (!isOwnerCurrent()) return;
       for (const [key, record] of records) {
         if (record.rootId === rootId) records.delete(key);
       }

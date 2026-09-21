@@ -59,6 +59,37 @@ describe("purgePrivateBrowserState", () => {
     expect(cleanup).toHaveBeenCalledOnce();
   });
 
+  it("finishes teardown and surfaces a sanitized failure when an owner cleanup throws", async () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(["private", "root"], "secret");
+    const privateFailure = "private path /archive/source was retained";
+    const unsubscribeThrowing = registerPrivateStateCleanup(() => {
+      throw new Error(privateFailure);
+    });
+    const laterCleanup = vi.fn();
+    const unsubscribeLater = registerPrivateStateCleanup(laterCleanup);
+    let release = () => {};
+    const gate = new Promise<string[]>((resolve) => { release = () => resolve([]); });
+    Object.defineProperty(window, "caches", {
+      configurable: true,
+      value: {keys: () => gate},
+    });
+
+    const pending = purgePrivateBrowserState(queryClient);
+    expect(laterCleanup).toHaveBeenCalledOnce();
+    expect(queryClient.getQueryData(["private", "root"])).toBeUndefined();
+    release();
+    const failure = await pending.catch((error: unknown) => error);
+
+    expect(failure).toMatchObject({
+      name: "PrivateStateCleanupError",
+      message: "Private browser state cleanup failed",
+    });
+    expect(String(failure)).not.toContain(privateFailure);
+    unsubscribeThrowing();
+    unsubscribeLater();
+  });
+
   it("does not let obsolete namespace cleanup replace a newer account namespace", async () => {
     const client = new QueryClient();
     await purgePrivateBrowserState(client);

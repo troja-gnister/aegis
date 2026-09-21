@@ -5,9 +5,19 @@ import {
   type PropsWithChildren,
 } from "react";
 import {Navigate} from "react-router";
+import {ApiProblem} from "../../api/problem";
 import {fetchSession} from "./api";
 import {activateCacheNamespace, purgePrivateBrowserState} from "./cache";
-import {AuthSessionContext, isSessionAccessOpen, SESSION_QUERY_KEY, useSessionAccess} from "./session";
+import {
+  AuthSessionContext,
+  beginSignOut,
+  captureSessionTransition,
+  completeSignOut,
+  isSessionAccessOpen,
+  isSessionTransitionCurrent,
+  SESSION_QUERY_KEY,
+  useSessionAccess,
+} from "./session";
 
 function PrivateContentSkeleton() {
   return (
@@ -38,15 +48,22 @@ export function AuthBoundary({children}: PropsWithChildren) {
     if (!session || !sessionQuery.isFetchedAfterMount || sessionQuery.isFetching ||
         readyNamespace === session.cacheNamespace) return;
     let active = true;
+    const generation = captureSessionTransition();
     void (async () => {
-      const cacheWasPurged = await activateCacheNamespace(
-        queryClient,
-        session.cacheNamespace,
-      );
-      if (!active) return;
-      if (cacheWasPurged) queryClient.setQueryData(SESSION_QUERY_KEY, session);
-      setAnonymous(false);
-      setReadyNamespace(session.cacheNamespace);
+      try {
+        const cacheWasPurged = await activateCacheNamespace(
+          queryClient,
+          session.cacheNamespace,
+          () => active && isSessionTransitionCurrent(generation),
+        );
+        if (!active) return;
+        if (cacheWasPurged) queryClient.setQueryData(SESSION_QUERY_KEY, session);
+        setAnonymous(false);
+        setReadyNamespace(session.cacheNamespace);
+      } catch {
+        completeSignOut(generation, false, false);
+        if (active) setAnonymous(true);
+      }
     })();
     return () => {
       active = false;
@@ -55,10 +72,19 @@ export function AuthBoundary({children}: PropsWithChildren) {
 
   useEffect(() => {
     if (!sessionQuery.isError) return;
+    const generation = beginSignOut();
+    const confirmed = sessionQuery.error instanceof ApiProblem && sessionQuery.error.status === 401;
     let active = true;
-    void purgePrivateBrowserState(queryClient).then(() => {
-      if (active) setAnonymous(true);
-    });
+    void purgePrivateBrowserState(queryClient).then(
+      () => {
+        completeSignOut(generation, confirmed);
+        if (active) setAnonymous(true);
+      },
+      () => {
+        completeSignOut(generation, confirmed, false);
+        if (active) setAnonymous(true);
+      },
+    );
     return () => {
       active = false;
     };
@@ -70,7 +96,13 @@ export function AuthBoundary({children}: PropsWithChildren) {
       setRestoredPageChecking(true);
       void sessionQuery.refetch().then(async (result) => {
         if (result.error) {
-          await purgePrivateBrowserState(queryClient);
+          const generation = beginSignOut();
+          const confirmed = result.error instanceof ApiProblem && result.error.status === 401;
+          const cleanupSucceeded = await purgePrivateBrowserState(queryClient).then(
+            () => true,
+            () => false,
+          );
+          completeSignOut(generation, confirmed, cleanupSucceeded);
           setAnonymous(true);
         }
         setRestoredPageChecking(false);
