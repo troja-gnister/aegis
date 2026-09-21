@@ -52,7 +52,7 @@ Planning baseline: `842ba2a` on `main`, with unchanged application code from the
 | 8 | Typed filters and signed cursor contracts | 1, 2 | Complete (`78b05f1`) |
 | 9 | Permission-bound indexed keyset queries and details | 3, 8 | Complete (`6c8b1f3`) |
 | 10 | List/details/status/rescan HTTP endpoints | 4, 9 | Complete (`c364394`) |
-| 11 | Validated browser API and bounded private query window | 10 | In progress |
+| 11 | Validated browser API and bounded private query window | 10 | Review fixes (`9093744` initial) |
 | 12 | Virtualized mobile file navigation | 11 | Planned |
 | 13 | Filter panel, details, and scan-state interactions | 12 | Planned |
 | 14 | Real-stack browser and original-preservation regressions | 7, 13 | Planned |
@@ -1052,7 +1052,7 @@ Fresh scoped review passed specification and quality: both required findings and
 
 **Interfaces:** Produces the shared wire types; `fetchDirectory(input: BrowseInput, signal: AbortSignal) -> Promise<DirectoryPage>`, `fetchEntry(id: string, signal: AbortSignal) -> Promise<EntryDetails>`, `fetchIndexStatus(rootId: string, signal: AbortSignal) -> Promise<IndexStatus>`, `requestScan(rootId: string, requestId: string, csrfToken: string) -> Promise<{scanId: string}>`, and `directoryQueryOptions(input: BrowseInput)`. `BrowseInput` contains namespace, root ID/epoch, parent ID, filters, sort and order, never a filesystem path.
 
-- [ ] **Step 1: Write failing validation/cache tests.**
+- [x] **Step 1: Write failing validation/cache tests.**
 
 ```typescript
 it("bounds the active directory and rejects foreign-root rows", async () => {
@@ -1067,9 +1067,9 @@ it("bounds the active directory and rejects foreign-root rows", async () => {
 
 Define `createBrowseQueryFixture()` in the test file with a real `QueryClient` and MSW handlers producing deterministic valid `DirectoryPage` objects and signed-looking opaque test cursors; it calls the actual query functions, not a separate cache implementation. Test next/previous fetch, filter changes, namespace changes, account switch during response parsing, abort, malformed/oversized success bodies, nulls/unsafe integer encodings, duplicate IDs, root/parent mismatch, invalid cursors and extra private fields. Verify one-million-step navigation input cannot grow history/query maps beyond their caps.
 
-- [ ] **Step 2: Verify red.** Run `npm --prefix frontend test -- src/features/files/api.test.tsx src/features/files/queries.test.tsx src/features/files/navigation.test.tsx`.
+- [x] **Step 2: Verify red.** Run `npm --prefix frontend test -- src/features/files/api.test.tsx src/features/files/queries.test.tsx src/features/files/navigation.test.tsx`.
 
-- [ ] **Step 3: Implement response guards and a five-page query window.**
+- [x] **Step 3: Implement response guards and a five-page query window.**
 
 ```typescript
 import {infiniteQueryOptions} from "@tanstack/react-query";
@@ -1096,9 +1096,17 @@ Active page data is the only retained directory dataset (`gcTime=0` for inactive
 
 Use the existing auth transition ownership and query cancellation. A 401 closes private rendering, cancels file/status/detail queries, purges state, then routes to login. A 404 for a formerly visible root clears that root's records and reloads authorized roots. An obsolete namespace or aborted request cannot publish data after a newer transition. Dedupe only within the current bounded page window; this package has no bulk selection store.
 
-- [ ] **Step 4: Verify green.** Run all new browser data/cache tests plus existing HTTP/auth/cache tests, `npm --prefix frontend run lint`, `npm --prefix frontend run typecheck`, and `npm --prefix frontend run build`.
+- [x] **Step 4: Verify green.** Run all new browser data/cache tests plus existing HTTP/auth/cache tests, `npm --prefix frontend run lint`, `npm --prefix frontend run typecheck`, and `npm --prefix frontend run build`.
 
 - [ ] **Step 5: Review and commit.** Record bounded-cache, parsing and late-response evidence; commit `feat: add bounded session-scoped file query state`; push `origin main`.
+
+### Task 11 initial implementation verification
+
+Initial implementation `9093744` passed **78 frontend tests across ten files**, lint, TypeScript checks, the production build and whitespace checks on Node 24.20. These are pre-review-fix results. Covering HTTP/auth/cache/file tests passed 62 cases before the final full run. The implementation adds wire guards and streamed 1 MiB success-body limits, directory/details/status queries, a five-page query window, and bounded memory-only navigation with synchronous private cleanup. The ownership and refresh gaps below prevent acceptance. No rendered file browser, content access, dependency, backend or deployment change is included.
+
+Meaningful RED first exposed 21 missing behaviors after compile-only scaffolding replaced missing-module failures. An initial stub rejection warning was resolved by prompt promise settlement; passing and final outputs were clean. Self-review regressions then addressed same-namespace reactivation, retained-page refetches, obsolete 401 responses, invalid/path-bearing inputs, navigation-key byte accounting and compatibility with empty root-anchor ancestor labels. Synthetic tests exercise one-million-step metadata navigation, delayed parsing/account changes and bounded page retention; these are not physical 1M-entry/50K-folder or rendered-browser acceptance.
+
+Independent review returned five required corrections: refreshing pages with newly signed opaque cursors, enforcing query ownership before execution/publication/error side effects, matching details to the requested entry ID, making obsolete navigation owners inert, and reporting cleanup failures while finishing teardown safely. A separate minor finding requests behavioral query-map churn coverage; the million-step fixture bounds navigation metadata only. Task 11 is in review fixes and is not counted complete. Corrections require regression tests and fresh scoped review. The user-owned preview, originals and operator resources remain outside this work.
 
 ## Task 12: Virtualized mobile file navigation
 
