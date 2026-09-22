@@ -70,6 +70,29 @@ function persistedPageShow(): Event {
   return event;
 }
 
+function deferCacheStorageCleanup() {
+  let release = () => {};
+  let cleanupStarted = false;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const descriptor = Object.getOwnPropertyDescriptor(window, "caches");
+  Object.defineProperty(window, "caches", {
+    configurable: true,
+    value: {keys: async () => {
+      cleanupStarted = true;
+      await gate;
+      return [];
+    }},
+  });
+  return {
+    release,
+    isStarted: () => cleanupStarted,
+    restore() {
+      if (descriptor) Object.defineProperty(window, "caches", descriptor);
+      else Reflect.deleteProperty(window, "caches");
+    },
+  };
+}
+
 afterEach(async () => {
   await Promise.all([...clients].map((client) => purgePrivateBrowserState(client)));
   clients.clear();
@@ -363,6 +386,97 @@ describe("AuthBoundary", () => {
     expect(await screen.findByRole("heading", {name: "Sign in"})).toBeVisible();
     expect(client.getQueryData(["private", "pop-root"])).toBeUndefined();
     expect(screen.getByLabelText("Session access")).toHaveTextContent("closed");
+  });
+
+  it("completes a delayed successful POP purge after the boundary unmounts", async () => {
+    let calls = 0;
+    server.use(http.get("/api/v1/auth/session", () => {
+      calls += 1;
+      return calls === 1
+        ? HttpResponse.json(SESSION)
+        : HttpResponse.json({type: "authentication_required"}, {status: 401});
+    }));
+    const cleanup = deferCacheStorageCleanup();
+    try {
+      renderBoundary();
+      expect(await screen.findByText("Private family archive")).toBeVisible();
+
+      fireEvent.click(screen.getByRole("button", {name: "Back"}));
+      await waitFor(() => expect(cleanup.isStarted()).toBe(true));
+      expect(await screen.findByRole("heading", {name: "Sign in"})).toBeVisible();
+      expect(screen.getByLabelText("Session access")).toHaveTextContent("signing_out");
+      await act(async () => { cleanup.release(); });
+
+      await waitFor(() => expect(screen.getByLabelText("Session access")).toHaveTextContent("closed"));
+    } finally {
+      await act(async () => { cleanup.release(); });
+      cleanup.restore();
+    }
+  });
+
+  it("reports delayed POP cleanup failure after the boundary unmounts", async () => {
+    let calls = 0;
+    server.use(http.get("/api/v1/auth/session", () => {
+      calls += 1;
+      return calls === 1
+        ? HttpResponse.json(SESSION)
+        : HttpResponse.json({type: "authentication_required"}, {status: 401});
+    }));
+    const cleanup = deferCacheStorageCleanup();
+    const unregister = registerPrivateStateCleanup(() => {
+      throw new Error("private POP cleanup detail");
+    });
+    try {
+      renderBoundary();
+      expect(await screen.findByText("Private family archive")).toBeVisible();
+
+      fireEvent.click(screen.getByRole("button", {name: "Back"}));
+      await waitFor(() => expect(cleanup.isStarted()).toBe(true));
+      expect(await screen.findByRole("heading", {name: "Sign in"})).toBeVisible();
+      await act(async () => { cleanup.release(); });
+
+      await waitFor(() =>
+        expect(screen.getByLabelText("Session access")).toHaveTextContent("cleanup_failed"),
+      );
+      expect(screen.queryByText("private POP cleanup detail")).not.toBeInTheDocument();
+    } finally {
+      await act(async () => { cleanup.release(); });
+      unregister();
+      cleanup.restore();
+    }
+  });
+
+  it("ignores an obsolete delayed POP cleanup completion after a newer session opens", async () => {
+    let calls = 0;
+    server.use(http.get("/api/v1/auth/session", () => {
+      calls += 1;
+      return calls === 1
+        ? HttpResponse.json(SESSION)
+        : HttpResponse.json({type: "authentication_required"}, {status: 401});
+    }));
+    const cleanup = deferCacheStorageCleanup();
+    const unregister = registerPrivateStateCleanup(() => {
+      throw new Error("obsolete private POP cleanup detail");
+    });
+    try {
+      renderBoundary();
+      expect(await screen.findByText("Private family archive")).toBeVisible();
+
+      fireEvent.click(screen.getByRole("button", {name: "Back"}));
+      await waitFor(() => expect(cleanup.isStarted()).toBe(true));
+      expect(await screen.findByRole("heading", {name: "Sign in"})).toBeVisible();
+      await act(async () => {
+        openSessionAfterLogin();
+        cleanup.release();
+      });
+
+      await waitFor(() => expect(screen.getByLabelText("Session access")).toHaveTextContent("open"));
+      expect(screen.queryByText("obsolete private POP cleanup detail")).not.toBeInTheDocument();
+    } finally {
+      await act(async () => { cleanup.release(); });
+      unregister();
+      cleanup.restore();
+    }
   });
 
   it("ignores an obsolete POP completion after a newer PUSH owns the route", async () => {

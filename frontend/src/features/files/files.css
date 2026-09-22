@@ -54,6 +54,11 @@
   cursor: pointer;
 }
 
+.virtual-file-list > .file-page-control[aria-disabled="true"] {
+  cursor: wait;
+  opacity: 0.65;
+}
+
 .virtual-file-list__viewport {
   position: relative;
   inline-size: 100%;

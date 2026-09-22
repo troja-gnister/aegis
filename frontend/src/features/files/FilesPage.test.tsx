@@ -11,6 +11,7 @@ import {AuthSessionContext} from "../auth/session";
 import type {SessionResponse} from "../auth/types";
 import {FileNavigationProvider, FileNavigationRouteConsumer, FilesPage} from "./FilesPage";
 import type {FileNavigation, FileNavigationRecord} from "./navigation";
+import {directoryQueryOptions} from "./queries";
 import {FIXTURE_ROOT_ID, fixtureEntry} from "./test-fixtures";
 
 const PARENT_ID = "22222222-2222-4222-8222-222222222222";
@@ -360,5 +361,91 @@ describe("FilesPage", () => {
     const restoredViewport = await screen.findByTestId("file-list-viewport");
     await waitFor(() => expect(restoredViewport.scrollTop).toBe(160));
     expect(restoredViewport).toHaveAttribute("data-first-visible-id", rootEntries[2]!.id);
+  });
+
+  it("restores a deep-page anchor after POP validation and inactive query eviction", async () => {
+    const deepDirectory = {
+      ...fixtureEntry(620),
+      id: PARENT_ID,
+      displayName: "Deep retained directory",
+      kind: "directory" as const,
+      typeHint: null,
+    };
+    const requestedCursors: Array<string | null> = [];
+    let sessionCalls = 0;
+    let releaseSession = () => {};
+    const sessionGate = new Promise<void>((resolve) => { releaseSession = resolve; });
+    server.use(
+      http.get("/api/v1/auth/session", async () => {
+        sessionCalls += 1;
+        if (sessionCalls > 1) await sessionGate;
+        return HttpResponse.json(SESSION);
+      }),
+      http.get("/api/v1/roots", () => HttpResponse.json(rootResponse())),
+      http.get(`/api/v1/roots/${FIXTURE_ROOT_ID}/entries`, ({request}) => {
+        const url = new URL(request.url);
+        const parent = url.searchParams.get("parent");
+        if (parent) return HttpResponse.json(pageResponse(parent, []));
+        const cursor = url.searchParams.get("cursor");
+        requestedCursors.push(cursor);
+        const pageNumber = cursor === null ? 0 : Number(cursor.split(":").at(-1));
+        const pageEntries = Array.from({length: 100}, (_, index) =>
+          pageNumber === 6 && index === 20 ? deepDirectory : fixtureEntry(pageNumber * 100 + index),
+        );
+        return HttpResponse.json({
+          ...pageResponse(null, pageEntries),
+          nextCursor: pageNumber < 6 ? `cursor:${pageNumber + 1}` : null,
+          previousCursor: pageNumber > 0 ? `cursor:${pageNumber - 1}` : null,
+        });
+      }),
+    );
+    const queryClient = new QueryClient({defaultOptions: {queries: {retry: false}}});
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={[`/files/${FIXTURE_ROOT_ID}`]}>
+          <BackButton />
+          <AppRoutes />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    const viewport = await screen.findByTestId("file-list-viewport");
+    Object.defineProperty(viewport, "clientHeight", {configurable: true, value: 480});
+    for (let pageNumber = 1; pageNumber <= 6; pageNumber += 1) {
+      fireEvent.click(screen.getByRole("button", {name: "Load more files"}));
+      await waitFor(() => expect(requestedCursors.at(-1)).toBe(`cursor:${pageNumber}`));
+      if (pageNumber < 6) {
+        await waitFor(() => expect(screen.getByRole("button", {name: "Load more files"})).toBeEnabled());
+      }
+    }
+    fireEvent.scroll(viewport, {target: {scrollTop: 420 * 80}});
+    await waitFor(() => expect(viewport).toHaveAttribute("data-first-visible-id", PARENT_ID));
+    fireEvent.click(screen.getByRole("button", {name: "Open directory Deep retained directory"}));
+    expect(await screen.findByText("No files in this location.")).toBeVisible();
+
+    const rootDirectoryKey = directoryQueryOptions({
+      namespace: SESSION.cacheNamespace,
+      rootId: FIXTURE_ROOT_ID,
+      rootEpoch: 4,
+      parentId: null,
+      filters: {v: 1},
+      sort: "name",
+      order: "asc",
+      cursor: null,
+    }).queryKey;
+    await waitFor(() => expect(queryClient.getQueryData(rootDirectoryKey)).toBeUndefined());
+
+    fireEvent.click(screen.getByRole("button", {name: "Back in history"}));
+    try {
+      expect(screen.getByLabelText("Checking session")).toBeVisible();
+      expect(screen.queryByText("Deep retained directory")).not.toBeInTheDocument();
+      await waitFor(() => expect(sessionCalls).toBe(2));
+    } finally {
+      releaseSession();
+    }
+
+    const restoredViewport = await screen.findByTestId("file-list-viewport");
+    await waitFor(() => expect(requestedCursors.at(-1)).toBe("cursor:6"));
+    await waitFor(() => expect(restoredViewport.scrollTop).toBe(20 * 80));
+    expect(restoredViewport).toHaveAttribute("data-first-visible-id", PARENT_ID);
   });
 });

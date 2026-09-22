@@ -29,6 +29,27 @@ export type VirtualFileListProps = {
 
 type FocusedRow = {id: string; index: number};
 
+function nearestSurvivingIndex(
+  previousEntries: EntrySummary[],
+  previousIndex: number,
+  entries: EntrySummary[],
+): number {
+  const currentIndexes = new Map(entries.map((entry, index) => [entry.id, index]));
+  for (let distance = 1; distance < previousEntries.length; distance += 1) {
+    const before = previousEntries[previousIndex - distance];
+    if (before) {
+      const index = currentIndexes.get(before.id);
+      if (index !== undefined) return index;
+    }
+    const after = previousEntries[previousIndex + distance];
+    if (after) {
+      const index = currentIndexes.get(after.id);
+      if (index !== undefined) return index;
+    }
+  }
+  return entries.length === 0 ? -1 : 0;
+}
+
 export function VirtualFileList({
   entries,
   onOpen,
@@ -42,6 +63,7 @@ export function VirtualFileList({
   const scrollRef = useRef<HTMLDivElement>(null);
   const previousEntriesRef = useRef(entries);
   const scrollTopRef = useRef(0);
+  const programmaticScrollTopRef = useRef<number | null>(null);
   const rowControlsRef = useRef(new Map<string, HTMLButtonElement>());
   const focusedRef = useRef<FocusedRow | null>(null);
   const pagingRef = useRef({next: false, previous: false});
@@ -49,6 +71,7 @@ export function VirtualFileList({
   const [scrollTop, setScrollTop] = useState(0);
   const [paging, setPaging] = useState({next: false, previous: false});
   const [announcement, setAnnouncement] = useState("");
+  const [pendingFocusId, setPendingFocusId] = useState<string | null>(null);
 
   const rangeExtractor = useCallback((range: Range) => {
     const indexes = defaultRangeExtractor(range);
@@ -97,6 +120,7 @@ export function VirtualFileList({
     const index = entries.findIndex((entry) => entry.id === anchor.id);
     if (index < 0) return;
     const nextOffset = Math.max(0, index * ROW_HEIGHT - anchor.offset);
+    programmaticScrollTopRef.current = nextOffset;
     viewport.scrollTop = nextOffset;
     scrollTopRef.current = nextOffset;
     setScrollTop(nextOffset);
@@ -117,24 +141,47 @@ export function VirtualFileList({
     const oldOffset = oldFirstIndex * ROW_HEIGHT - scrollTopRef.current;
     let newIndex = oldAnchor ? entries.findIndex((entry) => entry.id === oldAnchor.id) : -1;
     if (newIndex < 0 && entries.length > 0) {
-      newIndex = Math.min(oldFirstIndex, entries.length - 1);
+      newIndex = nearestSurvivingIndex(previousEntries, oldFirstIndex, entries);
       setAnnouncement("The visible file moved to the nearest available file.");
     }
     if (newIndex >= 0) {
       const nextOffset = Math.max(0, newIndex * ROW_HEIGHT - oldOffset);
+      programmaticScrollTopRef.current = nextOffset;
       viewport.scrollTop = nextOffset;
       scrollTopRef.current = nextOffset;
       setScrollTop(nextOffset);
     }
 
     const focused = focusedRef.current;
-    if (!focused || entries.some((entry) => entry.id === focused.id) || entries.length === 0) return;
-    const replacementIndex = Math.min(focused.index, entries.length - 1);
+    if (!focused) return;
+    const retainedFocusIndex = entries.findIndex((entry) => entry.id === focused.id);
+    if (retainedFocusIndex >= 0) {
+      focusedRef.current = {id: focused.id, index: retainedFocusIndex};
+      return;
+    }
+    if (entries.length === 0) {
+      focusedRef.current = null;
+      return;
+    }
+    const previousFocusedIndex = previousEntries.findIndex((entry) => entry.id === focused.id);
+    const replacementIndex = nearestSurvivingIndex(
+      previousEntries,
+      previousFocusedIndex >= 0 ? previousFocusedIndex : focused.index,
+      entries,
+    );
     const replacement = entries[replacementIndex]!;
     focusedRef.current = {id: replacement.id, index: replacementIndex};
     setAnnouncement("Focus moved to the nearest available file.");
-    queueMicrotask(() => rowControlsRef.current.get(replacement.id)?.focus());
+    setPendingFocusId(replacement.id);
   }, [entries]);
+
+  useLayoutEffect(() => {
+    if (pendingFocusId === null) return;
+    const control = rowControlsRef.current.get(pendingFocusId);
+    if (!control) return;
+    control.focus({preventScroll: true});
+    setPendingFocusId(null);
+  }, [pendingFocusId, virtualItems]);
 
   const load = useCallback(async (direction: "next" | "previous") => {
     if (pagingRef.current[direction]) return;
@@ -161,7 +208,9 @@ export function VirtualFileList({
       <button
         className="file-page-control interactive"
         type="button"
-        disabled={!hasPrevious || paging.previous}
+        disabled={!hasPrevious}
+        aria-disabled={paging.previous || undefined}
+        aria-busy={paging.previous || undefined}
         onClick={() => void load("previous")}
       >
         {paging.previous ? "Loading previous files…" : "Load previous files"}
@@ -172,9 +221,14 @@ export function VirtualFileList({
         ref={scrollRef}
         onScroll={(event) => {
           const viewport = event.currentTarget;
+          const programmaticScrollTop = programmaticScrollTopRef.current;
+          const isProgrammaticRestoration = programmaticScrollTop !== null &&
+            Math.abs(viewport.scrollTop - programmaticScrollTop) < 1;
+          programmaticScrollTopRef.current = null;
           scrollTopRef.current = viewport.scrollTop;
           setScrollTop(viewport.scrollTop);
           publishAnchor();
+          if (isProgrammaticRestoration) return;
           if (
             hasNext && !pagingRef.current.next && viewport.scrollHeight > viewport.clientHeight &&
             viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - ROW_HEIGHT
@@ -218,6 +272,12 @@ export function VirtualFileList({
                     }
                   }}
                   onFocus={() => { focusedRef.current = {id: entry.id, index: row.index}; }}
+                  onBlur={(event) => {
+                    if (
+                      !event.currentTarget.contains(event.relatedTarget as Node | null) &&
+                      focusedRef.current?.id === entry.id
+                    ) focusedRef.current = null;
+                  }}
                 >
                   <FileRow entry={entry} onOpen={onOpen} />
                 </span>
@@ -229,7 +289,9 @@ export function VirtualFileList({
       <button
         className="file-page-control interactive"
         type="button"
-        disabled={!hasNext || paging.next}
+        disabled={!hasNext}
+        aria-disabled={paging.next || undefined}
+        aria-busy={paging.next || undefined}
         onClick={() => void load("next")}
       >
         {paging.next ? "Loading more files…" : "Load more files"}

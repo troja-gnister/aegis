@@ -137,18 +137,22 @@ export function FilesPage() {
 
   const remember = useCallback((anchor = anchorRef.current) => {
     if (!navigation) return;
-    const firstPageParam = directoryQuery.data?.pageParams[0];
+    const pages = directoryQuery.data?.pages ?? [];
+    const anchorPageIndex = anchor.id === null
+      ? -1
+      : pages.findIndex((page) => page.entries.some((entry) => entry.id === anchor.id));
+    const pageParam = directoryQuery.data?.pageParams[anchorPageIndex >= 0 ? anchorPageIndex : 0];
     navigation.remember(routeKey, {
       rootId,
       parentId: parentId ?? null,
       filters,
       sort,
       order,
-      cursor: typeof firstPageParam === "string" ? firstPageParam : null,
+      cursor: typeof pageParam === "string" ? pageParam : null,
       visibleAnchorId: anchor.id,
       visibleAnchorOffset: anchor.offset,
     });
-  }, [directoryQuery.data?.pageParams, filters, navigation, order, parentId, rootId, routeKey, sort]);
+  }, [directoryQuery.data, filters, navigation, order, parentId, rootId, routeKey, sort]);
 
   useEffect(() => {
     setSelectedFile(null);

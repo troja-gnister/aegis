@@ -130,8 +130,8 @@ export function AuthBoundary({children}: AuthBoundaryProps) {
           () => true,
           () => false,
         );
-        if (!active || pendingPopKeyRef.current !== checkedLocationKey) return;
         completeSignOut(signOutGeneration, confirmed, cleanupSucceeded);
+        if (!active || pendingPopKeyRef.current !== checkedLocationKey) return;
         setAnonymous(true);
         return;
       }
