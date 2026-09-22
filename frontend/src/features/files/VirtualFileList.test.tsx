@@ -1,5 +1,5 @@
 import {fireEvent, render, screen, waitFor} from "@testing-library/react";
-import {useState} from "react";
+import {useLayoutEffect, useState} from "react";
 import {afterEach, beforeEach, describe, expect, it, vi} from "vitest";
 import {fixtureEntry} from "./test-fixtures";
 import {VirtualFileList} from "./VirtualFileList";
@@ -232,6 +232,58 @@ describe("VirtualFileList", () => {
     expect(viewport).toHaveAttribute("data-first-visible-id", fixtureEntry(594).id);
     expect(screen.getByRole("status")).toHaveTextContent(/focus moved to the nearest available file/i);
   });
+
+  it.each(["Load more files", "Outside control"])(
+    "does not fulfill deferred row focus after %s gains ownership",
+    async (focusTarget) => {
+      function FocusAfterEviction({active}: {active: boolean}) {
+        useLayoutEffect(() => {
+          if (active) screen.getByRole("button", {name: focusTarget}).focus();
+        }, [active]);
+        return null;
+      }
+
+      const view = (items: ReturnType<typeof entries>, ownershipChanges: boolean) => (
+        <>
+          <button type="button">Outside control</button>
+          <VirtualFileList
+            entries={items}
+            onOpen={vi.fn()}
+            onLoadNext={vi.fn()}
+            onLoadPrevious={vi.fn()}
+            hasNext
+            hasPrevious
+          />
+          <FocusAfterEviction active={ownershipChanges} />
+        </>
+      );
+      const {rerender} = render(view(entries(100), false));
+      const viewport = screen.getByTestId("file-list-viewport");
+      Object.defineProperties(viewport, {
+        clientHeight: {configurable: true, value: 480},
+        scrollHeight: {configurable: true, value: 40_000},
+      });
+      fireEvent.scroll(viewport, {target: {scrollTop: 60 * 80}});
+      const ownedRow = await screen.findByRole("button", {name: "Select file Synthetic file 0160.jpg"});
+      ownedRow.focus();
+      fireEvent.scroll(viewport, {target: {scrollTop: 494 * 80}});
+      await waitFor(() => expect(viewport).toHaveAttribute(
+        "data-first-visible-id",
+        fixtureEntry(594).id,
+      ));
+
+      rerender(view(entries(200), true));
+      const newOwner = screen.getByRole("button", {name: focusTarget});
+      expect(newOwner).toHaveFocus();
+
+      fireEvent.scroll(viewport, {target: {scrollTop: 0}});
+
+      await waitFor(() => expect(screen.getByRole("button", {
+        name: "Select file Synthetic file 0200.jpg",
+      })).toBeVisible());
+      expect(newOwner).toHaveFocus();
+    },
+  );
 
   it.each(["Load more files", "Outside control"])(
     "does not steal focus from %s when a previously focused row is evicted",

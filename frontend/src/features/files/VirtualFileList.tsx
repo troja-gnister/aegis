@@ -66,6 +66,7 @@ export function VirtualFileList({
   const programmaticScrollTopRef = useRef<number | null>(null);
   const rowControlsRef = useRef(new Map<string, HTMLButtonElement>());
   const focusedRef = useRef<FocusedRow | null>(null);
+  const pendingFocusOwnerRef = useRef<Element | null>(null);
   const pagingRef = useRef({next: false, previous: false});
   const initialAnchorRef = useRef(initialAnchor);
   const [scrollTop, setScrollTop] = useState(0);
@@ -171,15 +172,23 @@ export function VirtualFileList({
     );
     const replacement = entries[replacementIndex]!;
     focusedRef.current = {id: replacement.id, index: replacementIndex};
-    setAnnouncement("Focus moved to the nearest available file.");
+    pendingFocusOwnerRef.current = document.activeElement;
     setPendingFocusId(replacement.id);
   }, [entries]);
 
   useLayoutEffect(() => {
     if (pendingFocusId === null) return;
+    if (document.activeElement !== pendingFocusOwnerRef.current) {
+      focusedRef.current = null;
+      pendingFocusOwnerRef.current = null;
+      setPendingFocusId(null);
+      return;
+    }
     const control = rowControlsRef.current.get(pendingFocusId);
     if (!control) return;
     control.focus({preventScroll: true});
+    pendingFocusOwnerRef.current = null;
+    setAnnouncement("Focus moved to the nearest available file.");
     setPendingFocusId(null);
   }, [pendingFocusId, virtualItems]);
 
