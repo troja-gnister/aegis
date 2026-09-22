@@ -28,11 +28,13 @@ test("Alice isolation, refresh, phone accessibility, and revoked restoration", a
   await page.reload();
   await expect(page.getByRole("heading", {name: "Alice files"})).toBeVisible();
 
-  const rootButton = page.getByRole("button", {name: /Alice files/});
-  await rootButton.focus();
+  const rootLink = page.getByRole("link", {name: /Alice files/});
+  await rootLink.focus();
   await page.keyboard.press("Enter");
-  await expect(page.getByText("File browsing arrives in Phase 2.")).toBeVisible();
-  await expect(rootButton).toHaveAttribute("aria-expanded", "true");
+  await expect(page).toHaveURL(/\/files\/[0-9a-f-]+$/);
+  await page.goBack();
+  await expect(page).toHaveURL(/\/roots$/);
+  await expect(page.getByRole("heading", {name: "Alice files"})).toBeVisible();
 
   for (const width of [320, 390]) {
     await page.setViewportSize({width, height: 844});

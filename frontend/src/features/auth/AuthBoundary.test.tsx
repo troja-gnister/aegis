@@ -29,6 +29,7 @@ function LocationProbe() {
     <output aria-label="Current route">{useLocation().pathname}</output>
     <output aria-label="Session access">{useSessionAccess()}</output>
     <button onClick={() => navigate(-1)}>Back</button>
+    <button onClick={() => navigate("/roots?fresh")}>Navigate fresh</button>
   </>;
 }
 
@@ -315,6 +316,78 @@ describe("AuthBoundary", () => {
     releaseRevalidation();
     expect(await screen.findByText("Private family archive")).toBeVisible();
     expect(calls).toBe(2);
+  });
+
+  it("withholds private content synchronously while a POP session revalidation is pending", async () => {
+    let calls = 0;
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    server.use(http.get("/api/v1/auth/session", async () => {
+      calls += 1;
+      if (calls > 1) await gate;
+      return HttpResponse.json(SESSION);
+    }));
+    renderBoundary();
+    expect(await screen.findByText("Private family archive")).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", {name: "Back"}));
+    try {
+      expect(screen.queryByText("Private family archive")).not.toBeInTheDocument();
+      expect(screen.getByLabelText("Checking session")).toBeVisible();
+      await waitFor(() => expect(calls).toBe(2));
+    } finally {
+      release();
+    }
+    expect(await screen.findByText("Private family archive")).toBeVisible();
+  });
+
+  it("keeps POP content closed and purges private state when revalidation finds revocation", async () => {
+    let calls = 0;
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    server.use(http.get("/api/v1/auth/session", async () => {
+      calls += 1;
+      if (calls === 1) return HttpResponse.json(SESSION);
+      await gate;
+      return HttpResponse.json({type: "authentication_required"}, {status: 401});
+    }));
+    const client = renderBoundary();
+    expect(await screen.findByText("Private family archive")).toBeVisible();
+    client.setQueryData(["private", "pop-root"], "secret");
+
+    fireEvent.click(screen.getByRole("button", {name: "Back"}));
+    expect(screen.queryByText("Private family archive")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Checking session")).toBeVisible();
+    release();
+
+    expect(await screen.findByRole("heading", {name: "Sign in"})).toBeVisible();
+    expect(client.getQueryData(["private", "pop-root"])).toBeUndefined();
+    expect(screen.getByLabelText("Session access")).toHaveTextContent("closed");
+  });
+
+  it("ignores an obsolete POP completion after a newer PUSH owns the route", async () => {
+    let calls = 0;
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    server.use(http.get("/api/v1/auth/session", async () => {
+      calls += 1;
+      if (calls === 1) return HttpResponse.json(SESSION);
+      await gate;
+      return HttpResponse.json({type: "authentication_required"}, {status: 401});
+    }));
+    renderBoundary();
+    expect(await screen.findByText("Private family archive")).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", {name: "Back"}));
+    expect(screen.getByLabelText("Checking session")).toBeVisible();
+    await waitFor(() => expect(calls).toBe(2));
+    fireEvent.click(screen.getByRole("button", {name: "Navigate fresh"}));
+    expect(await screen.findByText("Private family archive")).toBeVisible();
+    release();
+
+    await waitFor(() => expect(screen.getByLabelText("Session access")).toHaveTextContent("open"));
+    expect(screen.getByText("Private family archive")).toBeVisible();
+    expect(screen.queryByRole("heading", {name: "Sign in"})).not.toBeInTheDocument();
   });
 
   it("purges the prior query cache before rendering a changed namespace", async () => {

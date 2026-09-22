@@ -1,4 +1,4 @@
-import {useState} from "react";
+import {Link} from "react-router";
 import type {RootShell} from "./types";
 
 type RootCardProps = {
@@ -12,17 +12,11 @@ function hostCapability(mode: RootShell["mode"]): string {
 }
 
 export function RootCard({root}: RootCardProps) {
-  const [open, setOpen] = useState(false);
-  const detailsId = `root-${root.id}-details`;
-
   return (
     <article className="root-card">
-      <button
+      <Link
         className="root-card__button interactive"
-        type="button"
-        aria-expanded={open}
-        aria-controls={detailsId}
-        onClick={() => setOpen((current) => !current)}
+        to={`/files/${root.id}`}
       >
         <span className="root-card__icon" aria-hidden="true">
           ◫
@@ -37,13 +31,7 @@ export function RootCard({root}: RootCardProps) {
         <span className="root-card__chevron" aria-hidden="true">
           ›
         </span>
-      </button>
-      {open ? (
-        <div className="root-card__details" id={detailsId}>
-          <p>File browsing arrives in Phase 2.</p>
-          <p>Mounted originals remain read only.</p>
-        </div>
-      ) : null}
+      </Link>
     </article>
   );
 }

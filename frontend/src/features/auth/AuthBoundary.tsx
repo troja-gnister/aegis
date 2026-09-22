@@ -1,10 +1,12 @@
 import {useQuery, useQueryClient} from "@tanstack/react-query";
 import {
   useEffect,
+  useReducer,
+  useRef,
   useState,
-  type PropsWithChildren,
+  type ReactNode,
 } from "react";
-import {Navigate} from "react-router";
+import {Navigate, useLocation, useNavigationType} from "react-router";
 import {ApiProblem} from "../../api/problem";
 import {fetchSession} from "./api";
 import {activateCacheNamespace, purgePrivateBrowserState} from "./cache";
@@ -27,9 +29,30 @@ function PrivateContentSkeleton() {
   );
 }
 
-export function AuthBoundary({children}: PropsWithChildren) {
+export function PrivateContentGate({checking, children}: {
+  checking: boolean;
+  children: ReactNode;
+}) {
+  return checking ? <PrivateContentSkeleton /> : children;
+}
+
+type AuthBoundaryProps = {
+  children: ReactNode | ((state: {checking: boolean}) => ReactNode);
+};
+
+export function AuthBoundary({children}: AuthBoundaryProps) {
   const queryClient = useQueryClient();
   const sessionAccess = useSessionAccess();
+  const location = useLocation();
+  const navigationType = useNavigationType();
+  const previousLocationKeyRef = useRef(location.key);
+  const pendingPopKeyRef = useRef<string | null>(null);
+  const [, renderAfterHistoryCheck] = useReducer((value: number) => value + 1, 0);
+  if (previousLocationKeyRef.current !== location.key) {
+    previousLocationKeyRef.current = location.key;
+    pendingPopKeyRef.current = navigationType === "POP" ? location.key : null;
+  }
+  const popChecking = pendingPopKeyRef.current === location.key;
   const sessionQuery = useQuery({
     queryKey: SESSION_QUERY_KEY,
     queryFn: fetchSession,
@@ -71,7 +94,7 @@ export function AuthBoundary({children}: PropsWithChildren) {
   }, [queryClient, readyNamespace, sessionQuery.data, sessionQuery.isFetchedAfterMount, sessionQuery.isFetching]);
 
   useEffect(() => {
-    if (!sessionQuery.isError) return;
+    if (!sessionQuery.isError || pendingPopKeyRef.current === location.key) return;
     const generation = beginSignOut();
     const confirmed = sessionQuery.error instanceof ApiProblem && sessionQuery.error.status === 401;
     let active = true;
@@ -88,7 +111,58 @@ export function AuthBoundary({children}: PropsWithChildren) {
     return () => {
       active = false;
     };
-  }, [queryClient, sessionQuery.isError]);
+  }, [location.key, queryClient, sessionQuery.error, sessionQuery.isError]);
+
+  useEffect(() => {
+    if (!popChecking) return;
+    const checkedLocationKey = location.key;
+    const generation = captureSessionTransition();
+    let active = true;
+    void sessionQuery.refetch({cancelRefetch: true}).then(async (result) => {
+      if (
+        !active || pendingPopKeyRef.current !== checkedLocationKey ||
+        !isSessionTransitionCurrent(generation) || !isSessionAccessOpen()
+      ) return;
+      if (result.error) {
+        const confirmed = result.error instanceof ApiProblem && result.error.status === 401;
+        const signOutGeneration = beginSignOut();
+        const cleanupSucceeded = await purgePrivateBrowserState(queryClient).then(
+          () => true,
+          () => false,
+        );
+        if (!active || pendingPopKeyRef.current !== checkedLocationKey) return;
+        completeSignOut(signOutGeneration, confirmed, cleanupSucceeded);
+        setAnonymous(true);
+        return;
+      }
+      const session = result.data;
+      if (!session) return;
+      try {
+        const cacheWasPurged = await activateCacheNamespace(
+          queryClient,
+          session.cacheNamespace,
+          () => active && pendingPopKeyRef.current === checkedLocationKey &&
+            isSessionTransitionCurrent(generation),
+        );
+        if (
+          !active || pendingPopKeyRef.current !== checkedLocationKey ||
+          !isSessionTransitionCurrent(generation)
+        ) return;
+        if (cacheWasPurged) queryClient.setQueryData(SESSION_QUERY_KEY, session);
+        setAnonymous(false);
+        setReadyNamespace(session.cacheNamespace);
+        pendingPopKeyRef.current = null;
+        renderAfterHistoryCheck();
+      } catch {
+        completeSignOut(generation, false, false);
+        if (active) setAnonymous(true);
+      }
+    });
+    return () => {
+      active = false;
+      void queryClient.cancelQueries({queryKey: SESSION_QUERY_KEY, exact: true});
+    };
+  }, [location.key, popChecking, queryClient, sessionQuery.refetch]);
 
   useEffect(() => {
     const revalidate = (event: PageTransitionEvent) => {
@@ -118,17 +192,19 @@ export function AuthBoundary({children}: PropsWithChildren) {
   if (
     sessionQuery.isPending ||
     !sessionQuery.isFetchedAfterMount ||
-    sessionQuery.isFetching ||
     sessionQuery.isError ||
-    restoredPageChecking ||
     !sessionQuery.data ||
     readyNamespace !== sessionQuery.data.cacheNamespace
   ) {
     return <PrivateContentSkeleton />;
   }
+  const checking = sessionQuery.isFetching || restoredPageChecking || popChecking;
+  const content = typeof children === "function"
+    ? children({checking})
+    : <PrivateContentGate checking={checking}>{children}</PrivateContentGate>;
   return (
     <AuthSessionContext.Provider value={{session: sessionQuery.data}}>
-      {children}
+      {content}
     </AuthSessionContext.Provider>
   );
 }

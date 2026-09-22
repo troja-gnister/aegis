@@ -113,7 +113,7 @@ describe("RootListPage", () => {
     }
   });
 
-  it("opens the Phase 2 explanation with keyboard-native activation", async () => {
+  it("navigates to the authorized root with a keyboard-native link", async () => {
     const longName = `Archive ${"very-long-name-".repeat(7)}`;
     server.use(
       http.get("/api/v1/roots", () =>
@@ -131,15 +131,17 @@ describe("RootListPage", () => {
       ),
     );
     renderRootList();
-    const rootButton = await screen.findByRole("button", {name: new RegExp(longName)});
+    const rootLink = await screen.findByRole("link", {name: new RegExp(longName)});
 
-    rootButton.focus();
-    fireEvent.keyDown(rootButton, {key: "Enter"});
-    fireEvent.click(rootButton);
-
-    expect(screen.getByText("File browsing arrives in Phase 2.")).toBeVisible();
+    rootLink.focus();
+    expect(rootLink).toHaveAttribute("href", "/files/2503ab90-d801-466c-a6aa-3599fb0fe68f");
     expect(screen.getByText("Legacy host declaration: read/write")).toBeVisible();
-    expect(getComputedStyle(rootButton).minBlockSize).toBe("var(--touch-target)");
+    fireEvent.click(rootLink);
+
+    expect(screen.getByLabelText("Current route")).toHaveTextContent(
+      "/files/2503ab90-d801-466c-a6aa-3599fb0fe68f",
+    );
+    expect(getComputedStyle(rootLink).minBlockSize).toBe("var(--touch-target)");
   });
 
   it("shows a generic bounded failure and never renders malformed names", async () => {
