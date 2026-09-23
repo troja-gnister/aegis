@@ -38,7 +38,7 @@
 
 ## Status and task ledger
 
-Planning baseline: `842ba2a` on `main`, with unchanged application code from the verified Phase 1 foundation; execution begins from the committed plan at `6169402`. This plan defines **18 tasks: 12 complete, 6 remaining**. Tasks 1–12 passed verification and independent review, including lifecycle, input-bound, authentication-precedence, availability, browser-state ownership and navigation/focus corrections. Permission-bound indexed queries, bounded details, private HTTP endpoints, the browser data layer and virtualized mobile file navigation are accepted. Work is paused before Task 13; the [portable handoff](../../development-handoff.md) records the next integration boundaries. Task 6 retains the September 15 approved commit-fence boundary below. Task 4's local full-deployment limitation remains documented below, not a green gate. The ledger is authoritative; checkboxes below record the execution recipe and subsequent evidence, not a second task count.
+Planning baseline: `842ba2a` on `main`, with unchanged application code from the verified Phase 1 foundation; execution begins from the committed plan at `6169402`. This plan defines **18 tasks: 12 complete, 6 remaining**. Tasks 1–12 passed verification and independent review, including lifecycle, input-bound, authentication-precedence, availability, browser-state ownership and navigation/focus corrections. Permission-bound indexed queries, bounded details, private HTTP endpoints, the browser data layer and virtualized mobile file navigation are accepted. Linux/Podman prerequisite verification precedes Task 13; the [portable handoff](../../development-handoff.md) records the next integration boundaries. Task 6 retains the September 15 approved commit-fence boundary below. Task 4's local full-deployment limitation remains documented below, not a green gate. The ledger is authoritative; checkboxes below record the execution recipe and subsequent evidence, not a second task count.
 
 | Task | Independently testable deliverable | Depends on | Status |
 | --- | --- | --- | --- |
@@ -62,6 +62,10 @@ Planning baseline: `842ba2a` on `main`, with unchanged application code from the
 | 18 | Fresh-checkout acceptance, upgrade runbook, and reconciled roadmap | 1–17 | Planned |
 
 Later 2A plans still own watcher/event ingestion, broader filename/path search, reconnectable events, and authorized downloads/ranges. All 2B–2G milestones remain required. Their task counts have not been assigned, so 18 is not the remaining-task count for the full rewrite.
+
+### Linux/Podman prerequisite, September 23
+
+A separately scoped runtime adaptation is in progress before Task 13. The [prerequisite report](../../verification/linux-podman-prerequisite.md) records the actual Fedora/x86-64 host, rootless Podman and external Compose provider, locked toolchain, synthetic browser results, unresolved preparation/cleanup findings, and cleanup disposition. Application Podman gates have not run; no package task or feature status advances. Docker CI support and all original-preservation, network-isolation, mount, init/reaping and resource assertions remain required. The i7 development host is not the calibrated N100 reference.
 
 ### Current checkpoint CI limitation
 
