@@ -65,7 +65,7 @@ Later 2A plans still own watcher/event ingestion, broader filename/path search, 
 
 ### Linux/Podman prerequisite, September 23
 
-A separately scoped runtime adaptation is in progress before Task 13. The [prerequisite report](../../verification/linux-podman-prerequisite.md) records the actual Fedora/x86-64 host, rootless Podman and external Compose provider, locked toolchain, synthetic browser results, unresolved preparation/cleanup findings, and cleanup disposition. Application Podman gates have not run; no package task or feature status advances. Docker CI support and all original-preservation, network-isolation, mount, init/reaping and resource assertions remain required. The i7 development host is not the calibrated N100 reference.
+A separately scoped runtime adaptation is in progress before Task 13. The [prerequisite report](../../verification/linux-podman-prerequisite.md) records the actual Fedora/x86-64 host, rootless Podman and external Compose provider, locked toolchain, synthetic browser results, unresolved preparation/cleanup findings, and cleanup disposition. The independently reviewed focused disposable PostgreSQL probe passed three tests and exact cleanup. Full application Podman gates have not run; no package task or feature status advances. Docker CI support and all original-preservation, network-isolation, mount, init/reaping and resource assertions remain required. The i7 development host is not the calibrated N100 reference.
 
 ### Current checkpoint CI limitation
 

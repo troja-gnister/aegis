@@ -45,18 +45,35 @@ Before starting that browser container, inspection confirmed rootless execution,
 
 The first remote-client attempt was blocked by the command sandbox's loopback restriction; the approved retry passed. Temporary browser configuration and synthetic scripts remain local preparation tools, not a shipped cross-platform harness or real-stack acceptance gate.
 
+## Disposable PostgreSQL probe
+
+The documentation checkpoint `ec1f64e4066a355950908f08dc01d425ebdb1a6e` passed overall [CI run 35861161780](https://github.com/troja-gnister/aegis/actions/runs/35861161780). That run does not test the subsequent uncommitted adapter.
+
+An independently reviewed subset of the adapter now passes the canonical focused probe:
+
+```bash
+python scripts/verify.py backend \
+  --test-target backend/tests/integration/roots/test_models.py::test_database_rejects_invalid_root_modes
+```
+
+The run used Python 3.13 and explicit `AEGIS_CONTAINER_ENGINE=podman`, `PODMAN_COMPOSE_PROVIDER` and `AEGIS_PODMAN_SOCKET` values. The socket belonged to a newly created temporary rootless Unix API service; no TCP API or persistent service was enabled. Django checks and migration-drift detection passed, all three selected tests passed in 2.55 seconds, and the command exited successfully after removing its memory-only database and fixture. Subsequent engine container and volume inventories were empty.
+
+This evidence belongs to verifier source SHA-256 `42b779d42c0c505b7ba62ab644f540f00ffe4c89bddfe9f2446464b9f8761d84`, before the adapter has a committed revision. The pulled PostgreSQL image is Linux amd64, image ID `b07129cc272f688c98f5b343138a0a52fa45b3d82f50d7a53ff441330624cd2e`, from the existing pinned PostgreSQL 18.6 Alpine reference. It is a small disposable database probe, not full backend, application deployment, browser, or scale acceptance.
+
+Two failures preceded this passing result. Fedora's enforced short-name policy rejected the unqualified image reference without a TTY; qualification as `docker.io/library/postgres` kept its tag and digest unchanged. A later run passed the three tests but refused final file cleanup because Podman had automatically removed its CID file. The correction permits only that recorded file's disappearance after successful exact container removal and a successful absence query, while retaining complete directory/password checks. A further regression test covers partial creation with no CID file. The verifier's 48 focused tests and independent correction review passed. This behavior follows the upstream [CID-file lifecycle](https://docs.podman.io/en/latest/markdown/podman-create.1.html#cidfile-file); no registry or host security settings were changed.
+
 ## Adapter status and required next checks
 
-The local, uncommitted adapter is under independent review. Its first correction round reported 68 resource-free tests passing and 387 deployment tests collected. Full Ruff passed, but full backend mypy found two test-only errors. Further review found unresolved resource adoption, ownership tracking, full pre-cleanup validation, absence/error distinction, partial-create recovery, preparation ordering and synthetic manifest/test setup problems. These results do not clear runtime preparation; correction work is in progress.
+The local adapter remains uncommitted. Its first correction round reported 68 resource-free tests passing and 387 deployment tests collected. Full Ruff passed, but full backend mypy found two test-only errors. Further review found unresolved resource adoption, ownership tracking, full pre-cleanup validation, absence/error distinction, partial-create recovery, preparation ordering and synthetic manifest/test setup problems. These historical results did not clear runtime preparation.
 
 An earlier broader unit run under `backend/tests/unit/aegisctl` reported 133 passes and 61 failures; the observed failures rejected the sandbox's host-mount identity. This is retained as failed local evidence, with host-runtime verification still pending. It is not a passing mount-security gate or a reason to weaken those checks.
 
-Complete and review those boundaries before the smallest canonical disposable PostgreSQL probe. Then test the actual application under rootless Podman, preserving Docker CI and all read-only mounts, nested-mount rejection, web-without-originals, no-egress, loopback, init/reaping, resource-limit and secret-permission assertions. Never substitute skips, rootful/privileged execution, disabled SELinux or relabeling/chown of user originals.
+The subsequent correction round reports 98 combined verifier/engine/E2E-support tests, focused gateway/TLS/boundary tests, full Ruff, and mypy across 224 files passing. Independent lifecycle and compatibility reviews completed with further findings; correction round three is in progress. It covers remaining resource-scope and diagnostic-preservation gaps, the Compose verification token, explicit local Podman command routing, and intentional Caddy recreation. These resource-free results do not clear all runtime paths. Review those corrections before testing the actual application under rootless Podman, preserving Docker CI and all read-only mounts, nested-mount rejection, web-without-originals, no-egress, loopback, init/reaping, resource-limit and secret-permission assertions. Never substitute skips, rootful/privileged execution, disabled SELinux or relabeling/chown of user originals.
 
 The application gates remain unrun on this host: `make verify`, `make verify-compose`, and `make test-e2e`. Run full resource-using harnesses sequentially. Task 14 still owns the validated test-only port override and real indexed 603-entry mobile journeys. Catalog, physical-scan and long mobile scale measurements, reference certification and fresh-checkout/upgrade acceptance remain open under Tasks 15–18.
 
 ## Cleanup disposition
 
-The isolated browser container was stopped and removed only after checking its recorded full ID and owner label; container absence and listener disappearance were confirmed. Its uniquely owned image/build cache is retained and recorded locally. No application container, database, mounted original or large fixture was started or changed.
+The isolated browser container was stopped and removed only after checking its recorded full ID and owner label; container absence and listener disappearance were confirmed. Its uniquely owned image/build cache is retained and recorded locally. The focused PostgreSQL probe's exact container was also removed, with empty container/volume inventories confirmed. No original or large fixture was changed. Private diagnostic directories from refusal tests and the earlier CID cleanup failure are retained; names alone do not authorize their removal.
 
-On September 23 resumption, the old temporary API process, directory and socket were absent. Rootless Podman listed no containers, and ports 18080, 55432 and the former browser port had no listeners. Future runs must check again and create new owned resources with new identity records. Never infer ownership from a reusable name or delete unknown contents to complete cleanup.
+On September 23 resumption, the old temporary API process, directory and socket were absent. A new identity-recorded foreground Unix API service was created for the focused probe and remains active during prerequisite testing. Its exact process, socket and directory require identity-checked shutdown at the next stopping checkpoint. Ports 18080 and 55432 were free before the passing probe. Future runs must check again and create new owned resources with new identity records. Never infer ownership from a reusable name or delete unknown contents to complete cleanup.
