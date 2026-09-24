@@ -121,9 +121,34 @@ uv run --locked python scripts/verify.py deployment \
   --test-target tests/deployment/test_nested_mounts.py::test_real_observer_rejects_descendant_mount_visible_only_in_container
 ```
 
-These runs used the explicit Podman/provider/private-socket environment above, enforcing SELinux and owned synthetic sources. Both disposable databases were removed; final container inventories were empty, and source-sentinel checks reported no changes. Failure diagnostics and complete command logs were retained. The final reviewed 41-file source manifest is `c081688df179a535eea9614941d91c41f36b65be2d7c35f84403dc227d9d8feb`, committed as `71da40ed34bbe05990093afbf12925df40462ccf`. This closes the focused duplicate-mask and nested-mount regressions; it does not replace the full deployment, network, init/reaping, browser or source-manifest gates. The Podman overlay is selected by guarded launch interfaces, not a standalone operator recipe. PostgreSQL's fixed private-tmpfs bootstrap is the next prerequisite slice, followed by Caddy's private-tmpfs configuration. No product task advances.
+These runs used the explicit Podman/provider/private-socket environment above, enforcing SELinux and owned synthetic sources. Both disposable databases were removed; final container inventories were empty, and source-sentinel checks reported no changes. Failure diagnostics and complete command logs were retained. The final reviewed 41-file source manifest is `c081688df179a535eea9614941d91c41f36b65be2d7c35f84403dc227d9d8feb`, committed as `71da40ed34bbe05990093afbf12925df40462ccf`. This closes the focused duplicate-mask and nested-mount regressions; it does not replace the full deployment, network, init/reaping, browser or source-manifest gates. The Podman overlay is selected by guarded launch interfaces, not a standalone operator recipe.
+
+The pushed documentation checkpoint `2857a3168bccee34e9116d1ee2493caa5658be0b`, containing mask source `71da40e`, failed [CI run 36027572227](https://github.com/troja-gnister/aegis/actions/runs/36027572227). Backend and frontend passed; deployment and browser journeys failed. Hermetic Compose rendering and pinned image builds passed before deployment step 7 failed in the disposable database-role/runtime tests. The browser job installed frozen dependencies and both locked browsers before step 8 failed in the gateway journey. Public metadata locates these failures but does not establish their causes. These failures remain open independently of the focused local Podman success. PostgreSQL's fixed private-tmpfs bootstrap is the next prerequisite slice, followed by Caddy's private-tmpfs configuration. No product task advances.
 
 Continue preserving Docker CI and all read-only mounts, nested-mount rejection, web-without-originals, no-egress, loopback, init/reaping, resource-limit and secret-permission assertions. Never substitute skips, rootful/privileged execution, disabled SELinux or relabeling/chown of user originals. Run full resource-using harnesses sequentially. Task 14 still owns the validated test-only port override and real indexed 603-entry mobile journeys. Catalog, physical-scan and long mobile scale measurements, reference certification and fresh-checkout/upgrade acceptance remain open under Tasks 15–18.
+
+## Canonical merging and private-tmpfs checks
+
+Canonical merge correction `520cf1f5bb9d5126953d33b0ce37751080ef7db8` removes the overlay's duplicate NNP declaration. Compose 2.39.4 rejected the repeated base/overlay option before starting PostgreSQL. The corrected overlay contributes only the mask option; each effective service retains NNP from the base. Actual configuration rendering passed with no profile, `tls`, `tls-local` and both profiles, with every service otherwise unchanged. The affected unit file passed **290 tests**; independent review passed, including seven focused checks. This correction does not alter Docker configuration or the guarded runtime policy.
+
+The separately reviewed, uncommitted PostgreSQL candidate still needs runtime diagnosis. It validates the four fixed private tmpfs mounts before preparing their directory ownership, with effective engine provenance checked on the recorded container before startup. Resource-free verification passed 153 helper/fixture cases and 93 launch-order cases. The canonical command below has not passed:
+
+```bash
+uv run --locked python scripts/verify.py deployment \
+  --test-target tests/deployment/test_container_boundaries.py::test_postgres_stages_fixed_source_secrets_into_uid_70_private_tmpfs \
+  --test-target tests/deployment/test_container_boundaries.py::test_live_postgres_stages_secrets_and_drops_to_uid_70
+```
+
+| Local candidate | Result |
+| --- | --- |
+| Reviewed 54-file manifest `a77c0a5714b491d83c1cdeebdea10eb1bf1146a8f98913fe3e6ed955c39f2c88` | **2 failed in 1.12s**: duplicate security options prevented rendering; the new bootstrap did not run. |
+| Same candidate plus merge correction, manifest `1ee6407b63fb308142e4b0e810b420390559af8cb75271eb44c8b087a7c18d7f` | **2 failed in 15.77s**: an old static assertion omitted the approved mask option; the recorded bootstrap container passed mount-provenance checks but exited 1. The refusal's cause is not yet established. |
+
+Both commands retained complete logs, removed their disposable databases and recorded containers, and ended with empty container inventories. The bootstrap failure does not establish secret staging, live UID/capability drop, reconciliation or rotation compatibility. Source snapshots and ownership assertions remain required; no runtime refusal is treated as a skip or successful acceptance.
+
+A separate isolated Caddy diagnostic did pass on the unchanged helper bundle from `71da40e`, after independent review and correction of its shell directory-enumeration checks. Diagnostic script SHA-256 `1dc8079aaddfa8b56409d4b3f66ce379fe52dc7fc07f6431901b5b419f70e966` used pinned image `ebbf5210d94567392591a0a07d61279a8be8c9041091c1713427ffa23e0f842b`, a fresh shared mask check, and two native plus two Compose generations. All four measured UID/GID 10001, zero kernel capabilities, NNP, absent Caddy file capabilities, initially empty private `/config` and `/tmp` mounts, exact 16 MiB limits and 0700/1777 modes. Tiny scratch writes/readback and empty recreation passed. The unchanged full mount parser accepted each complete snapshot with one retained powercap mask. Exact cleanup completed, the command exited 0, and the final container inventory was empty.
+
+Those Caddy probes used no host binds, secrets, published ports, network or server. The inherited OOM score remained 100; general resource enforcement is not certified. Canonical Caddy `!override` rendering, server startup, autosave, TLS and durable certificate storage remain pending. No Phase 2A.1 task advances from these prerequisite checks.
 
 ## Cleanup disposition
 
