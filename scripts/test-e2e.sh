@@ -92,10 +92,24 @@ export AEGIS_DB_PORT=5432
 export DJANGO_SETTINGS_MODULE=aegis.settings.test
 unset COMPOSE_FILE COMPOSE_PROFILES AEGIS_MOUNT_MANIFEST AEGIS_MOUNT_MANIFEST_SHA256
 
-compose_base=("${compose_engine[@]}" compose --env-file /dev/null \
+compose_options=(--env-file /dev/null \
     --project-name aegis-phase1-e2e
     --project-directory "$repository_dir" -f compose.yaml -f compose.test.yaml)
-compose=("${compose_base[@]}" -f "$work_dir/compose.mounts.yaml")
+compose_base=("${compose_engine[@]}" compose "${compose_options[@]}")
+compose_options+=(-f "$work_dir/compose.mounts.yaml")
+if [[ "${container_engine[0]}" == podman ]]; then
+    compose_base+=(-f "$repository_dir/compose.podman.yaml")
+    compose_options+=(-f "$repository_dir/compose.podman.yaml")
+fi
+compose=("${compose_engine[@]}" compose "${compose_options[@]}")
+
+controlled_compose() {
+    if [[ "${container_engine[0]}" == podman ]]; then
+        uv run python scripts/e2e_support.py controlled-compose "${compose_options[@]}" "$@"
+    else
+        "${compose[@]}" "$@"
+    fi
+}
 started=0
 
 cleanup() {
@@ -138,7 +152,7 @@ uv run python scripts/e2e_support.py prepare-runtime "$work_dir"
 
 started=1
 set +e
-"${compose[@]}" up --build --wait --wait-timeout 180
+controlled_compose up --build --wait --wait-timeout 180
 compose_status=$?
 uv run python scripts/e2e_support.py resources-record "$work_dir" up
 record_status=$?
@@ -147,7 +161,7 @@ if (( record_status != 0 )); then exit "$record_status"; fi
 if (( compose_status != 0 )); then exit "$compose_status"; fi
 uv run python scripts/e2e_support.py resources-check "$work_dir"
 set +e
-"${compose[@]}" run --rm --no-deps \
+controlled_compose run --rm --no-deps \
     --volume "$AEGIS_TEST_SECRET_DIR/e2e-admin-password:/run/secrets/bootstrap-password:ro" \
     web python manage.py bootstrap_admin --username phase1-admin \
     --email phase1-admin@e2e.invalid --password-file /run/secrets/bootstrap-password

@@ -215,7 +215,7 @@ def test_observer_filter_retains_descendants_for_rejection(
     monkeypatch: pytest.MonkeyPatch,
     engine: str,
 ) -> None:
-    select_fake_engine(engine, tmp_path, monkeypatch)
+    select_fake_engine(engine, tmp_path, monkeypatch, checked_mask_policy=True)
     source = tmp_path / "source"
     source.mkdir()
     slots = preflight_slots([_slot(source)])

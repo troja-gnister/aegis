@@ -1,0 +1,16 @@
+# Explicitly selected by controlled Podman launch interfaces.
+x-podman-security: &podman-security
+  security_opt:
+    - no-new-privileges:true
+    - unmask=/sys/devices/virtual/powercap
+
+services:
+  postgres: *podman-security
+  migrate: *podman-security
+  web: *podman-security
+  operations: *podman-security
+  indexer: *podman-security
+  media: *podman-security
+  gateway: *podman-security
+  caddy: *podman-security
+  caddy-local: *podman-security

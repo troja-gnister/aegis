@@ -511,7 +511,7 @@ def test_exact_project_cleanup_refuses_unknown_or_replaced_resource_before_delet
         resources.ProjectResource("container", "extra", "extra-id", "created=extra"),
     ))
     removed: list[list[str]] = []
-    monkeypatch.setattr(resources, "capture_project_inventory", lambda *args: changed)
+    monkeypatch.setattr(resources, "capture_project_inventory", lambda *args, runner=None: changed)
     monkeypatch.setattr(resources, "_run", lambda arguments, environment: removed.append(arguments))
 
     with pytest.raises(resources.ProjectResourceError, match="unknown"):
@@ -521,7 +521,9 @@ def test_exact_project_cleanup_refuses_unknown_or_replaced_resource_before_delet
     replacement = resources.ProjectInventory("owned", (
         resources.ProjectResource("volume", "owned_data", "owned_data", "created=two"),
     ))
-    monkeypatch.setattr(resources, "capture_project_inventory", lambda *args: replacement)
+    monkeypatch.setattr(
+        resources, "capture_project_inventory", lambda *args, runner=None: replacement
+    )
     with pytest.raises(resources.ProjectResourceError, match="changed"):
         resources.cleanup_project_inventory(expected, {})
     assert removed == []
@@ -626,7 +628,9 @@ def test_exact_project_cleanup_removes_only_recorded_immutable_identities(
         removed.append(arguments)
         return subprocess.CompletedProcess(arguments, 0, "", "")
 
-    monkeypatch.setattr(resources, "capture_project_inventory", lambda *args: next(inventories))
+    monkeypatch.setattr(
+        resources, "capture_project_inventory", lambda *args, runner=None: next(inventories)
+    )
     monkeypatch.setattr(resources, "_run", completed)
     resources.cleanup_project_inventory(expected, {})
 

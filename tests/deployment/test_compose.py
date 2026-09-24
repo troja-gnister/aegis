@@ -25,6 +25,7 @@ from aegisctl.container_resources import (
 from django.test import override_settings
 
 from tests.support.container_runtime import copy_bind_inputs
+from tests.support.container_runtime import run_deployment_process as run_container
 from tests.support.fake_container_engine import ProjectEngine, select_fake_engine
 
 REPOSITORY = Path(__file__).resolve().parents[2]
@@ -68,7 +69,7 @@ def _run_invalid_tls_host_probe(
     result: subprocess.CompletedProcess[str] | None = None
     error: BaseException | None = None
     try:
-        result = subprocess.run(
+        result = run_container(
             command, check=False, capture_output=True, text=True, timeout=120,
             env=environment,
         )
@@ -165,7 +166,7 @@ def rendered_compose(
         | {"AEGIS_RELEASE_ID": "test-release-identity"}
         | (environment or {})
     )
-    result = subprocess.run(
+    result = run_container(
         [
             *CONTAINER_COMMAND,
             "compose",
@@ -193,7 +194,7 @@ def adapted_caddyfile(path: Path, *, tls_host: str | None = None) -> dict[str, A
         ]
         if tls_host is not None:
             arguments.extend(["--env", f"AEGIS_TLS_HOST={tls_host}"])
-        result = subprocess.run(
+        result = run_container(
             [*arguments, CADDY_IMAGE, "caddy", "adapt", "--config",
              "/etc/caddy/Caddyfile", "--adapter", "caddyfile"],
             check=True, capture_output=True, text=True, timeout=30,
@@ -210,7 +211,7 @@ def test_nginx_configuration_parses_with_pinned_runtime(tmp_path: Path) -> None:
     )
     inputs = copy_bind_inputs(tmp_path, {"nginx.conf": config, "server.conf": server_config})
 
-    subprocess.run(
+    run_container(
         [
             *CONTAINER_COMMAND,
             "run",
@@ -252,7 +253,7 @@ def test_nginx_configuration_failure_remains_visible_to_ci(tmp_path: Path) -> No
         "sha256:45ce1e2e699234253d1def7baa96218a5d00b498d1ba0cbb1a17b6bdf73d1351"
     )
 
-    result = subprocess.run(
+    result = run_container(
         [
             *CONTAINER_COMMAND,
             "run",
@@ -565,7 +566,7 @@ def test_production_caddy_start_rejects_non_public_hosts(
     else:
         environment["AEGIS_TLS_HOST"] = tls_host
 
-    result = subprocess.run(
+    result = run_container(
         ["sh", str(REPOSITORY / "deploy" / "caddy" / "aegis-caddy-start")],
         check=False,
         capture_output=True,
@@ -595,7 +596,7 @@ def test_production_caddy_start_exports_only_normalized_valid_host(
     probe_path = tmp_path / "aegis-caddy-start-probe"
     probe_path.write_text(probe, encoding="utf-8")
 
-    result = subprocess.run(
+    result = run_container(
         ["sh", str(probe_path)],
         check=False,
         capture_output=True,
@@ -756,7 +757,7 @@ def test_backend_release_identity_is_required_and_propagated_to_web_and_workers(
     environment = os.environ.copy()
     environment.pop("AEGIS_RELEASE_ID", None)
     environment = validated_compose_environment(environment)
-    result = subprocess.run(
+    result = run_container(
         [*CONTAINER_COMMAND, "compose", "-f", "compose.yaml", "config", "--quiet"],
         check=False,
         capture_output=True,
@@ -808,7 +809,7 @@ def test_invalid_tls_probe_preserves_interruption_through_recovery(
 def test_tls_complete_observed_inventory_exact_cleanup_or_refusal(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, engine: str, unknown: bool,
 ) -> None:
-    prefix = select_fake_engine(engine, tmp_path, monkeypatch)
+    prefix = select_fake_engine(engine, tmp_path, monkeypatch, checked_mask_policy=True)
     declared = (
         ("network", "backend"), ("network", "edge"), ("network", "tls-hop"),
         ("volume", "caddy-data"), ("volume", "derivatives"),

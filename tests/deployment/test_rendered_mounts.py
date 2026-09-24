@@ -43,6 +43,9 @@ from tests.support.container_runtime import (
     record_fresh_test_tree,
     record_test_tree_inventory,
 )
+from tests.support.container_runtime import (
+    run_deployment_process as run_container,
+)
 from tests.support.fake_container_engine import ProjectEngine, select_fake_engine
 
 REPOSITORY = Path(__file__).resolve().parents[2]
@@ -55,7 +58,7 @@ NGINX_IMAGE = (
 
 
 def _docker(*arguments: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    return run_container(
         [*CONTAINER_COMMAND, *arguments],
         check=False,
         capture_output=True,
@@ -415,7 +418,7 @@ def test_runtime_attestation_rejects_effective_permission_denial(
 def test_gateway_mount_attestation_is_noop_only_when_both_settings_are_unset(
     settings: dict[str, str],
 ) -> None:
-    result = subprocess.run(
+    result = run_container(
         ["/bin/sh", GATEWAY_ATTEST],
         check=False,
         capture_output=True,
@@ -623,7 +626,7 @@ expected_identity = "{local_identity(source)}"
         uid=os.geteuid(),
         gid=os.getegid(),
     )
-    result = subprocess.run(
+    result = run_container(
         [
             *CONTAINER_COMMAND,
             "compose",
@@ -707,7 +710,7 @@ def test_compose_bind_sources_preserve_literal_dollars_for_preflight_and_runtime
     )
     record_created_test_path(tree, output)
     record_created_test_path(tree, attestation)
-    configured = subprocess.run(
+    configured = run_container(
         [
             *CONTAINER_COMMAND,
             "compose",
@@ -779,7 +782,7 @@ def test_compose_bind_sources_preserve_literal_dollars_for_preflight_and_runtime
     ]
     expected_resources = require_empty_project(project)
     try:
-        runtime = subprocess.run(
+        runtime = run_container(
             [
                 *compose_command,
                 "run",
@@ -1016,7 +1019,7 @@ expected_identity = "{local_identity(source)}"
 def test_rendered_complete_observed_inventory_exact_cleanup_or_refusal(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, engine: str, unknown: bool,
 ) -> None:
-    select_fake_engine(engine, tmp_path, monkeypatch)
+    select_fake_engine(engine, tmp_path, monkeypatch, checked_mask_policy=True)
     declared = (
         ("network", "backend"), ("volume", "postgres-data"), ("volume", "indexer-coordination"),
     )

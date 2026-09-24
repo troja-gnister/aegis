@@ -27,6 +27,9 @@ from tests.support.container_runtime import (
     record_test_tree_inventory,
     recover_owned_resource,
 )
+from tests.support.container_runtime import (
+    run_deployment_process as run_container,
+)
 from tests.support.fake_container_engine import select_fake_engine
 
 REPOSITORY = Path(__file__).resolve().parents[2]
@@ -62,7 +65,7 @@ def _run(
     input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     try:
-        return subprocess.run(
+        return run_container(
             arguments,
             check=False,
             capture_output=True,
@@ -430,7 +433,7 @@ def role_init_database(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Rol
 def test_role_init_keeps_passwords_out_of_shell_and_psql_state() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
 
-    assert subprocess.run(
+    assert run_container(
         ["sh", "-n", str(SCRIPT)],
         check=False,
         capture_output=True,
@@ -932,7 +935,7 @@ def test_role_init_create_recovery_reports_safe_status_and_count(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
     engine: str, create_status: int, handles: str, expected: str,
 ) -> None:
-    prefix = select_fake_engine(engine, tmp_path, monkeypatch)
+    prefix = select_fake_engine(engine, tmp_path, monkeypatch, checked_mask_policy=True)
     monkeypatch.setattr(f"{__name__}.CONTAINER_COMMAND", prefix)
     recorded: list[OwnedDirectResource] = []
     commands: list[list[str]] = []
@@ -976,7 +979,7 @@ def test_role_init_interruption_during_recovery_propagates_without_adoption(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, engine: str,
     interruption: BaseException,
 ) -> None:
-    prefix = select_fake_engine(engine, tmp_path, monkeypatch)
+    prefix = select_fake_engine(engine, tmp_path, monkeypatch, checked_mask_policy=True)
     monkeypatch.setattr(f"{__name__}.CONTAINER_COMMAND", prefix)
     recorded: list[OwnedDirectResource] = []
     commands: list[list[str]] = []

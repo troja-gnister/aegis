@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import secrets
-import subprocess
 import sys
 import uuid
 from pathlib import Path
@@ -45,6 +44,7 @@ from django.utils import timezone
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
+from tests.support.container_runtime import run_deployment_process as run_container
 from tests.support.database_roles import (
     ALL_TEST_ROLES,
     MIGRATOR_ROLE,
@@ -399,7 +399,7 @@ with psycopg.connect(dbname=data['database'], host=data['host'], port=data['port
 print('Installed wheel shared initialization: periodic and manual runtime login round trip passed.')
 """
     try:
-        built = subprocess.run(
+        built = run_container(
             [*CONTAINER_COMMAND, "build", "--label", f"aegis.verify.owner={image_tag}",
              "--tag", image_tag,
              "--file", "docker/backend.Dockerfile", "."],
@@ -412,7 +412,7 @@ print('Installed wheel shared initialization: periodic and manual runtime login 
                            "WHERE worker_id=%s", [worker])
         host = "host.docker.internal" if sys.platform == "darwin" else "127.0.0.1"
         network = [] if sys.platform == "darwin" else ["--network", "host"]
-        result = subprocess.run(
+        result = run_container(
             [*CONTAINER_COMMAND, "run", "--rm", "--interactive", *network, "--workdir", "/tmp",
              "--entrypoint", "python", image_tag, "-I", "-c", script],
             input=json.dumps({
@@ -428,12 +428,12 @@ print('Installed wheel shared initialization: periodic and manual runtime login 
         assert result.returncode == 0, result.stderr[-4000:]
         assert "runtime login round trip passed" in result.stdout
     finally:
-        inspected = subprocess.run([*CONTAINER_COMMAND, "image", "inspect", image_tag],
+        inspected = run_container([*CONTAINER_COMMAND, "image", "inspect", image_tag],
                                    capture_output=True, text=True, timeout=30)
         if inspected.returncode == 0:
             info = json.loads(inspected.stdout)[0]
             assert info["Config"]["Labels"].get("aegis.verify.owner") == image_tag
-            subprocess.run([*CONTAINER_COMMAND, "image", "rm", image_tag],
+            run_container([*CONTAINER_COMMAND, "image", "rm", image_tag],
                            check=True, capture_output=True, timeout=30)
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -15,6 +15,8 @@ from aegisctl.container_engine import (
     selected_engine,
 )
 from aegisctl.container_network import network_identity_fields
+
+ResourceRunner = Callable[[list[str], Mapping[str, str]], subprocess.CompletedProcess[str]]
 
 
 class ProjectResourceError(RuntimeError):
@@ -92,8 +94,10 @@ def _inspect_fields(
 
 def capture_project_inventory(
     project: str, environment: Mapping[str, str] | None = None,
+    *, runner: ResourceRunner | None = None,
 ) -> ProjectInventory:
     source = os.environ if environment is None else environment
+    execute = _run if runner is None else runner
     label = f"label=com.docker.compose.project={project}"
     resources: list[ProjectResource] = []
     queries = {
@@ -102,14 +106,14 @@ def capture_project_inventory(
         "volume": ("volume", "ls", "--quiet", "--filter", label),
     }
     for kind, arguments in queries.items():
-        listed = _run(container_command(*arguments, environment=source), source)
+        listed = execute(container_command(*arguments, environment=source), source)
         if listed.returncode:
             raise ProjectResourceError("project resource query failed")
         handles = listed.stdout.split()
         if len(handles) != len(set(handles)):
             raise ProjectResourceError("project resource inventory is ambiguous")
         for handle in handles:
-            inspected = _run(
+            inspected = execute(
                 container_command(kind, "inspect", handle, environment=source), source,
             )
             if inspected.returncode:
@@ -135,8 +139,9 @@ def capture_project_inventory(
 
 def require_empty_project(
     project: str, environment: Mapping[str, str] | None = None,
+    *, runner: ResourceRunner | None = None,
 ) -> ProjectInventory:
-    inventory = capture_project_inventory(project, environment)
+    inventory = capture_project_inventory(project, environment, runner=runner)
     if inventory.resources:
         raise ProjectResourceError("disposable project already has resources")
     return inventory
@@ -144,8 +149,9 @@ def require_empty_project(
 
 def require_project_inventory(
     expected: ProjectInventory, environment: Mapping[str, str] | None = None,
+    *, runner: ResourceRunner | None = None,
 ) -> None:
-    if capture_project_inventory(expected.project, environment) != expected:
+    if capture_project_inventory(expected.project, environment, runner=runner) != expected:
         raise ProjectResourceError("project resources changed or contain unknown resources")
 
 
@@ -226,9 +232,11 @@ def admit_project_transition(
 
 def cleanup_project_inventory(
     expected: ProjectInventory, environment: Mapping[str, str] | None = None,
+    *, runner: ResourceRunner | None = None,
 ) -> None:
     source = os.environ if environment is None else environment
-    require_project_inventory(expected, source)
+    execute = _run if runner is None else runner
+    require_project_inventory(expected, source, runner=runner)
     for resource in expected.resources:
         if resource.kind == "container":
             arguments = ("rm", "--force", resource.immutable_id)
@@ -236,10 +244,10 @@ def cleanup_project_inventory(
             arguments = ("network", "rm", resource.immutable_id)
         else:
             arguments = ("volume", "rm", resource.handle)
-        removed = _run(container_command(*arguments, environment=source), source)
+        removed = execute(container_command(*arguments, environment=source), source)
         if removed.returncode:
             raise ProjectResourceError("exact project resource cleanup failed")
-    remaining = capture_project_inventory(expected.project, source)
+    remaining = capture_project_inventory(expected.project, source, runner=runner)
     if remaining.resources:
         raise ProjectResourceError("exact project resource cleanup was incomplete")
 

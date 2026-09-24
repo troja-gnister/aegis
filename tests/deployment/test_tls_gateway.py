@@ -51,6 +51,9 @@ from tests.support.container_runtime import (
     recover_owned_resource,
     validate_owned_resources,
 )
+from tests.support.container_runtime import (
+    run_deployment_process as run_container,
+)
 from tests.support.fake_container_engine import select_fake_engine
 
 REPOSITORY = Path(__file__).resolve().parents[2]
@@ -108,7 +111,7 @@ def run_command(
     env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     try:
-        return subprocess.run(
+        return run_container(
             arguments,
             check=check,
             capture_output=True,
@@ -705,7 +708,7 @@ def test_tls_gateway_removal_records_transition_before_admitting_recreation(
 def test_tls_cleanup_prevalidates_every_client_before_any_resource_delete(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, engine: str,
 ) -> None:
-    prefix = select_fake_engine(engine, tmp_path, monkeypatch)
+    prefix = select_fake_engine(engine, tmp_path, monkeypatch, checked_mask_policy=True)
     monkeypatch.setattr(f"{__name__}.CONTAINER_COMMAND", prefix)
     override = tmp_path / "override.yaml"
     override.write_text("services: {}\n", encoding="ascii")
@@ -762,7 +765,7 @@ def test_caddy_recreation_records_exact_removal_before_normal_up() -> None:
 def test_tls_client_identity_is_recorded_before_failed_start(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, engine: str,
 ) -> None:
-    prefix = select_fake_engine(engine, tmp_path, monkeypatch)
+    prefix = select_fake_engine(engine, tmp_path, monkeypatch, checked_mask_policy=True)
     monkeypatch.setattr(f"{__name__}.CONTAINER_COMMAND", prefix)
     override = tmp_path / "override.yaml"
     override.write_text("services: {}\n", encoding="ascii")
@@ -806,7 +809,7 @@ def test_tls_client_identity_is_recorded_before_failed_start(
 def test_tls_client_interruption_recovers_identity_then_propagates(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, interruption: BaseException, engine: str,
 ) -> None:
-    prefix = select_fake_engine(engine, tmp_path, monkeypatch)
+    prefix = select_fake_engine(engine, tmp_path, monkeypatch, checked_mask_policy=True)
     monkeypatch.setattr(f"{__name__}.CONTAINER_COMMAND", prefix)
     override = tmp_path / "override.yaml"
     override.write_text("services: {}\n", encoding="ascii")
@@ -845,7 +848,7 @@ def test_tls_client_interruption_recovers_identity_then_propagates(
 def test_tls_client_unsafe_cid_still_recovers_and_preserves_interrupt(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, engine: str,
 ) -> None:
-    prefix = select_fake_engine(engine, tmp_path, monkeypatch)
+    prefix = select_fake_engine(engine, tmp_path, monkeypatch, checked_mask_policy=True)
     monkeypatch.setattr(f"{__name__}.CONTAINER_COMMAND", prefix)
     override = tmp_path / "override.yaml"
     override.write_text("services: {}\n", encoding="ascii")
@@ -888,7 +891,7 @@ def test_tls_client_unsafe_cid_still_recovers_and_preserves_interrupt(
 def test_tls_address_occupant_exception_recovers_before_propagating(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, creation_error: Exception, engine: str,
 ) -> None:
-    prefix = select_fake_engine(engine, tmp_path, monkeypatch)
+    prefix = select_fake_engine(engine, tmp_path, monkeypatch, checked_mask_policy=True)
     monkeypatch.setattr(f"{__name__}.CONTAINER_COMMAND", prefix)
     override = tmp_path / "override.yaml"
     override.write_text("services: {}\n", encoding="ascii")
@@ -931,7 +934,7 @@ def test_tls_address_occupant_exception_recovers_before_propagating(
 def test_tls_client_nonzero_create_without_cidfile_recovers_unique_canonical_id(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, engine: str,
 ) -> None:
-    prefix = select_fake_engine(engine, tmp_path, monkeypatch)
+    prefix = select_fake_engine(engine, tmp_path, monkeypatch, checked_mask_policy=True)
     monkeypatch.setattr(f"{__name__}.CONTAINER_COMMAND", prefix)
     override = tmp_path / "override.yaml"
     override.write_text("services: {}\n", encoding="ascii")
@@ -1082,7 +1085,7 @@ def configured_subnets(networks: Sequence[dict]) -> list[str]:
 def test_tls_network_inventory_handles_null_default_network_ipam(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, engine: str,
 ) -> None:
-    prefix = select_fake_engine(engine, tmp_path, monkeypatch)
+    prefix = select_fake_engine(engine, tmp_path, monkeypatch, checked_mask_policy=True)
     monkeypatch.setattr(f"{__name__}.CONTAINER_COMMAND", prefix)
     networks = [
         {"IPAM": {"Config": None}}, {"IPAM": None}, {"IPAM": {}},

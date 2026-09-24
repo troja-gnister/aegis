@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import socket
-import subprocess
 import uuid
 from pathlib import Path
 
@@ -18,6 +17,9 @@ from tests.support.container_runtime import (
     record_created_test_path,
     record_fresh_test_tree,
     record_test_tree_inventory,
+)
+from tests.support.container_runtime import (
+    run_deployment_process as run_container,
 )
 
 REPOSITORY = Path(__file__).resolve().parents[2]
@@ -128,18 +130,18 @@ def run_probe(
                     + (",readonly" if read_only else "")]
     command += ["--entrypoint", "python", "aegis-backend", "-c", PROBE, descendant]
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=60, check=False)
+        result = run_container(command, capture_output=True, text=True, timeout=60, check=False)
         assert result.returncode == 0, result.stdout + result.stderr
         return json.loads(result.stdout)
     finally:
-        inspection = subprocess.run([*CONTAINER_COMMAND, "inspect", name], capture_output=True,
+        inspection = run_container([*CONTAINER_COMMAND, "inspect", name], capture_output=True,
                                     text=True, timeout=20, check=False)
         if inspection.returncode == 0:
             owned = json.loads(inspection.stdout)[0]
             assert owned["Config"]["Labels"]["aegis.reader.owner"] == name
-            subprocess.run([*CONTAINER_COMMAND, "rm", "--force", owned["Id"]], capture_output=True,
+            run_container([*CONTAINER_COMMAND, "rm", "--force", owned["Id"]], capture_output=True,
                            text=True, timeout=20, check=True)
-            absent = subprocess.run(
+            absent = run_container(
                 [*CONTAINER_COMMAND, "inspect", owned["Id"]], capture_output=True,
                 timeout=20, check=False,
             )

@@ -29,6 +29,9 @@ from tests.support.container_runtime import (
     record_fresh_test_tree,
     record_test_tree_inventory,
 )
+from tests.support.container_runtime import (
+    run_deployment_process as run_container,
+)
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 CONTAINER_COMMAND = container_command()
@@ -68,7 +71,7 @@ def _boundary_up_rules(arguments: tuple[str, ...]) -> tuple[ProjectResourceRule,
 
 
 def rendered_compose() -> dict[str, Any]:
-    result = subprocess.run(
+    result = run_container(
         [
             *CONTAINER_COMMAND,
             "compose",
@@ -281,7 +284,7 @@ def test_postgres_staging_wrapper_never_reads_secret_values_into_shell_state() -
     wrapper = REPOSITORY / "deploy" / "postgres" / "entrypoint.sh"
     source = wrapper.read_text(encoding="utf-8")
 
-    syntax = subprocess.run(
+    syntax = run_container(
         ["bash", "-n", str(wrapper)],
         check=False,
         capture_output=True,
@@ -339,7 +342,7 @@ def docker_compose(
         return subprocess.CompletedProcess(arguments, 0, "", "")
     mutation = bool(arguments) and arguments[0] == "up"
     try:
-        result = subprocess.run(
+        result = run_container(
             [
                 *CONTAINER_COMMAND,
                 "compose",
@@ -405,7 +408,7 @@ def test_docker_compose_failed_up_refuses_unknown_transition_and_retains_invento
 
 
 def protected_volume_created_at() -> str | None:
-    result = subprocess.run(
+    result = run_container(
         [
             *CONTAINER_COMMAND,
             "volume",
@@ -433,7 +436,7 @@ def wait_for_postgres_health(
     assert container_id
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        health = subprocess.run(
+        health = run_container(
             [
                 *CONTAINER_COMMAND,
                 "inspect",
@@ -472,7 +475,7 @@ def run_database_probe(
     pgpass.chmod(0o600)
     record_created_test_path(tree, pgpass)
     prepare_owned_test_inventory(record_test_tree_inventory(tree))
-    return subprocess.run(
+    return run_container(
         [
             *CONTAINER_COMMAND,
             "run",
@@ -573,7 +576,7 @@ def test_live_postgres_stages_secrets_and_drops_to_uid_70(tmp_path: Path) -> Non
 
         deadline = time.monotonic() + 90
         while time.monotonic() < deadline:
-            health = subprocess.run(
+            health = run_container(
                 [
                     *CONTAINER_COMMAND,
                     "inspect",
@@ -593,7 +596,7 @@ def test_live_postgres_stages_secrets_and_drops_to_uid_70(tmp_path: Path) -> Non
         else:
             pytest.fail("disposable PostgreSQL did not become healthy", pytrace=False)
 
-        mounts = subprocess.run(
+        mounts = run_container(
             [*CONTAINER_COMMAND, "inspect", container_id, "--format", "{{json .Mounts}}"],
             check=True,
             capture_output=True,
@@ -604,7 +607,7 @@ def test_live_postgres_stages_secrets_and_drops_to_uid_70(tmp_path: Path) -> Non
         )
         assert all(mount.get("Type") != "volume" for mount in json.loads(mounts.stdout))
 
-        process_status = subprocess.run(
+        process_status = run_container(
             [
                 *CONTAINER_COMMAND,
                 "exec",
@@ -625,7 +628,7 @@ def test_live_postgres_stages_secrets_and_drops_to_uid_70(tmp_path: Path) -> Non
 
         for name in POSTGRES_SECRET_SOURCES:
             staged_name = name.replace("-", "_")
-            metadata = subprocess.run(
+            metadata = run_container(
                 [
                     *CONTAINER_COMMAND,
                     "exec",
@@ -645,7 +648,7 @@ def test_live_postgres_stages_secrets_and_drops_to_uid_70(tmp_path: Path) -> Non
             assert (owner, group, mode) == ("70", "70", "400")
             assert 1 <= int(size) <= 4096
 
-        source_access = subprocess.run(
+        source_access = run_container(
             [
                 *CONTAINER_COMMAND,
                 "exec",
@@ -679,7 +682,7 @@ def test_live_postgres_stages_secrets_and_drops_to_uid_70(tmp_path: Path) -> Non
             pgpass.chmod(0o600)
             record_created_test_path(tree, pgpass)
             prepare_owned_test_inventory(record_test_tree_inventory(tree))
-            authentication = subprocess.run(
+            authentication = run_container(
                 [
                     *CONTAINER_COMMAND,
                     "run",
@@ -717,7 +720,7 @@ def test_live_postgres_stages_secrets_and_drops_to_uid_70(tmp_path: Path) -> Non
                 )
             assert authentication.stdout.strip() == f"{role}|{role}"
 
-        logs = subprocess.run(
+        logs = run_container(
             [*CONTAINER_COMMAND, "logs", container_id],
             check=True,
             capture_output=True,
@@ -737,7 +740,7 @@ def test_live_postgres_stages_secrets_and_drops_to_uid_70(tmp_path: Path) -> Non
         assert stopped.returncode == 0
         if container_id:
             assert (
-                subprocess.run(
+                run_container(
                     [*CONTAINER_COMMAND, "inspect", container_id],
                     check=False,
                     capture_output=True,
@@ -859,7 +862,7 @@ def test_postgres_reconciles_populated_accepted_base_and_rotated_secrets(
         invalid_container_id = invalid_identity.stdout.strip()
         if invalid_container_id:
             container_ids.append(invalid_container_id)
-            invalid_logs = subprocess.run(
+            invalid_logs = run_container(
                 [*CONTAINER_COMMAND, "logs", invalid_container_id],
                 check=False,
                 capture_output=True,
@@ -935,7 +938,7 @@ def test_postgres_reconciles_populated_accepted_base_and_rotated_secrets(
         assert preserved.stdout.splitlines() == ["preserved", "aegis_migrator", "0", "0"]
 
         for container_id in container_ids:
-            logs = subprocess.run(
+            logs = run_container(
                 [*CONTAINER_COMMAND, "logs", container_id],
                 check=False,
                 capture_output=True,

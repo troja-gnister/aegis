@@ -14,12 +14,16 @@ from pathlib import Path
 
 import pytest
 from aegisctl.container_engine import container_command
+from aegisctl.container_launch import controlled_container_argv
 
 from tests.support.container_runtime import (
     prepare_owned_test_inventory,
     record_created_test_path,
     record_fresh_test_tree,
     record_test_tree_inventory,
+)
+from tests.support.container_runtime import (
+    run_deployment_process as run_container,
 )
 from tests.support.database_roles import RoleDatabase
 
@@ -31,7 +35,7 @@ CONTAINER_COMMAND = container_command()
 def indexer_image() -> Iterator[str]:
     name = f"aegis-task7-{uuid.uuid4().hex}"
     try:
-        built = subprocess.run(
+        built = run_container(
             [*CONTAINER_COMMAND, "build", "--tag", name, "--label", f"aegis.indexer.owner={name}",
              "--build-arg", "AEGIS_UID=501", "--build-arg", "AEGIS_GID=20",
              "--file", "docker/backend.Dockerfile", "."], cwd=REPOSITORY,
@@ -40,20 +44,20 @@ def indexer_image() -> Iterator[str]:
         assert built.returncode == 0, built.stderr[-5000:]
         yield name
     finally:
-        inspected = subprocess.run(
+        inspected = run_container(
             [*CONTAINER_COMMAND, "image", "inspect", name], capture_output=True,
             text=True, timeout=20, check=False,
         )
         if inspected.returncode == 0:
             info = json.loads(inspected.stdout)[0]
             assert info["Config"]["Labels"]["aegis.indexer.owner"] == name
-            subprocess.run([*CONTAINER_COMMAND, "image", "rm", name], capture_output=True,
+            run_container([*CONTAINER_COMMAND, "image", "rm", name], capture_output=True,
                            timeout=30, check=True)
 
 
 def test_new_coordination_volume_supports_nondefault_uid_gid(indexer_image: str) -> None:
     volume = f"aegis-task7-coordination-{uuid.uuid4().hex}"
-    subprocess.run(
+    run_container(
         [*CONTAINER_COMMAND, "volume", "create", "--label",
          f"aegis.indexer.owner={volume}", volume],
         capture_output=True, timeout=20, check=True,
@@ -64,7 +68,7 @@ def test_new_coordination_volume_supports_nondefault_uid_gid(indexer_image: str)
             "s=os.stat('/srv/aegis/indexer-coordination'); "
             "assert (s.st_uid,s.st_gid)==(501,20); c=Coordination(); c.close(); print('owned')"
         )
-        result = subprocess.run(
+        result = run_container(
             [*CONTAINER_COMMAND, "run", "--rm", "--init", "--network", "none", "--read-only",
              "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true", "--user", "501:20",
              "--mount", f"type=volume,src={volume},dst=/srv/aegis/indexer-coordination",
@@ -74,10 +78,10 @@ def test_new_coordination_volume_supports_nondefault_uid_gid(indexer_image: str)
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == "owned"
     finally:
-        info = json.loads(subprocess.run([*CONTAINER_COMMAND, "volume", "inspect", volume],
+        info = json.loads(run_container([*CONTAINER_COMMAND, "volume", "inspect", volume],
                           capture_output=True, text=True, timeout=20, check=True).stdout)[0]
         assert info["Labels"]["aegis.indexer.owner"] == volume
-        subprocess.run([*CONTAINER_COMMAND, "volume", "rm", volume], capture_output=True,
+        run_container([*CONTAINER_COMMAND, "volume", "rm", volume], capture_output=True,
                        timeout=20, check=True)
 
 TRANSPORT_PROBE = r'''
@@ -147,18 +151,18 @@ def test_actual_linux_reader_transport(tmp_path: Path) -> None:
         "--entrypoint", "python", "aegis-backend", "-c", TRANSPORT_PROBE,
     ]
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=45, check=False)
+        result = run_container(command, capture_output=True, text=True, timeout=45, check=False)
         assert result.returncode == 0, result.stdout + result.stderr
         assert json.loads(result.stdout) == {"observed": 1101, "complete": True, "reaped": True}
     finally:
-        inspected = subprocess.run(
+        inspected = run_container(
             [*CONTAINER_COMMAND, "inspect", name], capture_output=True, text=True,
             timeout=20, check=False,
         )
         if inspected.returncode == 0:
             owned = json.loads(inspected.stdout)[0]
             assert owned["Config"]["Labels"]["aegis.indexer.owner"] == name
-            subprocess.run([*CONTAINER_COMMAND, "rm", "--force", owned["Id"]], capture_output=True,
+            run_container([*CONTAINER_COMMAND, "rm", "--force", owned["Id"]], capture_output=True,
                            timeout=20, check=True)
         assert {item.name: (item.stat().st_size, item.stat().st_mtime_ns)
                 for item in source.iterdir()} == before
@@ -418,7 +422,8 @@ def _run_runtime_case(
     schema_thread = None
     migration = None
     try:
-        with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        with subprocess.Popen(controlled_container_argv(command),
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, text=True) as process:
             assert process.stdin is not None and process.stdout is not None
             process.stdin.write(json.dumps({
@@ -468,12 +473,12 @@ def _run_runtime_case(
                     "INSERT INTO django_migrations(id,app,name,applied) VALUES(%s,%s,%s,%s)",
                     migration,
                 )
-        inspected = subprocess.run([*CONTAINER_COMMAND, "inspect", name], capture_output=True,
+        inspected = run_container([*CONTAINER_COMMAND, "inspect", name], capture_output=True,
                                    text=True, timeout=20, check=False)
         if inspected.returncode == 0:
             owned = json.loads(inspected.stdout)[0]
             assert owned["Config"]["Labels"]["aegis.indexer.owner"] == name
-            subprocess.run([*CONTAINER_COMMAND, "rm", "--force", owned["Id"]], capture_output=True,
+            run_container([*CONTAINER_COMMAND, "rm", "--force", owned["Id"]], capture_output=True,
                            timeout=20, check=True)
         assert all(item.read_bytes() == b"preserve"
                    for source in sources for item in source.iterdir())
@@ -595,19 +600,19 @@ def test_parent_death_reaps_reader_before_replacement_admission(
         "--entrypoint", "python", indexer_image, "-c", RESTART_PROBE, reaper,
     ]
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=40, check=False)
+        result = run_container(command, capture_output=True, text=True, timeout=40, check=False)
         assert result.returncode == 0, result.stdout + result.stderr
         assert json.loads(result.stdout) == {
             "parent_death": "SIGKILL", "child_reaped": True, "replacement": True,
             "reaper": reaper,
         }
     finally:
-        inspected = subprocess.run([*CONTAINER_COMMAND, "inspect", name], capture_output=True,
+        inspected = run_container([*CONTAINER_COMMAND, "inspect", name], capture_output=True,
                                    text=True, timeout=20, check=False)
         if inspected.returncode == 0:
             owned = json.loads(inspected.stdout)[0]
             assert owned["Config"]["Labels"]["aegis.indexer.owner"] == name
-            subprocess.run([*CONTAINER_COMMAND, "rm", "--force", owned["Id"]], capture_output=True,
+            run_container([*CONTAINER_COMMAND, "rm", "--force", owned["Id"]], capture_output=True,
                            timeout=20, check=True)
         assert all(item.read_bytes() == b"preserve" for item in source.iterdir())
 
@@ -622,7 +627,7 @@ def test_coordination_fails_closed_without_owned_mount(indexer_image: str, mount
     )
     mounts = ([] if mount == "absent" else ["--tmpfs",
               "/srv/aegis/indexer-coordination:rw,nosuid,nodev,uid=0,gid=0,mode=0777"])
-    result = subprocess.run(
+    result = run_container(
         [*CONTAINER_COMMAND, "run", "--rm", "--init", "--network", "none", "--read-only",
          "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true", "--user", "501:20",
          *mounts, "--entrypoint", "python", indexer_image, "-c", probe],

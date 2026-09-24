@@ -7,9 +7,10 @@ import shutil
 import stat
 import subprocess
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from aegisctl.container_engine import ContainerEngineError, container_command, selected_engine
 from aegisctl.container_network import network_identity_fields
@@ -485,3 +486,18 @@ def copy_bind_inputs(
     if parent_tree is None:
         prepare_owned_test_inventory(record_test_tree_inventory(tree))
     return copied
+
+
+def run_deployment_process(
+    command: Sequence[str], **kwargs: Any,
+) -> subprocess.CompletedProcess[str]:
+    """Route complete workload argv through the production checked launcher."""
+    from aegisctl.container_launch import controlled_container_argv
+
+    if command and command[0] in ("docker", "podman"):
+        command = controlled_container_argv(
+            command, environment=kwargs.get("env"),
+            canonical_base=Path(__file__).resolve().parents[2] / "compose.yaml",
+            working_directory=kwargs.get("cwd"),
+        )
+    return subprocess.run(command, **kwargs)

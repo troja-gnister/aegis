@@ -12,7 +12,17 @@ import pytest
 
 def select_fake_engine(
     engine: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    *, checked_mask_policy: bool = False,
 ) -> list[str]:
+    if checked_mask_policy:
+        def checked_policy(*args: object, **kwargs: object) -> tuple[str, ...]:
+            del args, kwargs
+            return ("unmask=/sys/devices/virtual/powercap",) if engine == "podman" else ()
+
+        monkeypatch.setattr(
+            "aegisctl.container_launch.require_podman_mask_compatibility", checked_policy,
+        )
+        monkeypatch.setattr("aegisctl.mounts.require_podman_mask_compatibility", checked_policy)
     monkeypatch.setenv("AEGIS_CONTAINER_ENGINE", engine)
     if engine == "docker":
         return ["docker"]

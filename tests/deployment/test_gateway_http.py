@@ -29,6 +29,9 @@ from tests.support.container_runtime import (
     record_test_tree_inventory,
     recover_owned_resource,
 )
+from tests.support.container_runtime import (
+    run_deployment_process as run_container,
+)
 from tests.support.fake_container_engine import select_fake_engine
 
 REPOSITORY = Path(__file__).resolve().parents[2]
@@ -94,7 +97,7 @@ class GatewayHarness:
 
 
 def docker(*arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    return run_container(
         [*CONTAINER_COMMAND, *arguments],
         check=check,
         capture_output=True,
@@ -349,7 +352,7 @@ def test_gateway_bad_optional_cid_still_uses_scoped_recovery_and_preserves_inter
 def test_network_identity_is_recovered_before_failed_create_returns(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, engine: str,
 ) -> None:
-    prefix = select_fake_engine(engine, tmp_path, monkeypatch)
+    prefix = select_fake_engine(engine, tmp_path, monkeypatch, checked_mask_policy=True)
     monkeypatch.setattr(f"{__name__}.CONTAINER_COMMAND", prefix)
     recorded: list[OwnedDirectResource] = []
 

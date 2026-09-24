@@ -35,6 +35,7 @@ from aegisctl.container_resources import (
     require_empty_project,
 )
 from aegisctl.host_mounts import HostTopologyError, darwin_mountpoints, darwin_path_forms
+from aegisctl.podman_mask_compatibility import PodmanMaskError, require_podman_mask_compatibility
 
 if TYPE_CHECKING:
     from aegis_apps.roots.manifest import MountManifest
@@ -911,6 +912,19 @@ def observe_mount_fingerprints(
 ) -> tuple[ValidatedSlot, ...]:
     if not slots:
         raise ConfigError("mount slot observation requires slots")
+    # gettempdir() may itself create a write probe. Select and validate the
+    # configured location before asking tempfile to create anything.
+    temp_parent = Path(tempfile.tempdir or next(
+        (os.environ[name] for name in ("TMPDIR", "TEMP", "TMP") if os.environ.get(name)),
+        "/tmp",
+    ))
+    ensure_outputs_outside_originals((temp_parent,), tuple(slot.source for slot in slots))
+    try:
+        mask_options = require_podman_mask_compatibility(
+            originals=tuple(slot.source for slot in slots),
+        )
+    except PodmanMaskError as exc:
+        raise ConfigError(str(exc)) from exc
     project_name = f"aegis-preflight-{secrets.token_hex(8)}"
     targets = [slot.container_path for slot in slots]
     target_expression = " || ".join(
@@ -934,7 +948,7 @@ def observe_mount_fingerprints(
         "pids_limit": 64,
         "stop_grace_period": "3s",
         "cap_drop": ["ALL"],
-        "security_opt": ["no-new-privileges:true"],
+        "security_opt": ["no-new-privileges:true", *mask_options],
         "entrypoint": ["/bin/sh", "-eu", "-c"],
         "command": [observer_script],
         "volumes": [
@@ -942,13 +956,6 @@ def observe_mount_fingerprints(
         ],
     }
     try:
-        # gettempdir() may itself create a write probe. Select and validate the
-        # configured location before asking tempfile to create anything.
-        temp_parent = Path(tempfile.tempdir or next(
-            (os.environ[name] for name in ("TMPDIR", "TEMP", "TMP") if os.environ.get(name)),
-            "/tmp",
-        ))
-        ensure_outputs_outside_originals((temp_parent,), tuple(slot.source for slot in slots))
         temp = Path(tempfile.mkdtemp(prefix="aegis-mount-preflight-", dir=temp_parent))
         diagnostics: dict[Path, ObserverPathIdentity] = {
             temp: _observer_path_identity(temp, directory=True),

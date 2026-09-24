@@ -173,6 +173,7 @@ expected_identity = "{local_identity(source)}"
     )
     validated = preflight_slots(parse_config(config))
     engine = _ObserverEngine(source)
+    monkeypatch.setattr("aegisctl.mounts.require_podman_mask_compatibility", engine.checked_policy)
     monkeypatch.setattr("aegisctl.mounts.tempfile.tempdir", str(tmp_path))
     monkeypatch.setattr("aegisctl.mounts.subprocess.run", engine)
 
@@ -189,6 +190,7 @@ def test_observer_run_timeout_still_cleans_and_verifies_project_resources(
 ) -> None:
     slots = _observer_slots(tmp_path)
     engine = _ObserverEngine(slots[0].source, run_timeout=True)
+    monkeypatch.setattr("aegisctl.mounts.require_podman_mask_compatibility", engine.checked_policy)
     monkeypatch.setattr("aegisctl.mounts.tempfile.tempdir", str(tmp_path))
     monkeypatch.setattr("aegisctl.mounts.subprocess.run", engine)
 
@@ -217,6 +219,10 @@ def test_observer_resource_cleanup_refusal_retains_inventoried_diagnostics(
         _write_observer_record(kwargs["stdout"])
         return subprocess.CompletedProcess(arguments, 0)
 
+    monkeypatch.setattr(
+        "aegisctl.mounts.require_podman_mask_compatibility",
+        _ObserverEngine(slots[0].source).checked_policy,
+    )
     monkeypatch.setattr("aegisctl.mounts.subprocess.run", completed)
     monkeypatch.setattr(
         mounts, "_cleanup_observer_project",
@@ -255,6 +261,10 @@ def test_observer_unknown_diagnostic_file_refuses_before_engine_cleanup(
         del args
         cleanup_called = True
 
+    monkeypatch.setattr(
+        "aegisctl.mounts.require_podman_mask_compatibility",
+        _ObserverEngine(slots[0].source).checked_policy,
+    )
     monkeypatch.setattr("aegisctl.mounts.subprocess.run", completed)
     monkeypatch.setattr(mounts, "_cleanup_observer_project", cleanup)
 
@@ -279,6 +289,7 @@ def test_observer_rejects_unconfirmed_cleanup(
 ) -> None:
     slots = _observer_slots(tmp_path)
     engine = _ObserverEngine(slots[0].source, cleanup_failure=cleanup_failure)
+    monkeypatch.setattr("aegisctl.mounts.require_podman_mask_compatibility", engine.checked_policy)
     monkeypatch.setattr("aegisctl.mounts.tempfile.tempdir", str(tmp_path))
     monkeypatch.setattr("aegisctl.mounts.subprocess.run", engine)
 
@@ -319,6 +330,7 @@ expected_identity = "{local_identity(source)}"
     validated = preflight_slots(parse_config(config))
 
     engine = _ObserverEngine(source, oversized=True)
+    monkeypatch.setattr("aegisctl.mounts.require_podman_mask_compatibility", engine.checked_policy)
     monkeypatch.setattr("aegisctl.mounts.tempfile.tempdir", str(tmp_path))
     monkeypatch.setattr("aegisctl.mounts.subprocess.run", engine)
 
@@ -375,6 +387,10 @@ expected_identity = "{local_identity(source)}"
     def fail_run(*args: object, **kwargs: object) -> NoReturn:
         raise subprocess.SubprocessError(str(source))
 
+    monkeypatch.setattr(
+        "aegisctl.mounts.require_podman_mask_compatibility",
+        _ObserverEngine(validated[0].source).checked_policy,
+    )
     monkeypatch.setattr("aegisctl.mounts.subprocess.run", fail_run)
 
     with pytest.raises(ConfigError, match="observation") as caught:
@@ -412,6 +428,10 @@ def test_observer_failed_observation_retains_diagnostics(
             raise OSError("read failed")
         return original_open(path, *args, **kwargs)
 
+    monkeypatch.setattr(
+        "aegisctl.mounts.require_podman_mask_compatibility",
+        _ObserverEngine(slots[0].source).checked_policy,
+    )
     monkeypatch.setattr("aegisctl.mounts.subprocess.run", run)
     monkeypatch.setattr(Path, "open", open_output)
     with pytest.raises(ConfigError, match="diagnostics retained") as caught:
@@ -452,6 +472,10 @@ def test_observer_interruption_retains_original_and_recovers_when_safe(
         if uncertainty == "resources":
             raise recovery_error
 
+    monkeypatch.setattr(
+        "aegisctl.mounts.require_podman_mask_compatibility",
+        _ObserverEngine(slots[0].source).checked_policy,
+    )
     monkeypatch.setattr("aegisctl.mounts.subprocess.run", run)
     monkeypatch.setattr(mounts, "_cleanup_observer_project", cleanup)
     with pytest.raises(interruption) as caught:

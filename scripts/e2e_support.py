@@ -11,7 +11,13 @@ from pathlib import Path
 from typing import Any
 
 from aegis_apps.common.redaction import redact
-from aegisctl.container_engine import container_command, selected_engine
+from aegisctl.container_engine import (
+    compose_command,
+    compose_environment,
+    container_command,
+    selected_engine,
+)
+from aegisctl.container_launch import controlled_container_argv
 from aegisctl.container_resources import (
     ProjectInventory,
     ProjectResource,
@@ -459,9 +465,20 @@ def cleanup(path: Path) -> None:
     path.rmdir()
 
 
+def controlled_compose(arguments: list[str]) -> int:
+    environment = compose_environment(os.environ)
+    command = controlled_container_argv(
+        compose_command(*arguments, environment=environment), environment=environment,
+        canonical_base=REPOSITORY / "compose.yaml", working_directory=REPOSITORY,
+    )
+    return subprocess.run(command, cwd=REPOSITORY, env=environment, check=False).returncode
+
+
 if __name__ == "__main__":
     action = sys.argv[1]
-    if action == "check-compose":
+    if action == "controlled-compose":
+        raise SystemExit(controlled_compose(sys.argv[2:]))
+    elif action == "check-compose":
         check_compose(json.load(sys.stdin))
     elif action == "sanitize-logs":
         for _ in range(4000):

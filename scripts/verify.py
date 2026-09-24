@@ -26,6 +26,7 @@ from aegisctl.container_engine import (
     sanitized_environment,
     selected_engine,
 )
+from aegisctl.container_launch import canonical_compose_arguments
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 POSTGRES_IMAGE = (
@@ -425,6 +426,9 @@ def verify_compose() -> None:
         "--env-file", "/dev/null", "--project-name", "aegis-phase1-e2e",
         "-f", "compose.yaml", "-f", "compose.test.yaml",
     )
+    command = tuple(canonical_compose_arguments(
+        command, REPOSITORY / "compose.yaml", env, working_directory=REPOSITORY,
+    ))
     try:
         support["prepare"](directory)
         compose(*command, "config", "--quiet", env=env)

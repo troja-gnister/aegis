@@ -28,6 +28,9 @@ from tests.support.container_runtime import (
     record_fresh_test_tree,
     record_test_tree_inventory,
 )
+from tests.support.container_runtime import (
+    run_deployment_process as run_container,
+)
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 CONTAINER_COMMAND = container_command()
@@ -133,7 +136,7 @@ def _runtime_arguments(fixture: dict[str, Any], role: str) -> list[str]:
 
 @pytest.mark.parametrize("role", ["gateway", "operations", "indexer", "media"])
 def test_real_runtime_accepts_leaf_root(leaf_fixture: dict[str, Any], role: str) -> None:
-    result = subprocess.run(
+    result = run_container(
         _runtime_arguments(leaf_fixture, role), capture_output=True,
         text=True, timeout=60, check=False,
     )
@@ -151,8 +154,9 @@ def test_real_runtime_rejects_descendant_mount_introduced_after_preflight(
         f"type=bind,src={leaf_fixture['external']},dst=/srv/aegis/roots/photos/{descendant}"
         + (",readonly" if mode == "ro" else "")
     )
-    arguments[2:2] = ["--mount", child_mount]
-    result = subprocess.run(
+    insertion = len(CONTAINER_COMMAND) + 1
+    arguments[insertion:insertion] = ["--mount", child_mount]
+    result = run_container(
         arguments, capture_output=True, text=True, timeout=60, check=False,
     )
     assert result.returncode != 0
@@ -162,13 +166,75 @@ def test_real_runtime_rejects_descendant_mount_introduced_after_preflight(
     assert str(leaf_fixture["external"]) not in result.stderr
 
 
+@pytest.mark.parametrize("engine,prefix", [
+    ("docker", ["docker"]),
+    ("podman", ["podman", "--remote=false"]),
+])
+def test_descendant_runtime_routes_child_mount_through_checked_launch(
+    engine: str, prefix: list[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from aegisctl import container_launch
+
+    fixture = {
+        "source": Path("/synthetic/source"),
+        "external": Path("/synthetic/external"),
+        "digest": "synthetic-digest",
+        "manifest": Path("/synthetic/manifest"),
+        "aegisctl": Path("/synthetic/aegisctl"),
+    }
+    sent: list[list[str]] = []
+    admissions: list[tuple[Path, ...]] = []
+
+    def fake_run(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        sent.append(list(arguments))
+        return subprocess.CompletedProcess(
+            arguments, 1, "", json.dumps({"message": "mount attestation failed"}),
+        )
+
+    def admit(*args: Any, **kwargs: Any) -> tuple[str, ...]:
+        del args
+        admissions.append(kwargs["originals"])
+        return ("unmask=/sys/devices/virtual/powercap",)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setitem(globals(), "CONTAINER_COMMAND", prefix)
+    monkeypatch.setattr(container_launch, "selected_engine", lambda environment=None: engine)
+    monkeypatch.setattr(container_launch, "container_command", lambda environment=None: prefix)
+    monkeypatch.setattr(container_launch, "require_podman_mask_compatibility", admit)
+
+    test_real_runtime_rejects_descendant_mount_introduced_after_preflight(
+        fixture, "operations", "ro", "deep/nested",
+    )
+
+    native = sent[0]
+    assert native[:len(prefix) + 1] == [*prefix, "run"]
+    child_mount = (
+        "type=bind,src=/synthetic/external,"
+        "dst=/srv/aegis/roots/photos/deep/nested,readonly"
+    )
+    assert native.count(child_mount) == 1
+    assert native.index(child_mount) > len(prefix)
+    assert native[native.index(child_mount) - 1] == "--mount"
+    assert native.index(child_mount) < native.index("aegis-backend")
+    assert len(admissions) == (1 if engine == "podman" else 0)
+    if admissions:
+        assert Path("/synthetic/external") in admissions[0]
+
+    run_container(["unrelated", "inspect"], check=False)
+    assert sent[-1] == ["unrelated", "inspect"]
+
+
 def test_real_observer_rejects_descendant_mount_visible_only_in_container(
     leaf_fixture: dict[str, Any], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     real_run = subprocess.run
+    compose_prefix = [*CONTAINER_COMMAND, "compose"]
+    injections = 0
 
     def inject_child(arguments: list[str], **kwargs: Any) -> Any:
-        if arguments[:2] == [*CONTAINER_COMMAND, "compose"] and "run" in arguments:
+        nonlocal injections
+        if arguments[:len(compose_prefix)] == compose_prefix and "run" in arguments:
             path = Path(arguments[arguments.index("-f") + 1])
             document = yaml.safe_load(path.read_text())
             document["services"]["mount-observer"]["volumes"].append({
@@ -178,8 +244,94 @@ def test_real_observer_rejects_descendant_mount_visible_only_in_container(
             })
             # Only the observer's disposable, test-owned Compose artifact is altered.
             path.write_text(yaml.safe_dump(document))
+            injections += 1
         return real_run(arguments, **kwargs)
 
     monkeypatch.setattr(subprocess, "run", inject_child)
-    with pytest.raises(ConfigError, match="nested mount"):
+    with pytest.raises(
+        ConfigError, match=r"^container mount observation failed; diagnostics retained at /",
+    ) as caught:
         observe_mount_fingerprints(leaf_fixture["slots"])
+    cause = caught.value.__cause__
+    assert isinstance(cause, ConfigError), "expected direct nested-mount ConfigError cause"
+    assert str(cause) == (
+        "original root contains a nested mount; declare non-overlapping leaf roots"
+    ), "expected direct nested-mount ConfigError cause"
+    assert injections == 1
+
+
+@pytest.mark.parametrize("prefix", [
+    ["docker"],
+    ["podman", "--remote=false"],
+])
+@pytest.mark.parametrize("cause_case", [
+    "nested", "missing", "wrong_type", "other_config",
+])
+def test_observer_injects_one_child_only_into_compose_run(
+    prefix: list[str], cause_case: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compose_path = tmp_path / "compose.yaml"
+    compose_path.write_text(yaml.safe_dump({"services": {"mount-observer": {"volumes": [
+        {"type": "bind", "source": "/synthetic/source", "target": "/srv/aegis/roots/photos"},
+    ]}}}))
+    volumes_seen: list[int] = []
+    sent: list[list[str]] = []
+
+    def fake_run(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        sent.append(list(arguments))
+        volumes_seen.append(len(yaml.safe_load(compose_path.read_text())[
+            "services"]["mount-observer"]["volumes"]))
+        return subprocess.CompletedProcess(arguments, 0)
+
+    def fake_observe(slots: Any) -> None:
+        del slots
+        subprocess.run(["unrelated", "run"], check=False)
+        subprocess.run([*prefix, "compose", "-f", str(compose_path), "ps"], check=False)
+        subprocess.run([*prefix, "run"], check=False)
+        subprocess.run(
+            [*prefix, "compose", "-f", str(compose_path), "run", "mount-observer"],
+            check=False,
+        )
+        causes: dict[str, BaseException | None] = {
+            "nested": ConfigError(
+                "original root contains a nested mount; declare non-overlapping leaf roots"
+            ),
+            "missing": None,
+            "wrong_type": ValueError(
+                "original root contains a nested mount; declare non-overlapping leaf roots"
+            ),
+            "other_config": ConfigError("observer mountinfo was unavailable"),
+        }
+        raise ConfigError(
+            "container mount observation failed; diagnostics retained at /synthetic/diagnostics"
+        ) from causes[cause_case]
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setitem(globals(), "CONTAINER_COMMAND", prefix)
+    monkeypatch.setitem(globals(), "observe_mount_fingerprints", fake_observe)
+    fixture = {"external": Path("/synthetic/external"), "slots": ()}
+    if cause_case == "nested":
+        test_real_observer_rejects_descendant_mount_visible_only_in_container(
+            fixture, monkeypatch,
+        )
+    else:
+        with pytest.raises(AssertionError, match="expected direct nested-mount ConfigError cause"):
+            test_real_observer_rejects_descendant_mount_visible_only_in_container(
+                fixture, monkeypatch,
+            )
+
+    assert volumes_seen == [1, 1, 1, 2]
+    assert sent == [
+        ["unrelated", "run"],
+        [*prefix, "compose", "-f", str(compose_path), "ps"],
+        [*prefix, "run"],
+        [*prefix, "compose", "-f", str(compose_path), "run", "mount-observer"],
+    ]
+    assert yaml.safe_load(compose_path.read_text())["services"]["mount-observer"][
+        "volumes"
+    ].count({
+        "type": "bind", "source": "/synthetic/external",
+        "target": "/srv/aegis/roots/photos/deep/nested", "read_only": True,
+        "bind": {"create_host_path": False},
+    }) == 1

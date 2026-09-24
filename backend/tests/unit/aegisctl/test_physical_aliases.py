@@ -76,7 +76,7 @@ def test_observer_checks_structured_physical_ancestry_before_hashing(
     rejected: bool,
     engine: str,
 ) -> None:
-    select_fake_engine(engine, tmp_path, monkeypatch)
+    select_fake_engine(engine, tmp_path, monkeypatch, checked_mask_policy=True)
     parent, alias = tmp_path / "tree", tmp_path / "private-alias"
     parent.mkdir()
     alias.mkdir()
@@ -258,7 +258,7 @@ def test_observer_rejects_opaque_selected_root(
     monkeypatch: pytest.MonkeyPatch,
     engine: str,
 ) -> None:
-    select_fake_engine(engine, tmp_path, monkeypatch)
+    select_fake_engine(engine, tmp_path, monkeypatch, checked_mask_policy=True)
     source = tmp_path / "source"
     source.mkdir()
     slots = preflight_slots([_slot(source, "photos")])

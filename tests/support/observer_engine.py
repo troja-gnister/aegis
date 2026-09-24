@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -38,6 +39,12 @@ class ObserverEngine:
         self.queries: list[tuple[str, str]] = []
         self.diagnostics: Path | None = None
 
+    def checked_policy(self, *args: object, originals: tuple[Path, ...]) -> tuple[str, ...]:
+        del args
+        assert self.source in originals
+        return (("unmask=/sys/devices/virtual/powercap",)
+                if os.environ.get("AEGIS_CONTAINER_ENGINE") == "podman" else ())
+
     def __call__(self, arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         assert arguments[0] in {"docker", "podman"}
         prefix = 2 if arguments[0] == "podman" else 1
@@ -50,7 +57,13 @@ class ObserverEngine:
             compose_path = Path(args[args.index("-f") + 1])
             self.diagnostics = compose_path.parent
             assert compose_path.stat().st_mode & 0o777 == 0o600
-            service = yaml.safe_load(compose_path.read_text())["services"]["mount-observer"]
+            services = yaml.safe_load(compose_path.read_text())["services"]
+            assert set(services) == {"mount-observer"}
+            service = services["mount-observer"]
+            assert service["security_opt"] == [
+                "no-new-privileges:true",
+                *(["unmask=/sys/devices/virtual/powercap"] if prefix == 2 else []),
+            ]
             assert service["volumes"][0]["source"] == str(self.source)
             assert service["volumes"][0]["type"] == "bind"
             assert service["volumes"][0]["read_only"] is True
