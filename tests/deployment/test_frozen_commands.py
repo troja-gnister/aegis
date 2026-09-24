@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -47,8 +48,9 @@ def test_e2e_nested_uv_commands_are_frozen_even_during_failure_cleanup(tmp_path:
     binary = tmp_path / "bin"
     binary.mkdir()
     log = tmp_path / "uv-invocations"
+    engine_log = tmp_path / "engine-invocations"
     for name, source in {
-        "docker": '#!/bin/sh\nexit 0\n',
+        "docker": '#!/bin/sh\nprintf "%s\\n" "$*" >> "$ENGINE_PROBE_LOG"\nexit 0\n',
         "node": '#!/bin/sh\nprintf "24\\n"\n',
         "uv": '#!/bin/sh\nprintf "%s\\n" "${UV_LOCKED:-unset} $*" >> "$UV_PROBE_LOG"\n'
         'exit 77\n',
@@ -58,6 +60,7 @@ def test_e2e_nested_uv_commands_are_frozen_even_during_failure_cleanup(tmp_path:
         executable.chmod(0o700)
     environment = os.environ | {
         "PATH": str(binary) + os.pathsep + os.environ["PATH"], "UV_PROBE_LOG": str(log),
+        "ENGINE_PROBE_LOG": str(engine_log), "AEGIS_CONTAINER_ENGINE": "docker",
     }
     environment.pop("UV_LOCKED", None)
     result = subprocess.run(
@@ -74,3 +77,130 @@ def test_e2e_nested_uv_commands_are_frozen_even_during_failure_cleanup(tmp_path:
     directory.rmdir()
     assert len(invocations) == 2  # prepare rejected, then EXIT cleanup rejected.
     assert all(line.startswith("1 ") or "run --locked " in line for line in invocations)
+    assert not engine_log.exists()
+
+
+@pytest.mark.parametrize("invalid_engine", ("podman --remote", ""))
+def test_e2e_rejects_invalid_engine_before_resource_checks_or_temp_creation(
+    tmp_path: Path, invalid_engine: str,
+) -> None:
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    engine_log = tmp_path / "engine-invocations"
+    engine = binary / "podman --remote"
+    engine.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$*" >> "$ENGINE_PROBE_LOG"\n', encoding="ascii",
+    )
+    engine.chmod(0o700)
+    before = {path.name for path in Path("/tmp").glob("aegis-phase1-e2e.*")}
+    result = subprocess.run(
+        ["bash", str(REPOSITORY / "scripts/test-e2e.sh")],
+        env=os.environ | {
+            "PATH": str(binary) + os.pathsep + os.environ["PATH"],
+            "ENGINE_PROBE_LOG": str(engine_log),
+            "AEGIS_CONTAINER_ENGINE": invalid_engine,
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 64
+    assert not engine_log.exists()
+    assert {path.name for path in Path("/tmp").glob("aegis-phase1-e2e.*")} == before
+
+
+def test_e2e_rejects_podman_without_explicit_local_socket_before_engine_use(
+    tmp_path: Path,
+) -> None:
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    engine_log = tmp_path / "engine-invocations"
+    provider = tmp_path / "docker-compose"
+    provider.write_text("#!/bin/sh\nexit 0\n", encoding="ascii")
+    provider.chmod(0o700)
+    podman = binary / "podman"
+    podman.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$*" >> "$ENGINE_PROBE_LOG"\n', encoding="ascii",
+    )
+    podman.chmod(0o700)
+
+    result = subprocess.run(
+        ["bash", str(REPOSITORY / "scripts/test-e2e.sh")],
+        env=os.environ | {
+            "PATH": str(binary) + os.pathsep + os.environ["PATH"],
+            "ENGINE_PROBE_LOG": str(engine_log),
+            "AEGIS_CONTAINER_ENGINE": "podman",
+            "AEGIS_PODMAN_SOCKET": "",
+            "PODMAN_COMPOSE_PROVIDER": str(provider),
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 64
+    assert "AEGIS_PODMAN_SOCKET" in result.stderr
+    assert not engine_log.exists()
+
+
+def test_e2e_forces_local_podman_for_compose_boundary(tmp_path: Path) -> None:
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    engine_log = tmp_path / "engine-invocations"
+    work_dir = tmp_path / "fake-e2e-work"
+    provider = tmp_path / "docker-compose"
+    provider.write_text("#!/bin/sh\nexit 0\n", encoding="ascii")
+    provider.chmod(0o700)
+    private = tmp_path / "podman-service"
+    private.mkdir(mode=0o700)
+    socket_path = private / "podman.sock"
+    listener = socket.socket(socket.AF_UNIX)
+    listener.bind(str(socket_path))
+    for name, source in {
+        "mktemp": '#!/bin/sh\nmkdir -m 700 "$FAKE_E2E_WORK"\nprintf "%s\\n" "$FAKE_E2E_WORK"\n',
+        "node": "#!/bin/sh\nprintf '24\\n'\n",
+        "podman": (
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$ENGINE_PROBE_LOG\"\nexit 77\n"
+        ),
+        "uv": (
+            "#!/bin/sh\n"
+            "case \"$*\" in\n"
+            "  *'e2e_support.py prepare '*)\n"
+            "    for work do :; done; mkdir -p \"$work/secrets\"\n"
+            "    for name in e2e-alice-password e2e-bob-password e2e-admin-password; do "
+            "printf 'synthetic\\n' > \"$work/secrets/$name\"; done;;\n"
+            "esac\nexit 0\n"
+        ),
+    }.items():
+        executable = binary / name
+        executable.write_text(source, encoding="ascii")
+        executable.chmod(0o700)
+    try:
+        result = subprocess.run(
+            ["bash", str(REPOSITORY / "scripts/test-e2e.sh")],
+            env=os.environ | {
+                "PATH": str(binary) + os.pathsep + os.environ["PATH"],
+                "ENGINE_PROBE_LOG": str(engine_log),
+                "FAKE_E2E_WORK": str(work_dir),
+                "AEGIS_CONTAINER_ENGINE": "podman",
+                "AEGIS_PODMAN_SOCKET": str(socket_path),
+                "PODMAN_COMPOSE_PROVIDER": str(provider),
+            },
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    finally:
+        listener.close()
+
+    assert work_dir.parent == tmp_path
+    assert {p.name for p in (work_dir / "secrets").iterdir()} == {
+        "e2e-alice-password", "e2e-bob-password", "e2e-admin-password",
+    }
+    assert result.returncode == 77
+    assert engine_log.read_text(encoding="ascii").splitlines() == [
+        "--remote=false compose --env-file /dev/null --project-name "
+        "aegis-phase1-e2e --project-directory " + str(REPOSITORY) +
+        " -f compose.yaml -f compose.test.yaml build",
+    ]

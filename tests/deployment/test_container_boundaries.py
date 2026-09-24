@@ -10,8 +10,28 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from aegisctl.container_engine import compose_environment, container_command
+from aegisctl.container_resources import (
+    ProjectInventory,
+    ProjectResource,
+    ProjectResourceRule,
+    admit_project_transition,
+    capture_project_inventory,
+    cleanup_project_resource_kinds,
+    require_empty_project,
+    require_project_inventory,
+)
+
+from tests.support.container_runtime import (
+    FreshTestTree,
+    prepare_owned_test_inventory,
+    record_created_test_path,
+    record_fresh_test_tree,
+    record_test_tree_inventory,
+)
 
 REPOSITORY = Path(__file__).resolve().parents[2]
+CONTAINER_COMMAND = container_command()
 APPLICATION_SERVICES = ("gateway", "migrate", "web", "operations", "indexer", "media")
 BACKEND_SERVICES = ("migrate", "web", "operations", "indexer", "media")
 WORKER_SERVICES = ("operations", "indexer", "media")
@@ -24,14 +44,33 @@ POSTGRES_SECRET_SOURCES = (
     "db-media-password",
 )
 POSTGRES_BASE_IMAGE = (
-    "postgres:18.6-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2"
+    "docker.io/library/postgres:18.6-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2"
 )
+PROJECT_INVENTORIES: dict[str, ProjectInventory] = {}
+
+
+def _boundary_up_rules(arguments: tuple[str, ...]) -> tuple[ProjectResourceRule, ...]:
+    services = tuple(
+        name for name in ("postgres", *APPLICATION_SERVICES) if name in arguments
+    )
+    return (
+        *(ProjectResourceRule("container", (
+            ("com.docker.compose.service", service),
+            ("com.docker.compose.oneoff", "False"),
+        )) for service in services),
+        ProjectResourceRule("network", (("com.docker.compose.network", "backend"),)),
+        *(ProjectResourceRule("volume", (("com.docker.compose.volume", volume),))
+          for volume in (
+              "indexer-coordination", "postgres-data", "staging", "derivatives",
+              "model-cache", "quarantine", "frontier-outbox",
+          )),
+    )
 
 
 def rendered_compose() -> dict[str, Any]:
     result = subprocess.run(
         [
-            "docker",
+            *CONTAINER_COMMAND,
             "compose",
             "--project-directory",
             str(REPOSITORY),
@@ -44,7 +83,9 @@ def rendered_compose() -> dict[str, Any]:
         check=True,
         capture_output=True,
         text=True,
-        env=os.environ | {"AEGIS_RELEASE_ID": "container-boundary-test"},
+        env=compose_environment(
+            os.environ | {"AEGIS_RELEASE_ID": "container-boundary-test"}
+        ),
     )
     return cast(dict[str, Any], json.loads(result.stdout))
 
@@ -284,32 +325,89 @@ def docker_compose(
     *arguments: str,
     timeout: int = 180,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [
-            "docker",
-            "compose",
-            "--project-name",
-            project,
-            "--project-directory",
-            str(REPOSITORY),
-            "-f",
-            str(REPOSITORY / "compose.yaml"),
-            "-f",
-            str(override),
-            *arguments,
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        env=os.environ | {"AEGIS_RELEASE_ID": "container-runtime-test"},
+    if project not in PROJECT_INVENTORIES:
+        PROJECT_INVENTORIES[project] = require_empty_project(project)
+    inventory = PROJECT_INVENTORIES[project]
+    require_project_inventory(inventory)
+    if arguments and arguments[0] == "down":
+        kinds = {"container", "network"}
+        if "--volumes" in arguments:
+            kinds.add("volume")
+        PROJECT_INVENTORIES[project] = cleanup_project_resource_kinds(
+            inventory, frozenset(kinds),
+        )
+        return subprocess.CompletedProcess(arguments, 0, "", "")
+    mutation = bool(arguments) and arguments[0] == "up"
+    try:
+        result = subprocess.run(
+            [
+                *CONTAINER_COMMAND,
+                "compose",
+                "--project-name",
+                project,
+                "--project-directory",
+                str(REPOSITORY),
+                "-f",
+                str(REPOSITORY / "compose.yaml"),
+                "-f",
+                str(override),
+                *arguments,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=compose_environment(
+                os.environ | {"AEGIS_RELEASE_ID": "container-runtime-test"}
+            ),
+        )
+    finally:
+        if mutation:
+            observed = capture_project_inventory(project)
+            PROJECT_INVENTORIES[project] = admit_project_transition(
+                inventory, observed, _boundary_up_rules(arguments),
+            )
+    return result
+
+
+def test_docker_compose_failed_up_refuses_unknown_transition_and_retains_inventory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    project = "bounded-transition"
+    before = ProjectInventory(project, ())
+    unknown = ProjectResource(
+        "container", "unknown", "unknown",
+        json.dumps({
+            "Id": "unknown", "Created": "now", "Name": "unknown", "Image": "image",
+            "Labels": {
+                "com.docker.compose.project": project,
+                "com.docker.compose.service": "unknown",
+                "com.docker.compose.oneoff": "False",
+            },
+        }, sort_keys=True, separators=(",", ":")),
     )
+    PROJECT_INVENTORIES[project] = before
+    monkeypatch.setattr(f"{__name__}.require_project_inventory", lambda inventory: None)
+    monkeypatch.setattr(
+        f"{__name__}.subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 125, "", "failed"),
+    )
+    monkeypatch.setattr(
+        f"{__name__}.capture_project_inventory",
+        lambda name: ProjectInventory(name, (unknown,)),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="unexpected"):
+            docker_compose(project, tmp_path / "override.yaml", "up", "postgres")
+        assert PROJECT_INVENTORIES[project] == before
+    finally:
+        PROJECT_INVENTORIES.pop(project, None)
 
 
 def protected_volume_created_at() -> str | None:
     result = subprocess.run(
         [
-            "docker",
+            *CONTAINER_COMMAND,
             "volume",
             "inspect",
             "aegis_postgres-data",
@@ -337,7 +435,7 @@ def wait_for_postgres_health(
     while time.monotonic() < deadline:
         health = subprocess.run(
             [
-                "docker",
+                *CONTAINER_COMMAND,
                 "inspect",
                 container_id,
                 "--format",
@@ -363,6 +461,7 @@ def run_database_probe(
     role: str,
     password: str,
     statement: str,
+    tree: FreshTestTree,
 ) -> subprocess.CompletedProcess[str]:
     escaped_password = password.replace("\\", "\\\\").replace(":", "\\:")
     pgpass = scratch / f"{label}.pgpass"
@@ -371,9 +470,11 @@ def run_database_probe(
         encoding="utf-8",
     )
     pgpass.chmod(0o600)
+    record_created_test_path(tree, pgpass)
+    prepare_owned_test_inventory(record_test_tree_inventory(tree))
     return subprocess.run(
         [
-            "docker",
+            *CONTAINER_COMMAND,
             "run",
             "--rm",
             "--network",
@@ -406,6 +507,7 @@ def run_database_probe(
 
 @pytest.mark.integration
 def test_live_postgres_stages_secrets_and_drops_to_uid_70(tmp_path: Path) -> None:
+    tree = record_fresh_test_tree(tmp_path)
     protected_created_at = protected_volume_created_at()
     project = f"aegis-task11-boundary-{uuid.uuid4().hex[:10]}"
     secret_values = {
@@ -423,6 +525,7 @@ def test_live_postgres_stages_secrets_and_drops_to_uid_70(tmp_path: Path) -> Non
         path = tmp_path / name
         path.write_text(value + "\n", encoding="utf-8")
         path.chmod(0o600)
+        record_created_test_path(tree, path)
         secret_files[name] = str(path)
 
     override = tmp_path / "compose.runtime.json"
@@ -445,6 +548,8 @@ def test_live_postgres_stages_secrets_and_drops_to_uid_70(tmp_path: Path) -> Non
         ),
         encoding="utf-8",
     )
+    record_created_test_path(tree, override)
+    prepare_owned_test_inventory(record_test_tree_inventory(tree))
 
     container_id = ""
     try:
@@ -470,7 +575,7 @@ def test_live_postgres_stages_secrets_and_drops_to_uid_70(tmp_path: Path) -> Non
         while time.monotonic() < deadline:
             health = subprocess.run(
                 [
-                    "docker",
+                    *CONTAINER_COMMAND,
                     "inspect",
                     container_id,
                     "--format",
@@ -489,7 +594,7 @@ def test_live_postgres_stages_secrets_and_drops_to_uid_70(tmp_path: Path) -> Non
             pytest.fail("disposable PostgreSQL did not become healthy", pytrace=False)
 
         mounts = subprocess.run(
-            ["docker", "inspect", container_id, "--format", "{{json .Mounts}}"],
+            [*CONTAINER_COMMAND, "inspect", container_id, "--format", "{{json .Mounts}}"],
             check=True,
             capture_output=True,
             text=True,
@@ -501,7 +606,7 @@ def test_live_postgres_stages_secrets_and_drops_to_uid_70(tmp_path: Path) -> Non
 
         process_status = subprocess.run(
             [
-                "docker",
+                *CONTAINER_COMMAND,
                 "exec",
                 container_id,
                 "sh",
@@ -522,7 +627,7 @@ def test_live_postgres_stages_secrets_and_drops_to_uid_70(tmp_path: Path) -> Non
             staged_name = name.replace("-", "_")
             metadata = subprocess.run(
                 [
-                    "docker",
+                    *CONTAINER_COMMAND,
                     "exec",
                     "--user",
                     "70:70",
@@ -542,7 +647,7 @@ def test_live_postgres_stages_secrets_and_drops_to_uid_70(tmp_path: Path) -> Non
 
         source_access = subprocess.run(
             [
-                "docker",
+                *CONTAINER_COMMAND,
                 "exec",
                 "--user",
                 "70:70",
@@ -572,9 +677,11 @@ def test_live_postgres_stages_secrets_and_drops_to_uid_70(tmp_path: Path) -> Non
                 encoding="utf-8",
             )
             pgpass.chmod(0o600)
+            record_created_test_path(tree, pgpass)
+            prepare_owned_test_inventory(record_test_tree_inventory(tree))
             authentication = subprocess.run(
                 [
-                    "docker",
+                    *CONTAINER_COMMAND,
                     "run",
                     "--rm",
                     "--network",
@@ -611,7 +718,7 @@ def test_live_postgres_stages_secrets_and_drops_to_uid_70(tmp_path: Path) -> Non
             assert authentication.stdout.strip() == f"{role}|{role}"
 
         logs = subprocess.run(
-            ["docker", "logs", container_id],
+            [*CONTAINER_COMMAND, "logs", container_id],
             check=True,
             capture_output=True,
             text=True,
@@ -624,13 +731,14 @@ def test_live_postgres_stages_secrets_and_drops_to_uid_70(tmp_path: Path) -> Non
             override,
             "down",
             "--remove-orphans",
+            "--volumes",
             timeout=60,
         )
         assert stopped.returncode == 0
         if container_id:
             assert (
                 subprocess.run(
-                    ["docker", "inspect", container_id],
+                    [*CONTAINER_COMMAND, "inspect", container_id],
                     check=False,
                     capture_output=True,
                     text=True,
@@ -644,6 +752,7 @@ def test_live_postgres_stages_secrets_and_drops_to_uid_70(tmp_path: Path) -> Non
 def test_postgres_reconciles_populated_accepted_base_and_rotated_secrets(
     tmp_path: Path,
 ) -> None:
+    tree = record_fresh_test_tree(tmp_path)
     protected_created_at = protected_volume_created_at()
     project = f"aegis-task11-upgrade-{uuid.uuid4().hex[:10]}"
     initial_values = {
@@ -669,6 +778,7 @@ def test_postgres_reconciles_populated_accepted_base_and_rotated_secrets(
         path = tmp_path / name
         path.write_text(value + "\n", encoding="utf-8")
         path.chmod(0o600)
+        record_created_test_path(tree, path)
         secret_files[name] = path
 
     override = tmp_path / "compose.upgrade.json"
@@ -682,6 +792,8 @@ def test_postgres_reconciles_populated_accepted_base_and_rotated_secrets(
         ),
         encoding="utf-8",
     )
+    record_created_test_path(tree, override)
+    prepare_owned_test_inventory(record_test_tree_inventory(tree))
     all_sensitive_values = tuple(initial_values.values()) + tuple(rotated_values.values())
     container_ids: list[str] = []
     try:
@@ -748,7 +860,7 @@ def test_postgres_reconciles_populated_accepted_base_and_rotated_secrets(
         if invalid_container_id:
             container_ids.append(invalid_container_id)
             invalid_logs = subprocess.run(
-                ["docker", "logs", invalid_container_id],
+                [*CONTAINER_COMMAND, "logs", invalid_container_id],
                 check=False,
                 capture_output=True,
                 text=True,
@@ -782,6 +894,7 @@ def test_postgres_reconciles_populated_accepted_base_and_rotated_secrets(
                 role=database_role,
                 password=initial_values[f"db-{role}-password"],
                 statement="SELECT session_user",
+                tree=tree,
             )
             assert old_authentication.returncode != 0
             new_authentication = run_database_probe(
@@ -791,6 +904,7 @@ def test_postgres_reconciles_populated_accepted_base_and_rotated_secrets(
                 role=database_role,
                 password=rotated_values[f"db-{role}-password"],
                 statement="SELECT session_user || '|' || current_user",
+                tree=tree,
             )
             assert new_authentication.returncode == 0
             assert new_authentication.stdout.strip() == f"{database_role}|{database_role}"
@@ -815,13 +929,14 @@ def test_postgres_reconciles_populated_accepted_base_and_rotated_secrets(
                 "AND acl.grantee = "
                 "(SELECT oid FROM pg_roles WHERE rolname = 'aegis_web');"
             ),
+            tree=tree,
         )
         assert preserved.returncode == 0, preserved.stderr
         assert preserved.stdout.splitlines() == ["preserved", "aegis_migrator", "0", "0"]
 
         for container_id in container_ids:
             logs = subprocess.run(
-                ["docker", "logs", container_id],
+                [*CONTAINER_COMMAND, "logs", container_id],
                 check=False,
                 capture_output=True,
                 text=True,
@@ -830,29 +945,7 @@ def test_postgres_reconciles_populated_accepted_base_and_rotated_secrets(
                 value in logs.stdout + logs.stderr for value in all_sensitive_values
             )
     finally:
-        docker_compose(project, override, "down", "--remove-orphans", timeout=60)
-        volumes = subprocess.run(
-            [
-                "docker",
-                "volume",
-                "ls",
-                "--filter",
-                f"label=com.docker.compose.project={project}",
-                "--format",
-                "{{.Name}}",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.splitlines()
-        assert "aegis_postgres-data" not in volumes
-        for volume in volumes:
-            assert volume.startswith(f"{project}_")
-            removed = subprocess.run(
-                ["docker", "volume", "rm", volume],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            assert removed.returncode == 0
+        docker_compose(
+            project, override, "down", "--remove-orphans", "--volumes", timeout=60,
+        )
         assert protected_volume_created_at() == protected_created_at

@@ -1,7 +1,10 @@
 import {defineConfig} from "@playwright/test";
 import {fileURLToPath} from "node:url";
 
+import {browserProjects, validatedWebkitEndpoint} from "./e2e/webkit-endpoint";
+
 const baseURL = process.env.E2E_BASE_URL ?? "http://127.0.0.1:18080";
+const webkitEndpoint = validatedWebkitEndpoint(process.env);
 
 export default defineConfig({
   testDir: "./e2e",
@@ -25,8 +28,5 @@ export default defineConfig({
     trace: "off",
     video: "off",
   },
-  projects: [
-    {name: "mobile-chromium", use: {browserName: "chromium"}},
-    {name: "mobile-webkit", use: {browserName: "webkit"}},
-  ],
+  projects: browserProjects(webkitEndpoint),
 });

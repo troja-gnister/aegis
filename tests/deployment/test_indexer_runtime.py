@@ -13,10 +13,18 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from aegisctl.container_engine import container_command
 
+from tests.support.container_runtime import (
+    prepare_owned_test_inventory,
+    record_created_test_path,
+    record_fresh_test_tree,
+    record_test_tree_inventory,
+)
 from tests.support.database_roles import RoleDatabase
 
 REPOSITORY = Path(__file__).resolve().parents[2]
+CONTAINER_COMMAND = container_command()
 
 
 @pytest.fixture(scope="module")
@@ -24,7 +32,7 @@ def indexer_image() -> Iterator[str]:
     name = f"aegis-task7-{uuid.uuid4().hex}"
     try:
         built = subprocess.run(
-            ["docker", "build", "--tag", name, "--label", f"aegis.indexer.owner={name}",
+            [*CONTAINER_COMMAND, "build", "--tag", name, "--label", f"aegis.indexer.owner={name}",
              "--build-arg", "AEGIS_UID=501", "--build-arg", "AEGIS_GID=20",
              "--file", "docker/backend.Dockerfile", "."], cwd=REPOSITORY,
             capture_output=True, text=True, timeout=300, check=False,
@@ -32,19 +40,24 @@ def indexer_image() -> Iterator[str]:
         assert built.returncode == 0, built.stderr[-5000:]
         yield name
     finally:
-        inspected = subprocess.run(["docker", "image", "inspect", name], capture_output=True,
-                                   text=True, timeout=20, check=False)
+        inspected = subprocess.run(
+            [*CONTAINER_COMMAND, "image", "inspect", name], capture_output=True,
+            text=True, timeout=20, check=False,
+        )
         if inspected.returncode == 0:
             info = json.loads(inspected.stdout)[0]
             assert info["Config"]["Labels"]["aegis.indexer.owner"] == name
-            subprocess.run(["docker", "image", "rm", name], capture_output=True,
+            subprocess.run([*CONTAINER_COMMAND, "image", "rm", name], capture_output=True,
                            timeout=30, check=True)
 
 
 def test_new_coordination_volume_supports_nondefault_uid_gid(indexer_image: str) -> None:
     volume = f"aegis-task7-coordination-{uuid.uuid4().hex}"
-    subprocess.run(["docker", "volume", "create", "--label", f"aegis.indexer.owner={volume}",
-                    volume], capture_output=True, timeout=20, check=True)
+    subprocess.run(
+        [*CONTAINER_COMMAND, "volume", "create", "--label",
+         f"aegis.indexer.owner={volume}", volume],
+        capture_output=True, timeout=20, check=True,
+    )
     try:
         probe = (
             "import os; from aegis_apps.indexing.processes import Coordination; "
@@ -52,7 +65,7 @@ def test_new_coordination_volume_supports_nondefault_uid_gid(indexer_image: str)
             "assert (s.st_uid,s.st_gid)==(501,20); c=Coordination(); c.close(); print('owned')"
         )
         result = subprocess.run(
-            ["docker", "run", "--rm", "--init", "--network", "none", "--read-only",
+            [*CONTAINER_COMMAND, "run", "--rm", "--init", "--network", "none", "--read-only",
              "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true", "--user", "501:20",
              "--mount", f"type=volume,src={volume},dst=/srv/aegis/indexer-coordination",
              "--entrypoint", "python", indexer_image, "-c", probe],
@@ -61,10 +74,10 @@ def test_new_coordination_volume_supports_nondefault_uid_gid(indexer_image: str)
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == "owned"
     finally:
-        info = json.loads(subprocess.run(["docker", "volume", "inspect", volume],
+        info = json.loads(subprocess.run([*CONTAINER_COMMAND, "volume", "inspect", volume],
                           capture_output=True, text=True, timeout=20, check=True).stdout)[0]
         assert info["Labels"]["aegis.indexer.owner"] == volume
-        subprocess.run(["docker", "volume", "rm", volume], capture_output=True,
+        subprocess.run([*CONTAINER_COMMAND, "volume", "rm", volume], capture_output=True,
                        timeout=20, check=True)
 
 TRANSPORT_PROBE = r'''
@@ -113,25 +126,24 @@ finally:
 
 
 def test_actual_linux_reader_transport(tmp_path: Path) -> None:
+    tree = record_fresh_test_tree(tmp_path)
     source = tmp_path / "source"
     source.mkdir()
     for number in range(1101):
         (source / f"keep{number}").write_bytes(b"preserve")
     before = {item.name: (item.stat().st_size, item.stat().st_mtime_ns)
               for item in source.iterdir()}
+    record_created_test_path(tree, source, recursive=True)
+    prepare_owned_test_inventory(record_test_tree_inventory(tree))
     name = f"aegis-indexer-{uuid.uuid4().hex}"
     command = [
-        "docker", "run", "--init", "--name", name,
+        *CONTAINER_COMMAND, "run", "--init", "--name", name,
         "--label", f"aegis.indexer.owner={name}", "--network", "none", "--read-only",
         "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
         "--user", f"{os.geteuid()}:{os.getegid()}", "--memory", "128m", "--pids-limit", "32",
         "--tmpfs", f"/srv/aegis/indexer-coordination:rw,nosuid,nodev,size=1m,"
         f"uid={os.geteuid()},gid={os.getegid()},mode=0700",
         "--mount", f"type=bind,src={source},dst=/srv/aegis/roots/synthetic,readonly",
-        "--mount", f"type=bind,src={REPOSITORY / 'backend/aegis_apps'},"
-        "dst=/app/backend/aegis_apps,readonly",
-        "--mount", f"type=bind,src={REPOSITORY / 'backend/aegisctl'},"
-        "dst=/app/backend/aegisctl,readonly",
         "--entrypoint", "python", "aegis-backend", "-c", TRANSPORT_PROBE,
     ]
     try:
@@ -139,12 +151,14 @@ def test_actual_linux_reader_transport(tmp_path: Path) -> None:
         assert result.returncode == 0, result.stdout + result.stderr
         assert json.loads(result.stdout) == {"observed": 1101, "complete": True, "reaped": True}
     finally:
-        inspected = subprocess.run(["docker", "inspect", name], capture_output=True, text=True,
-                                   timeout=20, check=False)
+        inspected = subprocess.run(
+            [*CONTAINER_COMMAND, "inspect", name], capture_output=True, text=True,
+            timeout=20, check=False,
+        )
         if inspected.returncode == 0:
             owned = json.loads(inspected.stdout)[0]
             assert owned["Config"]["Labels"]["aegis.indexer.owner"] == name
-            subprocess.run(["docker", "rm", "--force", owned["Id"]], capture_output=True,
+            subprocess.run([*CONTAINER_COMMAND, "rm", "--force", owned["Id"]], capture_output=True,
                            timeout=20, check=True)
         assert {item.name: (item.stat().st_size, item.stat().st_mtime_ns)
                 for item in source.iterdir()} == before
@@ -363,6 +377,7 @@ print(json.dumps(evidence), flush=True)
 def _run_runtime_case(
     tmp_path: Path, role_database: RoleDatabase, indexer_image: str, mode: str,
 ) -> None:
+    tree = record_fresh_test_tree(tmp_path)
     from aegis_apps.catalog.models import CatalogEntry
     from aegis_apps.indexing.models import IndexDeployment
 
@@ -384,13 +399,15 @@ def _run_runtime_case(
         sources.append(source)
         for number in range(count):
             (source / f"keep{number}").write_bytes(b"preserve")
+        record_created_test_path(tree, source, recursive=True)
         mounts += ["--mount", f"type=bind,src={source},"
                    f"dst=/srv/aegis/roots/{root.slot_id},readonly"]
+    prepare_owned_test_inventory(record_test_tree_inventory(tree))
     name = f"aegis-indexer-runtime-{uuid.uuid4().hex}"
     host = "host.docker.internal" if sys.platform == "darwin" else "127.0.0.1"
     network = [] if sys.platform == "darwin" else ["--network", "host"]
     command = [
-        "docker", "run", "--interactive", "--init", "--name", name,
+        *CONTAINER_COMMAND, "run", "--interactive", "--init", "--name", name,
         "--label", f"aegis.indexer.owner={name}", *network, "--read-only", "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges:true", "--user", "501:20", "--memory", "256m",
         "--pids-limit", "64", "--tmpfs", "/tmp:rw,nosuid,nodev,size=16m,mode=1777",
@@ -451,12 +468,12 @@ def _run_runtime_case(
                     "INSERT INTO django_migrations(id,app,name,applied) VALUES(%s,%s,%s,%s)",
                     migration,
                 )
-        inspected = subprocess.run(["docker", "inspect", name], capture_output=True,
+        inspected = subprocess.run([*CONTAINER_COMMAND, "inspect", name], capture_output=True,
                                    text=True, timeout=20, check=False)
         if inspected.returncode == 0:
             owned = json.loads(inspected.stdout)[0]
             assert owned["Config"]["Labels"]["aegis.indexer.owner"] == name
-            subprocess.run(["docker", "rm", "--force", owned["Id"]], capture_output=True,
+            subprocess.run([*CONTAINER_COMMAND, "rm", "--force", owned["Id"]], capture_output=True,
                            timeout=20, check=True)
         assert all(item.read_bytes() == b"preserve"
                    for source in sources for item in source.iterdir())
@@ -487,7 +504,7 @@ owned_reaper = sys.argv[1] == 'owned'
 if owned_reaper:
     assert libc.prctl(36, 1, 0, 0, 0) == 0
 else:
-    assert 'docker-init' in open('/proc/1/comm').read()
+    assert os.getpid() != 1, 'container init is absent'
 worker_code = """
 import os, signal, time
 from uuid import uuid4
@@ -559,13 +576,17 @@ finally:
 def test_parent_death_reaps_reader_before_replacement_admission(
     tmp_path: Path, indexer_image: str, reaper: str,
 ) -> None:
+    tree = record_fresh_test_tree(tmp_path)
     source = tmp_path / "source"
     source.mkdir()
     for number in range(1501):
         (source / f"keep{number}").write_bytes(b"preserve")
+    record_created_test_path(tree, source, recursive=True)
+    prepare_owned_test_inventory(record_test_tree_inventory(tree))
     name = f"aegis-indexer-restart-{uuid.uuid4().hex}"
     command = [
-        "docker", "run", "--init", "--name", name, "--label", f"aegis.indexer.owner={name}",
+        *CONTAINER_COMMAND, "run", "--init", "--name", name,
+        "--label", f"aegis.indexer.owner={name}",
         "--network", "none", "--read-only", "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges:true", "--user", "501:20",
         "--tmpfs", "/srv/aegis/indexer-coordination:rw,nosuid,nodev,size=1m,"
@@ -581,12 +602,12 @@ def test_parent_death_reaps_reader_before_replacement_admission(
             "reaper": reaper,
         }
     finally:
-        inspected = subprocess.run(["docker", "inspect", name], capture_output=True,
+        inspected = subprocess.run([*CONTAINER_COMMAND, "inspect", name], capture_output=True,
                                    text=True, timeout=20, check=False)
         if inspected.returncode == 0:
             owned = json.loads(inspected.stdout)[0]
             assert owned["Config"]["Labels"]["aegis.indexer.owner"] == name
-            subprocess.run(["docker", "rm", "--force", owned["Id"]], capture_output=True,
+            subprocess.run([*CONTAINER_COMMAND, "rm", "--force", owned["Id"]], capture_output=True,
                            timeout=20, check=True)
         assert all(item.read_bytes() == b"preserve" for item in source.iterdir())
 
@@ -602,7 +623,7 @@ def test_coordination_fails_closed_without_owned_mount(indexer_image: str, mount
     mounts = ([] if mount == "absent" else ["--tmpfs",
               "/srv/aegis/indexer-coordination:rw,nosuid,nodev,uid=0,gid=0,mode=0777"])
     result = subprocess.run(
-        ["docker", "run", "--rm", "--init", "--network", "none", "--read-only",
+        [*CONTAINER_COMMAND, "run", "--rm", "--init", "--network", "none", "--read-only",
          "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true", "--user", "501:20",
          *mounts, "--entrypoint", "python", indexer_image, "-c", probe],
         capture_output=True, text=True, timeout=30, check=False,

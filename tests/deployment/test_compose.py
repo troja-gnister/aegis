@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import tempfile
 import urllib.request
 import uuid
 from contextlib import nullcontext
@@ -10,36 +11,163 @@ from typing import Any, cast
 
 import pytest
 from aegis_apps.common import runtime_checks
+from aegisctl.container_engine import compose_environment as validated_compose_environment
+from aegisctl.container_engine import container_command
+from aegisctl.container_resources import (
+    ProjectInventory,
+    ProjectResource,
+    ProjectResourceRule,
+    admit_project_transition,
+    capture_project_inventory,
+    cleanup_project_inventory,
+    require_empty_project,
+)
 from django.test import override_settings
 
+from tests.support.container_runtime import copy_bind_inputs
+from tests.support.fake_container_engine import ProjectEngine, select_fake_engine
+
 REPOSITORY = Path(__file__).resolve().parents[2]
+CONTAINER_COMMAND = container_command()
 UV_IMAGE = (
     "ghcr.io/astral-sh/uv:0.12.8@"
     "sha256:d1cbaeadc234fe19c0d93daabcf5e98738cd93c6d1dd4918ef6aa30735feb23a"
 )
 PYTHON_IMAGE = (
-    "python:3.13.15-slim-trixie@"
+    "docker.io/library/python:3.13.15-slim-trixie@"
     "sha256:881d80734ee05dca6f7f42dcb080975652a53c7eda9ba1f03bb8da31aa6a6ec2"
 )
+NODE_IMAGE = (
+    "docker.io/library/node:24.20.0-bookworm-slim@"
+    "sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e"
+)
 CADDY_IMAGE = (
-    "caddy:2.11.4-alpine@"
+    "docker.io/library/caddy:2.11.4-alpine@"
     "sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648"
 )
 PUBLIC_TLS_HOST = "files.operator-domain.dev"
+
+
+INVALID_TLS_RULES = (
+    ProjectResourceRule("container", (
+        ("com.docker.compose.service", "caddy"),
+        ("com.docker.compose.oneoff", "True"),
+    )),
+    ProjectResourceRule("network", (("com.docker.compose.network", "backend"),)),
+    ProjectResourceRule("network", (("com.docker.compose.network", "edge"),)),
+    ProjectResourceRule("network", (("com.docker.compose.network", "tls-hop"),)),
+    ProjectResourceRule("volume", (("com.docker.compose.volume", "caddy-data"),)),
+    ProjectResourceRule("volume", (("com.docker.compose.volume", "derivatives"),)),
+)
+
+
+def _run_invalid_tls_host_probe(
+    project: str, command: list[str], environment: dict[str, str],
+) -> subprocess.CompletedProcess[str]:
+    expected = require_empty_project(project, environment)
+    result: subprocess.CompletedProcess[str] | None = None
+    error: BaseException | None = None
+    try:
+        result = subprocess.run(
+            command, check=False, capture_output=True, text=True, timeout=120,
+            env=environment,
+        )
+    except BaseException as exc:
+        error = exc
+    try:
+        observed = capture_project_inventory(project, environment)
+        created = admit_project_transition(expected, observed, INVALID_TLS_RULES)
+        cleanup_project_inventory(created, environment)
+    except BaseException as recovery_error:
+        if isinstance(error, (SystemExit, KeyboardInterrupt)):
+            raise error from recovery_error
+        raise
+    if error is not None:
+        raise error
+    if result is None:
+        raise AssertionError("invalid-host TLS probe produced no result")
+    return result
+
+
+def _project_resource(
+    kind: str, identity: str, labels: dict[str, str],
+) -> ProjectResource:
+    fields = {"Id": identity, "Name": identity, "Labels": labels}
+    return ProjectResource(
+        kind, identity, identity,
+        json.dumps(fields, sort_keys=True, separators=(",", ":")),
+    )
+
+
+def test_invalid_tls_probe_preserves_unknown_addition_without_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    empty = ProjectInventory("probe", ())
+    unknown = ProjectInventory("probe", (_project_resource(
+        "container", "foreign", {
+            "com.docker.compose.project": "probe",
+            "com.docker.compose.service": "postgres",
+            "com.docker.compose.oneoff": "True",
+        },
+    ),))
+    cleaned: list[ProjectInventory] = []
+    monkeypatch.setattr(f"{__name__}.require_empty_project", lambda *args: empty)
+    monkeypatch.setattr(f"{__name__}.capture_project_inventory", lambda *args: unknown)
+    monkeypatch.setattr(f"{__name__}.cleanup_project_inventory", cleaned.append)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess(
+        args[0], 64, "", "invalid host",
+    ))
+
+    with pytest.raises(RuntimeError, match="unexpected project resource transition"):
+        _run_invalid_tls_host_probe("probe", ["compose", "run"], {})
+    assert cleaned == []
+
+
+def test_invalid_tls_probe_propagates_cleanup_query_failure_without_broad_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    empty = ProjectInventory("probe", ())
+    created = ProjectInventory("probe", (_project_resource(
+        "container", "oneoff", {
+            "com.docker.compose.project": "probe",
+            "com.docker.compose.service": "caddy",
+            "com.docker.compose.oneoff": "True",
+        },
+    ),))
+    commands: list[list[str]] = []
+    monkeypatch.setattr(f"{__name__}.require_empty_project", lambda *args: empty)
+    monkeypatch.setattr(f"{__name__}.capture_project_inventory", lambda *args: created)
+
+    def refuse(*args: object) -> None:
+        del args
+        raise RuntimeError("cleanup inventory query failed")
+
+    monkeypatch.setattr(f"{__name__}.cleanup_project_inventory", refuse)
+
+    def completed(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 64, "", "invalid host")
+
+    monkeypatch.setattr(subprocess, "run", completed)
+    with pytest.raises(RuntimeError, match="cleanup inventory query failed"):
+        _run_invalid_tls_host_probe("probe", ["compose", "run"], {})
+    assert commands == [["compose", "run"]]
+    assert all("down" not in command for command in commands)
 
 
 def rendered_compose(
     *profiles: str, environment: dict[str, str] | None = None
 ) -> dict[str, Any]:
     profile_arguments = [argument for profile in profiles for argument in ("--profile", profile)]
-    compose_environment = (
+    environment_for_compose = (
         os.environ
         | {"AEGIS_RELEASE_ID": "test-release-identity"}
         | (environment or {})
     )
     result = subprocess.run(
         [
-            "docker",
+            *CONTAINER_COMMAND,
             "compose",
             *profile_arguments,
             "-f",
@@ -51,51 +179,40 @@ def rendered_compose(
         check=True,
         capture_output=True,
         text=True,
-        env=compose_environment,
+        env=validated_compose_environment(environment_for_compose),
     )
     return cast(dict[str, Any], json.loads(result.stdout))
 
 
 def adapted_caddyfile(path: Path, *, tls_host: str | None = None) -> dict[str, Any]:
-    arguments = [
-        "docker",
-        "run",
-        "--rm",
-        "--volume",
-        f"{path}:/etc/caddy/Caddyfile:ro",
-    ]
-    if tls_host is not None:
-        arguments.extend(["--env", f"AEGIS_TLS_HOST={tls_host}"])
-    result = subprocess.run(
-        [
-            *arguments,
-            CADDY_IMAGE,
-            "caddy",
-            "adapt",
-            "--config",
-            "/etc/caddy/Caddyfile",
-            "--adapter",
-            "caddyfile",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    with tempfile.TemporaryDirectory(prefix="aegis-caddy-bind-", dir="/tmp") as temporary:
+        copied = copy_bind_inputs(Path(temporary), {"Caddyfile": path})["Caddyfile"]
+        arguments = [
+            *CONTAINER_COMMAND, "run", "--rm", "--volume",
+            f"{copied}:/etc/caddy/Caddyfile:ro",
+        ]
+        if tls_host is not None:
+            arguments.extend(["--env", f"AEGIS_TLS_HOST={tls_host}"])
+        result = subprocess.run(
+            [*arguments, CADDY_IMAGE, "caddy", "adapt", "--config",
+             "/etc/caddy/Caddyfile", "--adapter", "caddyfile"],
+            check=True, capture_output=True, text=True, timeout=30,
+        )
     return cast(dict[str, Any], json.loads(result.stdout))
 
 
-def test_nginx_configuration_parses_with_pinned_runtime() -> None:
+def test_nginx_configuration_parses_with_pinned_runtime(tmp_path: Path) -> None:
     config = REPOSITORY / "deploy" / "nginx" / "nginx.conf"
     server_config = REPOSITORY / "deploy" / "nginx" / "aegis-server.conf"
     image = (
-        "nginxinc/nginx-unprivileged:1.30.4-alpine@"
+        "docker.io/nginxinc/nginx-unprivileged:1.30.4-alpine@"
         "sha256:45ce1e2e699234253d1def7baa96218a5d00b498d1ba0cbb1a17b6bdf73d1351"
     )
+    inputs = copy_bind_inputs(tmp_path, {"nginx.conf": config, "server.conf": server_config})
 
     subprocess.run(
         [
-            "docker",
+            *CONTAINER_COMMAND,
             "run",
             "--rm",
             "--add-host",
@@ -103,9 +220,9 @@ def test_nginx_configuration_parses_with_pinned_runtime() -> None:
             "--add-host",
             "tls-gateway:127.0.0.1",
             "--volume",
-            f"{config}:/etc/nginx/nginx.conf:ro",
+            f"{inputs['nginx.conf']}:/etc/nginx/nginx.conf:ro",
             "--volume",
-            f"{server_config}:/etc/nginx/aegis-server.conf:ro",
+            f"{inputs['server.conf']}:/etc/nginx/aegis-server.conf:ro",
             "--entrypoint",
             "nginx",
             image,
@@ -127,14 +244,17 @@ def test_nginx_configuration_failure_remains_visible_to_ci(tmp_path: Path) -> No
         encoding="utf-8",
     )
     server_config = REPOSITORY / "deploy" / "nginx" / "aegis-server.conf"
+    inputs = copy_bind_inputs(
+        tmp_path, {"invalid.conf": invalid, "server.conf": server_config}
+    )
     image = (
-        "nginxinc/nginx-unprivileged:1.30.4-alpine@"
+        "docker.io/nginxinc/nginx-unprivileged:1.30.4-alpine@"
         "sha256:45ce1e2e699234253d1def7baa96218a5d00b498d1ba0cbb1a17b6bdf73d1351"
     )
 
     result = subprocess.run(
         [
-            "docker",
+            *CONTAINER_COMMAND,
             "run",
             "--rm",
             "--add-host",
@@ -142,9 +262,9 @@ def test_nginx_configuration_failure_remains_visible_to_ci(tmp_path: Path) -> No
             "--add-host",
             "tls-gateway:127.0.0.1",
             "--volume",
-            f"{invalid}:/etc/nginx/nginx.conf:ro",
+            f"{inputs['invalid.conf']}:/etc/nginx/nginx.conf:ro",
             "--volume",
-            f"{server_config}:/etc/nginx/aegis-server.conf:ro",
+            f"{inputs['server.conf']}:/etc/nginx/aegis-server.conf:ro",
             "--entrypoint",
             "nginx",
             image,
@@ -162,9 +282,10 @@ def test_nginx_configuration_failure_remains_visible_to_ci(tmp_path: Path) -> No
 def test_gateway_build_collects_only_admin_static_with_pinned_python_stage() -> None:
     dockerfile = (REPOSITORY / "docker" / "gateway.Dockerfile").read_text(encoding="utf-8")
     final_stage = dockerfile.split(
-        "FROM nginxinc/nginx-unprivileged:1.30.4-alpine@", maxsplit=1
+        "FROM docker.io/nginxinc/nginx-unprivileged:1.30.4-alpine@", maxsplit=1
     )[1]
 
+    assert f"FROM {NODE_IMAGE} AS frontend-build" in dockerfile
     assert f"FROM {UV_IMAGE} AS admin-static-uv" in dockerfile
     assert f"FROM {PYTHON_IMAGE} AS admin-static-build" in dockerfile
     assert "python manage.py collectstatic --noinput" in dockerfile
@@ -506,7 +627,7 @@ def test_production_tls_profile_rejects_invalid_host_before_acme(
 ) -> None:
     project = f"aegis-production-tls-probe-{uuid.uuid4().hex[:10]}"
     compose = [
-        "docker",
+        *CONTAINER_COMMAND,
         "compose",
         "--project-name",
         project,
@@ -517,36 +638,16 @@ def test_production_tls_profile_rejects_invalid_host_before_acme(
         "--profile",
         "tls",
     ]
-    environment = os.environ | {
+    environment = validated_compose_environment(os.environ | {
         "AEGIS_RELEASE_ID": "tls-rejection-test",
         "AEGIS_TLS_HOST": rejected_host,
-    }
+    })
 
-    try:
-        result = subprocess.run(
-            [
-                *compose,
-                "run",
-                "--build",
-                "--rm",
-                "--no-deps",
-                "caddy",
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            env=environment,
-        )
-    finally:
-        subprocess.run(
-            [*compose, "down", "--volumes", "--remove-orphans"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=environment,
-        )
+    result = _run_invalid_tls_host_probe(
+        project,
+        [*compose, "run", "--build", "--rm", "--no-deps", "caddy"],
+        environment,
+    )
 
     rendered = (result.stdout + result.stderr).lower()
     assert result.returncode == 64
@@ -572,7 +673,7 @@ def test_caddy_build_removes_unneeded_file_capability_without_weakening_policy()
     assert caddy["cap_drop"] == ["ALL"]
     assert caddy["security_opt"] == ["no-new-privileges:true"]
     assert (
-        "FROM caddy:2.11.4-alpine@"
+        "FROM docker.io/library/caddy:2.11.4-alpine@"
         "sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648"
     ) in dockerfile
     assert "setcap -r /usr/bin/caddy" in dockerfile
@@ -654,8 +755,9 @@ def test_backend_release_identity_is_required_and_propagated_to_web_and_workers(
 
     environment = os.environ.copy()
     environment.pop("AEGIS_RELEASE_ID", None)
+    environment = validated_compose_environment(environment)
     result = subprocess.run(
-        ["docker", "compose", "-f", "compose.yaml", "config", "--quiet"],
+        [*CONTAINER_COMMAND, "compose", "-f", "compose.yaml", "config", "--quiet"],
         check=False,
         capture_output=True,
         text=True,
@@ -663,3 +765,70 @@ def test_backend_release_identity_is_required_and_propagated_to_web_and_workers(
     )
     assert result.returncode != 0
     assert "AEGIS_RELEASE_ID" in result.stderr
+
+
+@pytest.mark.parametrize("interruption", [SystemExit, KeyboardInterrupt])
+@pytest.mark.parametrize("uncertainty", [None, "capture", "admission", "cleanup"])
+def test_invalid_tls_probe_preserves_interruption_through_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+    interruption: type[BaseException], uncertainty: str | None,
+) -> None:
+    empty = ProjectInventory("probe", ())
+    original = interruption(17)
+    recovery_error = RuntimeError("recovery uncertain")
+    calls: list[str] = []
+
+    def run(*args: object, **kwargs: object) -> None:
+        raise original
+
+    def step(name: str, result: object) -> Any:
+        def perform(*args: object) -> object:
+            calls.append(name)
+            if uncertainty == name:
+                raise recovery_error
+            return result
+        return perform
+
+    monkeypatch.setattr(f"{__name__}.require_empty_project", lambda *args: empty)
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(f"{__name__}.capture_project_inventory", step("capture", empty))
+    monkeypatch.setattr(f"{__name__}.admit_project_transition", step("admission", empty))
+    monkeypatch.setattr(f"{__name__}.cleanup_project_inventory", step("cleanup", None))
+    with pytest.raises(interruption) as caught:
+        _run_invalid_tls_host_probe("probe", ["compose", "run"], {})
+    assert caught.value is original
+    assert original.__cause__ is (None if uncertainty is None else recovery_error)
+    expected = ["capture", "admission", "cleanup"]
+    expected_calls = expected if uncertainty is None else expected[:expected.index(uncertainty) + 1]
+    assert calls == expected_calls
+
+
+@pytest.mark.parametrize("engine", ("docker", "podman"))
+@pytest.mark.parametrize("unknown", (False, True))
+def test_tls_complete_observed_inventory_exact_cleanup_or_refusal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, engine: str, unknown: bool,
+) -> None:
+    prefix = select_fake_engine(engine, tmp_path, monkeypatch)
+    declared = (
+        ("network", "backend"), ("network", "edge"), ("network", "tls-hop"),
+        ("volume", "caddy-data"), ("volume", "derivatives"),
+    )
+    if unknown:
+        declared += (("volume", "unknown"),)
+    fake = ProjectEngine(engine, "probe", declared)
+    monkeypatch.setattr(subprocess, "run", fake)
+    if unknown:
+        with pytest.raises(RuntimeError, match="unexpected project resource transition"):
+            _run_invalid_tls_host_probe("probe", [*prefix, "compose", "run"], dict(os.environ))
+        assert fake.removals == []
+        assert len(fake.resources) == len(declared)
+    else:
+        result = _run_invalid_tls_host_probe("probe", [*prefix, "compose", "run"], dict(os.environ))
+        assert result.returncode == 64
+        assert fake.removals == [
+            ("network", "rm", "immutable-backend"), ("network", "rm", "immutable-edge"),
+            ("network", "rm", "immutable-tls-hop"), ("volume", "rm", "probe_caddy-data"),
+            ("volume", "rm", "probe_derivatives"),
+        ]
+        assert fake.resources == {}
+        assert fake.queries[-3:] == ["container", "network", "volume"]

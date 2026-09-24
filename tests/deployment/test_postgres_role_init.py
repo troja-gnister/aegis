@@ -12,14 +12,29 @@ from typing import Any
 
 import psycopg
 import pytest
+from aegisctl.container_engine import ContainerEngineError, container_command
 from psycopg import sql
 
+from tests.support.container_runtime import (
+    OwnedDirectResource,
+    OwnedDirectScope,
+    cleanup_owned_resources,
+    copy_bind_inputs,
+    prepare_owned_test_inventory,
+    read_optional_cidfile,
+    record_created_test_path,
+    record_fresh_test_tree,
+    record_test_tree_inventory,
+    recover_owned_resource,
+)
+from tests.support.fake_container_engine import select_fake_engine
+
 REPOSITORY = Path(__file__).resolve().parents[2]
+CONTAINER_COMMAND = container_command()
 SCRIPT = REPOSITORY / "deploy" / "postgres" / "init" / "001-roles.sh"
-CONTAINER_NAME = "aegis-task11-role-init-pg"
 DATABASE_NAME = "aegis_role_init_test"
 POSTGRES_IMAGE = (
-    "postgres:18.6-alpine@"
+    "docker.io/library/postgres:18.6-alpine@"
     "sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2"
 )
 PROTECTED_VOLUME = "aegis_postgres-data"
@@ -64,7 +79,7 @@ def _docker(
     timeout: int = 60,
     input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    return _run(["docker", *arguments], timeout=timeout, input_text=input_text)
+    return _run([*CONTAINER_COMMAND, *arguments], timeout=timeout, input_text=input_text)
 
 
 def _require_success(result: subprocess.CompletedProcess[str], action: str) -> None:
@@ -88,6 +103,7 @@ def _assert_values_absent(
 class RoleInitDatabase:
     port: int
     admin_password: str = field(repr=False)
+    container_id: str
 
     def admin_connect(self) -> psycopg.Connection[Any]:
         return self.connect("postgres", self.admin_password)
@@ -120,14 +136,14 @@ class RoleInitDatabase:
         path = SECRET_PATHS[role]
         incoming = f"/run/secrets/.{Path(path).name}.incoming"
         _require_success(
-            _docker("exec", CONTAINER_NAME, "rm", "-f", path, incoming),
+            _docker("exec", self.container_id, "rm", "-f", path, incoming),
             "clear secret path",
         )
         _require_success(
             _docker(
                 "exec",
                 "--interactive",
-                CONTAINER_NAME,
+                self.container_id,
                 "dd",
                 f"of={incoming}",
                 input_text=value.decode("utf-8"),
@@ -135,9 +151,9 @@ class RoleInitDatabase:
             "stage secret",
         )
         commands = (
-            (("exec", CONTAINER_NAME, "chown", "70:70", incoming), "own secret"),
-            (("exec", CONTAINER_NAME, "chmod", f"{mode:o}", incoming), "mode secret"),
-            (("exec", CONTAINER_NAME, "mv", incoming, path), "install secret"),
+            (("exec", self.container_id, "chown", "70:70", incoming), "own secret"),
+            (("exec", self.container_id, "chmod", f"{mode:o}", incoming), "mode secret"),
+            (("exec", self.container_id, "mv", incoming, path), "install secret"),
         )
         for arguments, action in commands:
             _require_success(_docker(*arguments), action)
@@ -148,11 +164,13 @@ class RoleInitDatabase:
 
     def replace_with_symlink(self, role: str) -> None:
         path = SECRET_PATHS[role]
-        _require_success(_docker("exec", CONTAINER_NAME, "rm", "-f", path), "clear secret")
+        _require_success(
+            _docker("exec", self.container_id, "rm", "-f", path), "clear secret"
+        )
         _require_success(
             _docker(
                 "exec",
-                CONTAINER_NAME,
+                self.container_id,
                 "ln",
                 "-s",
                 SECRET_PATHS[MIGRATOR_ROLE],
@@ -163,17 +181,25 @@ class RoleInitDatabase:
 
     def replace_with_fifo(self, role: str) -> None:
         path = SECRET_PATHS[role]
-        _require_success(_docker("exec", CONTAINER_NAME, "rm", "-f", path), "clear secret")
-        _require_success(_docker("exec", CONTAINER_NAME, "mkfifo", path), "create secret fifo")
-        _require_success(_docker("exec", CONTAINER_NAME, "chown", "70:70", path), "own fifo")
-        _require_success(_docker("exec", CONTAINER_NAME, "chmod", "400", path), "mode fifo")
+        _require_success(
+            _docker("exec", self.container_id, "rm", "-f", path), "clear secret"
+        )
+        _require_success(
+            _docker("exec", self.container_id, "mkfifo", path), "create secret fifo"
+        )
+        _require_success(
+            _docker("exec", self.container_id, "chown", "70:70", path), "own fifo"
+        )
+        _require_success(
+            _docker("exec", self.container_id, "chmod", "400", path), "mode fifo"
+        )
 
     def run_init(self) -> subprocess.CompletedProcess[str]:
         return _docker(
             "exec",
             "--user",
             "70:70",
-            CONTAINER_NAME,
+            self.container_id,
             "/aegis-init/001-roles.sh",
             timeout=30,
         )
@@ -186,24 +212,165 @@ def _protected_volume_created_at() -> str | None:
     return result.stdout.strip()
 
 
+def _create_role_init_resource(
+    name: str, owner: str, cidfile: Path, arguments: Sequence[str],
+    recorded: list[OwnedDirectResource], sensitive_values: Sequence[str],
+) -> OwnedDirectResource:
+    result: subprocess.CompletedProcess[str] | None = None
+    error: Exception | None = None
+    interruption: KeyboardInterrupt | SystemExit | None = None
+    try:
+        result = _docker(
+            "create", "--cidfile", str(cidfile), "--name", name,
+            "--label", f"aegis.test.owner={owner}",
+            "--label", f"aegis.test.resource={name}", *arguments,
+        )
+    except (KeyboardInterrupt, SystemExit) as exc:
+        interruption = exc
+    except Exception as exc:
+        error = exc
+    candidate = read_optional_cidfile(cidfile)
+    try:
+        resource = recover_owned_resource(
+            "container", candidate, "aegis.test.owner", owner,
+            "aegis.test.resource", name,
+            lambda *command: _docker(*command),
+        )
+    except BaseException as exc:
+        if interruption is not None:
+            raise interruption from exc
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        status = (
+            f"exit status {result.returncode}; stderr characters={len(result.stderr or '')}"
+            if result is not None else f"create exception={type(error).__name__}"
+        )
+        cid_status = "available" if candidate else "unavailable"
+        # Recovery errors contain fixed validation messages and counts only. Never
+        # include subprocess output, command arguments, CID contents or credentials.
+        recovery = str(exc) if isinstance(exc, ContainerEngineError) else type(exc).__name__
+        for value in sensitive_values:
+            if value:
+                recovery = recovery.replace(value, "[redacted]")
+        failure = (
+            "create failed" if result is None or result.returncode else "inconsistent recovery"
+        )
+        raise AssertionError(
+            f"disposable PostgreSQL {failure} ({status}; CID {cid_status}); "
+            f"recovery failed: {recovery[:200]}"
+        ) from None
+    recorded.append(resource)
+    if interruption is not None:
+        raise interruption
+    if error is not None:
+        raise error
+    if result is None or result.returncode:
+        raise AssertionError("disposable PostgreSQL create failed after identity recovery")
+    _assert_values_absent(result, sensitive_values)
+    started = _docker("start", resource.immutable_id)
+    _require_success(started, "start disposable PostgreSQL")
+    return resource
+
+
+def _cleanup_role_init_resources(
+    resources: tuple[OwnedDirectResource, ...], owner: str,
+) -> None:
+    cleanup_owned_resources(
+        resources,
+        lambda *command: _docker(*command),
+        scopes=(OwnedDirectScope("container", "aegis.test.owner", owner),),
+    )
+
+
+def test_role_init_create_exception_recovers_canonical_id_before_propagating(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    recorded: list[OwnedDirectResource] = []
+    commands: list[tuple[str, ...]] = []
+
+    def completed(*arguments: str, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        commands.append(arguments)
+        if arguments[0] == "create":
+            raise OSError("transport failed after create")
+        if arguments[:2] == ("container", "ls"):
+            return subprocess.CompletedProcess(arguments, 0, "short-id\n", "")
+        if arguments == ("container", "inspect", "short-id"):
+            payload = [{"Id": "canonical-id", "Config": {"Labels": {
+                "aegis.test.owner": "unique-owner",
+                "aegis.test.resource": "unique-name",
+            }}}]
+            return subprocess.CompletedProcess(arguments, 0, json.dumps(payload), "")
+        raise AssertionError(arguments)
+
+    monkeypatch.setattr(f"{__name__}._docker", completed)
+    with pytest.raises(OSError, match="transport failed"):
+        _create_role_init_resource(
+            "unique-name", "unique-owner", tmp_path / "missing.cid",
+            (POSTGRES_IMAGE,), recorded, (),
+        )
+    assert recorded == [OwnedDirectResource(
+        "container", "canonical-id", "aegis.test.owner", "unique-owner",
+    )]
+    assert not any(command[:2] == ("rm", "--force") for command in commands)
+
+
+@pytest.mark.parametrize("failure", ("replacement", "query-error"))
+def test_role_init_cleanup_refuses_uncertain_or_replaced_identity_before_delete(
+    monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    commands: list[tuple[str, ...]] = []
+
+    def completed(*arguments: str, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        commands.append(arguments)
+        if arguments[:2] == ("container", "ls"):
+            return subprocess.CompletedProcess(
+                arguments, 125 if failure == "query-error" else 0,
+                "" if failure == "query-error" else "same-name\n", "",
+            )
+        if arguments == ("container", "inspect", "same-name"):
+            payload = [{"Id": "replacement-id", "Config": {"Labels": {
+                "aegis.test.owner": "unique-owner",
+                "aegis.test.resource": "unique-name",
+            }}}]
+            return subprocess.CompletedProcess(arguments, 0, json.dumps(payload), "")
+        raise AssertionError(arguments)
+
+    monkeypatch.setattr(f"{__name__}._docker", completed)
+    recorded = (OwnedDirectResource(
+        "container", "original-id", "aegis.test.owner", "unique-owner",
+    ),)
+    with pytest.raises(ValueError):
+        _cleanup_role_init_resources(recorded, "unique-owner")
+    assert not any(command[:2] == ("rm", "--force") for command in commands)
+
+
 @pytest.fixture(scope="module")
 def role_init_database(tmp_path_factory: pytest.TempPathFactory) -> Iterator[RoleInitDatabase]:
     protected_volume_created_at = _protected_volume_created_at()
-    if _docker("inspect", CONTAINER_NAME).returncode == 0:
-        pytest.fail(f"refusing to modify pre-existing container {CONTAINER_NAME}", pytrace=False)
+    token = secrets.token_hex(16)
+    container_name = f"aegis-role-init-{token}"
+    owner = f"role-init-{token}"
+    recorded: list[OwnedDirectResource] = []
 
     scratch = tmp_path_factory.mktemp("postgres-role-init")
+    tree = record_fresh_test_tree(scratch)
     bootstrap_password = f"bootstrap-{secrets.token_urlsafe(48)}"
     bootstrap_file = scratch / "postgres-password"
     bootstrap_file.write_text(bootstrap_password, encoding="utf-8")
     bootstrap_file.chmod(0o600)
-    created = False
+    record_created_test_path(tree, bootstrap_file)
+    script_copy = copy_bind_inputs(
+        scratch, {"001-roles.sh": SCRIPT}, parent_tree=tree,
+    )["001-roles.sh"]
+    prepare_owned_test_inventory(record_test_tree_inventory(tree))
     try:
-        result = _docker(
-            "run",
-            "--detach",
-            "--name",
-            CONTAINER_NAME,
+        resource = _create_role_init_resource(
+            container_name,
+            owner,
+            scratch / "postgres.cid",
+            (
             "--tmpfs",
             "/var/lib/postgresql:rw,nosuid,nodev,size=256m",
             "--tmpfs",
@@ -221,27 +388,29 @@ def role_init_database(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Rol
             "--mount",
             f"type=bind,src={bootstrap_file},dst=/bootstrap/postgres-password,readonly",
             "--mount",
-            f"type=bind,src={SCRIPT},dst=/aegis-init/001-roles.sh,readonly",
+            f"type=bind,src={script_copy},dst=/aegis-init/001-roles.sh,readonly",
             POSTGRES_IMAGE,
+            ),
+            recorded,
+            (bootstrap_password,),
         )
-        created = _docker("inspect", CONTAINER_NAME).returncode == 0
-        _assert_values_absent(result, [bootstrap_password])
-        _require_success(result, "start disposable PostgreSQL")
 
-        mounts_result = _docker("inspect", CONTAINER_NAME, "--format", "{{json .Mounts}}")
+        mounts_result = _docker(
+            "inspect", resource.immutable_id, "--format", "{{json .Mounts}}"
+        )
         _require_success(mounts_result, "inspect disposable PostgreSQL mounts")
         mounts = json.loads(mounts_result.stdout)
         assert all(mount.get("Name") != PROTECTED_VOLUME for mount in mounts)
         assert all(mount.get("Type") != "volume" for mount in mounts)
 
-        port_result = _docker("port", CONTAINER_NAME, "5432/tcp")
+        port_result = _docker("port", resource.immutable_id, "5432/tcp")
         _require_success(port_result, "discover disposable PostgreSQL port")
         port = int(port_result.stdout.strip().rsplit(":", maxsplit=1)[1])
 
         deadline = time.monotonic() + 60
         while True:
             try:
-                database = RoleInitDatabase(port, bootstrap_password)
+                database = RoleInitDatabase(port, bootstrap_password, resource.immutable_id)
                 with database.admin_connect() as connection, connection.cursor() as cursor:
                     cursor.execute("SELECT current_setting('server_version_num')::integer")
                     server_version = cursor.fetchone()
@@ -254,12 +423,7 @@ def role_init_database(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Rol
                 time.sleep(0.25)
         yield database
     finally:
-        if created:
-            _require_success(
-                _docker("rm", "--force", CONTAINER_NAME),
-                "remove disposable PostgreSQL",
-            )
-        assert _docker("inspect", CONTAINER_NAME).returncode != 0
+        _cleanup_role_init_resources(tuple(recorded), owner)
         assert _protected_volume_created_at() == protected_volume_created_at
 
 
@@ -306,6 +470,7 @@ def test_role_init_keeps_passwords_out_of_shell_and_psql_state() -> None:
 def test_role_init_removes_password_environment_before_starting_psql(
     tmp_path: Path,
 ) -> None:
+    tree = record_fresh_test_tree(tmp_path)
     psql_probe = tmp_path / "psql"
     psql_probe.write_text(
         """#!/bin/sh
@@ -323,6 +488,11 @@ exit 0
         encoding="utf-8",
     )
     psql_probe.chmod(0o555)
+    record_created_test_path(tree, psql_probe)
+    script_copy = copy_bind_inputs(
+        tmp_path, {"001-roles.sh": SCRIPT}, parent_tree=tree,
+    )["001-roles.sh"]
+    prepare_owned_test_inventory(record_test_tree_inventory(tree))
 
     result = _docker(
         "run",
@@ -343,7 +513,7 @@ exit 0
         "--tmpfs",
         "/run/secrets:rw,nosuid,nodev,size=64k,mode=0700",
         "--mount",
-        f"type=bind,src={SCRIPT},dst=/aegis-init/001-roles.sh,readonly",
+        f"type=bind,src={script_copy},dst=/aegis-init/001-roles.sh,readonly",
         "--mount",
         f"type=bind,src={psql_probe},dst=/test-bin/psql,readonly",
         "--env",
@@ -431,7 +601,7 @@ def test_role_init_runtime_contract(role_init_database: RoleInitDatabase) -> Non
 
     role_secret_path = SECRET_PATHS["aegis_web"]
     _require_success(
-        _docker("exec", CONTAINER_NAME, "chown", "0:0", role_secret_path),
+        _docker("exec", database.container_id, "chown", "0:0", role_secret_path),
         "set unsafe secret owner",
     )
     result = database.run_init()
@@ -486,7 +656,9 @@ def test_role_init_runtime_contract(role_init_database: RoleInitDatabase) -> Non
 
     database.stage_passwords(initial_passwords)
     for path in SECRET_PATHS.values():
-        stat_result = _docker("exec", CONTAINER_NAME, "stat", "-c", "%u:%g:%a", path)
+        stat_result = _docker(
+            "exec", database.container_id, "stat", "-c", "%u:%g:%a", path
+        )
         _require_success(stat_result, "inspect staged role secret")
         assert stat_result.stdout.strip() == "70:70:400"
     with database.admin_connect() as connection, connection.cursor() as cursor:
@@ -742,9 +914,89 @@ def test_role_init_runtime_contract(role_init_database: RoleInitDatabase) -> Non
     rerun = database.run_init()
     _assert_values_absent(rerun, [database.admin_password, *rotated_passwords.values()])
     _require_success(rerun, "rerun database role initialization")
-    logs = _docker("logs", CONTAINER_NAME)
+    logs = _docker("logs", database.container_id)
     _require_success(logs, "read disposable PostgreSQL logs")
     _assert_values_absent(
         logs,
         [database.admin_password, *initial_passwords.values(), *rotated_passwords.values()],
     )
+
+
+@pytest.mark.parametrize("engine", ("docker", "podman"))
+@pytest.mark.parametrize("create_status,handles,expected", (
+    (125, "", "create failed"),
+    (0, "", "inconsistent recovery"),
+    (0, "first\nsecond\n", "inconsistent recovery"),
+))
+def test_role_init_create_recovery_reports_safe_status_and_count(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    engine: str, create_status: int, handles: str, expected: str,
+) -> None:
+    prefix = select_fake_engine(engine, tmp_path, monkeypatch)
+    monkeypatch.setattr(f"{__name__}.CONTAINER_COMMAND", prefix)
+    recorded: list[OwnedDirectResource] = []
+    commands: list[list[str]] = []
+    secret = "private-password-canary"
+
+    def completed(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        assert arguments[:len(prefix)] == prefix
+        command = arguments[len(prefix):]
+        commands.append(command)
+        if command[0] == "create":
+            return subprocess.CompletedProcess(arguments, create_status, secret, secret * 4000)
+        assert command == [
+            "container", "ls", "--all", "--no-trunc", "--quiet", "--filter",
+            "label=aegis.test.owner=unique-owner", "--filter",
+            "label=aegis.test.resource=unique-name",
+        ]
+        return subprocess.CompletedProcess(arguments, 0, handles, secret)
+
+    monkeypatch.setattr(subprocess, "run", completed)
+    with pytest.raises(AssertionError, match=expected) as caught:
+        _create_role_init_resource(
+            "unique-name", "unique-owner", tmp_path / "missing.cid",
+            ("--env", f"PASSWORD={secret}", POSTGRES_IMAGE), recorded, (secret,),
+        )
+    diagnostic = str(caught.value)
+    assert f"exit status {create_status}" in diagnostic
+    assert f"handles={len(handles.split())}" in diagnostic
+    assert "CID unavailable" in diagnostic
+    assert "recovery" in diagnostic
+    assert secret not in diagnostic
+    assert POSTGRES_IMAGE not in diagnostic
+    assert len(diagnostic) < 512
+    assert recorded == []
+    assert [command[0] for command in commands] == ["create", "container"]
+
+
+@pytest.mark.parametrize("engine", ("docker", "podman"))
+@pytest.mark.parametrize("interruption", (KeyboardInterrupt(), SystemExit(143)))
+def test_role_init_interruption_during_recovery_propagates_without_adoption(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, engine: str,
+    interruption: BaseException,
+) -> None:
+    prefix = select_fake_engine(engine, tmp_path, monkeypatch)
+    monkeypatch.setattr(f"{__name__}.CONTAINER_COMMAND", prefix)
+    recorded: list[OwnedDirectResource] = []
+    commands: list[list[str]] = []
+
+    def completed(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        assert arguments[:len(prefix)] == prefix
+        command = arguments[len(prefix):]
+        commands.append(command)
+        if command[0] == "create":
+            return subprocess.CompletedProcess(arguments, 125, "", "create failed")
+        assert command[:2] == ["container", "ls"]
+        raise interruption
+
+    monkeypatch.setattr(subprocess, "run", completed)
+    with pytest.raises(type(interruption)) as caught:
+        _create_role_init_resource(
+            "unique-name", "unique-owner", tmp_path / "missing.cid",
+            (POSTGRES_IMAGE,), recorded, (),
+        )
+    assert caught.value is interruption
+    assert recorded == []
+    assert [command[0] for command in commands] == ["create", "container"]

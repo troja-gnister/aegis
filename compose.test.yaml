@@ -1,10 +1,14 @@
 services:
   postgres:
+    labels:
+      aegis.test.resource-token: "${AEGIS_TEST_RESOURCE_TOKEN:?AEGIS_TEST_RESOURCE_TOKEN is required}"
     environment:
       POSTGRES_INITDB_ARGS: --encoding=UTF8 --locale=C
     ports:
       - "127.0.0.1:${AEGIS_TEST_DB_PORT:-55432}:5432"
   web:
+    labels:
+      aegis.test.resource-token: "${AEGIS_TEST_RESOURCE_TOKEN:?AEGIS_TEST_RESOURCE_TOKEN is required}"
     environment:
       AEGIS_ENV: test
       DJANGO_SETTINGS_MODULE: aegis.settings.test
@@ -18,6 +22,52 @@ services:
         target: e2e_bob_password
       - source: e2e-admin-password
         target: e2e_admin_password
+  migrate:
+    labels:
+      aegis.test.resource-token: "${AEGIS_TEST_RESOURCE_TOKEN:?AEGIS_TEST_RESOURCE_TOKEN is required}"
+  operations:
+    labels:
+      aegis.test.resource-token: "${AEGIS_TEST_RESOURCE_TOKEN:?AEGIS_TEST_RESOURCE_TOKEN is required}"
+  indexer:
+    labels:
+      aegis.test.resource-token: "${AEGIS_TEST_RESOURCE_TOKEN:?AEGIS_TEST_RESOURCE_TOKEN is required}"
+  media:
+    labels:
+      aegis.test.resource-token: "${AEGIS_TEST_RESOURCE_TOKEN:?AEGIS_TEST_RESOURCE_TOKEN is required}"
+  gateway:
+    labels:
+      aegis.test.resource-token: "${AEGIS_TEST_RESOURCE_TOKEN:?AEGIS_TEST_RESOURCE_TOKEN is required}"
+
+networks:
+  backend:
+    labels:
+      aegis.test.resource-token: "${AEGIS_TEST_RESOURCE_TOKEN:?AEGIS_TEST_RESOURCE_TOKEN is required}"
+  edge:
+    labels:
+      aegis.test.resource-token: "${AEGIS_TEST_RESOURCE_TOKEN:?AEGIS_TEST_RESOURCE_TOKEN is required}"
+
+volumes:
+  indexer-coordination:
+    labels:
+      aegis.test.resource-token: "${AEGIS_TEST_RESOURCE_TOKEN:?AEGIS_TEST_RESOURCE_TOKEN is required}"
+  postgres-data:
+    labels:
+      aegis.test.resource-token: "${AEGIS_TEST_RESOURCE_TOKEN:?AEGIS_TEST_RESOURCE_TOKEN is required}"
+  staging:
+    labels:
+      aegis.test.resource-token: "${AEGIS_TEST_RESOURCE_TOKEN:?AEGIS_TEST_RESOURCE_TOKEN is required}"
+  derivatives:
+    labels:
+      aegis.test.resource-token: "${AEGIS_TEST_RESOURCE_TOKEN:?AEGIS_TEST_RESOURCE_TOKEN is required}"
+  model-cache:
+    labels:
+      aegis.test.resource-token: "${AEGIS_TEST_RESOURCE_TOKEN:?AEGIS_TEST_RESOURCE_TOKEN is required}"
+  quarantine:
+    labels:
+      aegis.test.resource-token: "${AEGIS_TEST_RESOURCE_TOKEN:?AEGIS_TEST_RESOURCE_TOKEN is required}"
+  frontier-outbox:
+    labels:
+      aegis.test.resource-token: "${AEGIS_TEST_RESOURCE_TOKEN:?AEGIS_TEST_RESOURCE_TOKEN is required}"
 
 secrets:
   postgres-superuser-password:

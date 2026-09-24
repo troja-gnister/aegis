@@ -10,8 +10,18 @@ import uuid
 from pathlib import Path
 
 import pytest
+from aegisctl.container_engine import container_command
+
+from tests.support.container_runtime import (
+    FreshTestTree,
+    prepare_owned_test_inventory,
+    record_created_test_path,
+    record_fresh_test_tree,
+    record_test_tree_inventory,
+)
 
 REPOSITORY = Path(__file__).resolve().parents[2]
+CONTAINER_COMMAND = container_command()
 
 # Executed in the exact container carrying the test mounts, not a second probe.
 PROBE = r'''
@@ -100,18 +110,17 @@ finally:
 '''
 
 
-def run_probe(source: Path, external: Path, descendant: str, read_only: bool) -> dict[str, object]:
+def run_probe(
+    source: Path, external: Path, descendant: str, read_only: bool, tree: FreshTestTree,
+) -> dict[str, object]:
+    prepare_owned_test_inventory(record_test_tree_inventory(tree))
     name = f"aegis-reader-{uuid.uuid4().hex}"
     command = [
-        "docker", "run", "--name", name, "--label", f"aegis.reader.owner={name}",
+        *CONTAINER_COMMAND, "run", "--name", name, "--label", f"aegis.reader.owner={name}",
         "--network", "none", "--read-only", "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges:true", "--user", f"{os.geteuid()}:{os.getegid()}",
         "--memory", "128m", "--pids-limit", "32", "--mount",
         f"type=bind,src={source},dst=/srv/aegis/roots/synthetic,readonly",
-        "--mount", f"type=bind,src={REPOSITORY / 'backend/aegis_apps'},"
-        "dst=/app/backend/aegis_apps,readonly",
-        "--mount", f"type=bind,src={REPOSITORY / 'backend/aegisctl'},"
-        "dst=/app/backend/aegisctl,readonly",
     ]
     if descendant != "leaf":
         command += ["--mount", f"type=bind,src={external},"
@@ -123,15 +132,17 @@ def run_probe(source: Path, external: Path, descendant: str, read_only: bool) ->
         assert result.returncode == 0, result.stdout + result.stderr
         return json.loads(result.stdout)
     finally:
-        inspection = subprocess.run(["docker", "inspect", name], capture_output=True,
+        inspection = subprocess.run([*CONTAINER_COMMAND, "inspect", name], capture_output=True,
                                     text=True, timeout=20, check=False)
         if inspection.returncode == 0:
             owned = json.loads(inspection.stdout)[0]
             assert owned["Config"]["Labels"]["aegis.reader.owner"] == name
-            subprocess.run(["docker", "rm", "--force", owned["Id"]], capture_output=True,
+            subprocess.run([*CONTAINER_COMMAND, "rm", "--force", owned["Id"]], capture_output=True,
                            text=True, timeout=20, check=True)
-            absent = subprocess.run(["docker", "inspect", owned["Id"]], capture_output=True,
-                                    timeout=20, check=False)
+            absent = subprocess.run(
+                [*CONTAINER_COMMAND, "inspect", owned["Id"]], capture_output=True,
+                timeout=20, check=False,
+            )
             assert absent.returncode != 0, "owned reader container cleanup failed"
 
 
@@ -142,6 +153,7 @@ def run_probe(source: Path, external: Path, descendant: str, read_only: bool) ->
 def test_actual_read_only_reader_and_same_container_mount_preconditions(
     tmp_path: Path, descendant: str, read_only: bool,
 ) -> None:
+    tree = record_fresh_test_tree(tmp_path)
     source, external = tmp_path / "source", tmp_path / "external"
     source.mkdir()
     external.mkdir()
@@ -161,10 +173,12 @@ def test_actual_read_only_reader_and_same_container_mount_preconditions(
     finally:
         os.chdir(original_cwd)
     (external / "nested-sentinel").write_bytes(b"nested original preserved")
+    record_created_test_path(tree, source, recursive=True)
+    record_created_test_path(tree, external, recursive=True)
     before = {str(p.relative_to(tmp_path)): (p.lstat().st_size, p.lstat().st_mtime_ns)
               for p in tmp_path.rglob("*")}
     try:
-        result = run_probe(source, external, descendant, read_only)
+        result = run_probe(source, external, descendant, read_only, tree)
         assert result["result"] == ("preserved" if descendant == "leaf" else "rejected")
         print(json.dumps(result, sort_keys=True))
     finally:

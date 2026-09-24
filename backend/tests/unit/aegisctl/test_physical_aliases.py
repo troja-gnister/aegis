@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import io
-import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
@@ -21,6 +20,9 @@ from aegisctl.mounts import (
     preflight_slots,
     write_manifest,
 )
+
+from tests.support.fake_container_engine import select_fake_engine
+from tests.support.observer_engine import ObserverEngine, assert_observer_engine_cleaned
 
 
 def _slot(path: Path, slot_id: str) -> SlotSpec:
@@ -65,13 +67,16 @@ def test_preflight_rejects_physical_ancestor_through_bind_alias(
         ("/tree/private", "8:2", False),
     ],
 )
+@pytest.mark.parametrize("engine", ("docker", "podman"))
 def test_observer_checks_structured_physical_ancestry_before_hashing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     child_root: str,
     device: str,
     rejected: bool,
+    engine: str,
 ) -> None:
+    select_fake_engine(engine, tmp_path, monkeypatch)
     parent, alias = tmp_path / "tree", tmp_path / "private-alias"
     parent.mkdir()
     alias.mkdir()
@@ -81,18 +86,26 @@ def test_observer_checks_structured_physical_ancestry_before_hashing(
         f"3 1 {device} {child_root} /srv/aegis/roots/alias ro - ext4 /dev/sda rw\n"
     ).encode()
 
-    def fixture_observer(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
-        if "run" in command:
-            kwargs["stdout"].write(records)
-            kwargs["stdout"].flush()
-        return subprocess.CompletedProcess(command, 0)
+    def fixture_output(command: list[str], kwargs: dict[str, Any]) -> None:
+        kwargs["stdout"].write(records)
+        kwargs["stdout"].flush()
 
-    monkeypatch.setattr("aegisctl.mounts.subprocess.run", fixture_observer)
+    fake = ObserverEngine(slots[0].source, output=fixture_output)
+    monkeypatch.setattr("aegisctl.mounts.subprocess.run", fake)
     if rejected:
-        with pytest.raises(ConfigError, match=r"overlap|inconsistent"):
+        with pytest.raises(
+            ConfigError, match="observation failed; diagnostics retained at",
+        ) as caught:
             observe_mount_fingerprints(slots)
+        cause = caught.value.__cause__
+        assert isinstance(cause, ConfigError)
+        assert "overlap" in str(cause) or "inconsistent" in str(cause)
+        assert fake.diagnostics is not None
+        assert str(caught.value).endswith(str(fake.diagnostics))
+        assert (fake.diagnostics / "mountinfo.out").read_bytes() == records
     else:
         assert len(observe_mount_fingerprints(slots)) == 2
+    assert_observer_engine_cleaned(fake)
 
 
 def test_output_guard_rejects_original_through_physical_bind_parent(
@@ -239,20 +252,23 @@ def test_runtime_rejects_opaque_selected_root_even_with_matching_fingerprint(
         attest_mounts(manifest, role, mountinfo_path=mountinfo)
 
 
+@pytest.mark.parametrize("engine", ("docker", "podman"))
 def test_observer_rejects_opaque_selected_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    engine: str,
 ) -> None:
+    select_fake_engine(engine, tmp_path, monkeypatch)
     source = tmp_path / "source"
     source.mkdir()
     slots = preflight_slots([_slot(source, "photos")])
 
-    def fixture_observer(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
-        if "run" in command:
-            kwargs["stdout"].write(b"2 1 0:32 /.. /srv/aegis/roots/photos ro - cgroup cgroup rw\n")
-            kwargs["stdout"].flush()
-        return subprocess.CompletedProcess(command, 0)
+    def fixture_output(command: list[str], kwargs: dict[str, Any]) -> None:
+        kwargs["stdout"].write(b"2 1 0:32 /.. /srv/aegis/roots/photos ro - cgroup cgroup rw\n")
+        kwargs["stdout"].flush()
 
-    monkeypatch.setattr("aegisctl.mounts.subprocess.run", fixture_observer)
+    fake = ObserverEngine(slots[0].source, output=fixture_output)
+    monkeypatch.setattr("aegisctl.mounts.subprocess.run", fake)
     with pytest.raises(ConfigError, match="observation failed"):
         observe_mount_fingerprints(slots)
+    assert_observer_engine_cleaned(fake)

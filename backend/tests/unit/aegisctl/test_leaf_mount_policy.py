@@ -24,6 +24,9 @@ from aegisctl.mounts import (
     write_manifest,
 )
 
+from tests.support.fake_container_engine import select_fake_engine
+from tests.support.observer_engine import ObserverEngine, assert_observer_engine_cleaned
+
 
 def _slot(path: Path, name: str = "photos") -> SlotSpec:
     return SlotSpec(name, path, f"/srv/aegis/roots/{name}", "read_only", local_identity(path))
@@ -206,10 +209,13 @@ def test_backend_rejects_descendant_mounts_introduced_after_preflight(
         attest_mounts(manifest, role, mountinfo_path=mountinfo)
 
 
+@pytest.mark.parametrize("engine", ("docker", "podman"))
 def test_observer_filter_retains_descendants_for_rejection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    engine: str,
 ) -> None:
+    select_fake_engine(engine, tmp_path, monkeypatch)
     source = tmp_path / "source"
     source.mkdir()
     slots = preflight_slots([_slot(source)])
@@ -220,15 +226,22 @@ def test_observer_filter_retains_descendants_for_rejection(
     )
     real_run = subprocess.run
 
-    def fixture_observer(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
-        if "run" in command:
-            compose = yaml.safe_load(Path(command[command.index("-f") + 1]).read_text())
-            script = compose["services"]["mount-observer"]["command"][0]
-            return real_run(
-                ["/bin/sh", "-ec", script.replace("/proc/self/mountinfo", str(mountinfo))], **kwargs
-            )
-        return subprocess.CompletedProcess(command, 0)
+    def fixture_output(command: list[str], kwargs: dict[str, Any]) -> None:
+        compose = yaml.safe_load(Path(command[command.index("-f") + 1]).read_text())
+        script = compose["services"]["mount-observer"]["command"][0]
+        result = real_run(
+            ["/bin/sh", "-ec", script.replace("/proc/self/mountinfo", str(mountinfo))], **kwargs
+        )
+        assert result.returncode == 0
 
-    monkeypatch.setattr("aegisctl.mounts.subprocess.run", fixture_observer)
-    with pytest.raises(ConfigError, match="nested mount"):
+    fake = ObserverEngine(slots[0].source, output=fixture_output)
+    monkeypatch.setattr("aegisctl.mounts.subprocess.run", fake)
+    with pytest.raises(ConfigError, match="observation failed; diagnostics retained at") as caught:
         observe_mount_fingerprints(slots)
+    cause = caught.value.__cause__
+    assert isinstance(cause, ConfigError)
+    assert "nested mount" in str(cause)
+    assert fake.diagnostics is not None
+    assert str(caught.value).endswith(str(fake.diagnostics))
+    assert (fake.diagnostics / "mountinfo.out").read_bytes() == mountinfo.read_bytes()
+    assert_observer_engine_cleaned(fake)

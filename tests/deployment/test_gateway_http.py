@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import os
 import re
 import subprocess
 import time
@@ -14,17 +15,33 @@ from email.message import Message
 from pathlib import Path
 
 import pytest
+from aegisctl.container_engine import container_command
+
+from tests.support.container_runtime import (
+    OwnedDirectResource,
+    OwnedDirectScope,
+    cleanup_owned_resources,
+    copy_bind_inputs,
+    prepare_owned_test_inventory,
+    read_optional_cidfile,
+    record_created_test_path,
+    record_fresh_test_tree,
+    record_test_tree_inventory,
+    recover_owned_resource,
+)
+from tests.support.fake_container_engine import select_fake_engine
 
 REPOSITORY = Path(__file__).resolve().parents[2]
+CONTAINER_COMMAND = container_command()
 NGINX_CONFIG = REPOSITORY / "deploy" / "nginx" / "nginx.conf"
 NGINX_SERVER_CONFIG = REPOSITORY / "deploy" / "nginx" / "aegis-server.conf"
 UPSTREAM_FIXTURE = Path(__file__).parent / "fixtures" / "gateway_upstream.py"
 PYTHON_IMAGE = (
-    "python:3.13.15-slim-trixie@"
+    "docker.io/library/python:3.13.15-slim-trixie@"
     "sha256:881d80734ee05dca6f7f42dcb080975652a53c7eda9ba1f03bb8da31aa6a6ec2"
 )
 NGINX_IMAGE = (
-    "nginxinc/nginx-unprivileged:1.30.4-alpine@"
+    "docker.io/nginxinc/nginx-unprivileged:1.30.4-alpine@"
     "sha256:45ce1e2e699234253d1def7baa96218a5d00b498d1ba0cbb1a17b6bdf73d1351"
 )
 SAFE_REQUEST_ID = re.compile(r"[A-Za-z0-9_-]{8,64}\Z")
@@ -78,19 +95,289 @@ class GatewayHarness:
 
 def docker(*arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["docker", *arguments],
+        [*CONTAINER_COMMAND, *arguments],
         check=check,
         capture_output=True,
         text=True,
     )
 
 
-def remove_container(name: str) -> None:
-    docker("rm", "--force", name, check=False)
+def remove_owned_resource(kind: str, identity: str, scope: str) -> None:
+    cleanup_owned_resources(
+        (OwnedDirectResource(kind, identity, "aegis.test.scope", scope),),
+        lambda *arguments: docker(*arguments, check=False),
+    )
 
 
-def remove_network(name: str) -> None:
-    docker("network", "rm", name, check=False)
+def create_and_start_owned_container(
+    arguments: list[str], cidfile: Path, scope: str,
+    recorded: list[OwnedDirectResource],
+) -> str:
+    name = arguments[arguments.index("--name") + 1]
+    created: subprocess.CompletedProcess[str] | None = None
+    creation_error: Exception | None = None
+    interruption: KeyboardInterrupt | SystemExit | None = None
+    try:
+        created = docker(
+            "create", "--cidfile", str(cidfile),
+            "--label", f"aegis.test.resource={name}", *arguments, check=False,
+        )
+    except (KeyboardInterrupt, SystemExit) as exc:
+        interruption = exc
+    except Exception as exc:
+        creation_error = exc
+    identity = read_optional_cidfile(cidfile)
+    try:
+        resource = recover_owned_resource(
+            "container", identity, "aegis.test.scope", scope,
+            "aegis.test.resource", name,
+            lambda *command: docker(*command, check=False),
+        )
+    except Exception as exc:
+        if interruption is not None:
+            raise interruption from exc
+        raise
+    recorded.append(resource)
+    if interruption is not None:
+        raise interruption
+    if creation_error is not None:
+        raise creation_error
+    if created is None or created.returncode:
+        raise AssertionError("container create failed after identity recovery")
+    docker("start", resource.immutable_id)
+    return resource.immutable_id
+
+
+def create_owned_network(
+    name: str, scope: str, recorded: list[OwnedDirectResource],
+) -> str:
+    created: subprocess.CompletedProcess[str] | None = None
+    creation_error: Exception | None = None
+    interruption: KeyboardInterrupt | SystemExit | None = None
+    try:
+        created = docker(
+            "network", "create", "--label", f"aegis.test.scope={scope}",
+            "--label", f"aegis.test.resource={name}", name, check=False,
+        )
+    except (KeyboardInterrupt, SystemExit) as exc:
+        interruption = exc
+    except Exception as exc:
+        creation_error = exc
+    candidate = created.stdout.strip() if created is not None else ""
+    try:
+        resource = recover_owned_resource(
+            "network", candidate, "aegis.test.scope", scope,
+            "aegis.test.resource", name,
+            lambda *command: docker(*command, check=False),
+        )
+    except Exception as exc:
+        if interruption is not None:
+            raise interruption from exc
+        raise
+    recorded.append(resource)
+    if interruption is not None:
+        raise interruption
+    if creation_error is not None:
+        raise creation_error
+    if created is None or created.returncode:
+        raise AssertionError("network create failed after identity recovery")
+    return resource.immutable_id
+
+
+def test_resource_cleanup_inspects_label_and_removes_exact_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[tuple[str, ...]] = []
+    removed = False
+
+    def completed(*arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        nonlocal removed
+        del check
+        commands.append(arguments)
+        if arguments[:2] == ("container", "ls"):
+            return subprocess.CompletedProcess(
+                arguments, 0, "" if removed else "exact-id\n", "",
+            )
+        if arguments == ("container", "inspect", "exact-id"):
+            payload = [{"Id": "exact-id", "Config": {"Labels": {"aegis.test.scope": "s"}}}]
+            return subprocess.CompletedProcess(arguments, 0, json.dumps(payload), "")
+        if arguments == ("rm", "--force", "exact-id"):
+            removed = True
+        return subprocess.CompletedProcess(arguments, 0, "", "")
+
+    monkeypatch.setattr(f"{__name__}.docker", completed)
+    remove_owned_resource("container", "exact-id", "s")
+
+    assert commands == [
+        ("container", "ls", "--all", "--no-trunc", "--quiet",
+         "--filter", "label=aegis.test.scope=s"),
+        ("container", "inspect", "exact-id"),
+        ("rm", "--force", "exact-id"),
+        ("container", "ls", "--all", "--no-trunc", "--quiet",
+         "--filter", "label=aegis.test.scope=s"),
+    ]
+
+
+def test_container_identity_is_recorded_before_failed_start(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    recorded: list[OwnedDirectResource] = []
+
+    def completed(*arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        del check
+        if arguments[0] == "create":
+            Path(arguments[arguments.index("--cidfile") + 1]).write_text(
+                "created-id\n", encoding="ascii",
+            )
+            return subprocess.CompletedProcess(arguments, 0, "created-id\n", "")
+        if arguments[:2] == ("container", "ls"):
+            return subprocess.CompletedProcess(arguments, 0, "created-id\n", "")
+        if arguments[:3] == ("container", "inspect", "created-id"):
+            payload = [{
+                "Id": "created-id", "Config": {"Labels": {
+                    "aegis.test.scope": "scope",
+                    "aegis.test.resource": "owned-container",
+                }},
+            }]
+            return subprocess.CompletedProcess(arguments, 0, json.dumps(payload), "")
+        if arguments == ("start", "created-id"):
+            raise RuntimeError("start failed")
+        raise AssertionError(arguments)
+
+    monkeypatch.setattr(f"{__name__}.docker", completed)
+    with pytest.raises(RuntimeError, match="start failed"):
+            create_and_start_owned_container(
+            ["--name", "owned-container", "--label", "aegis.test.scope=scope", "image"],
+            tmp_path / "container.cid", "scope", recorded,
+        )
+    assert recorded == [OwnedDirectResource(
+        "container", "created-id", "aegis.test.scope", "scope",
+    )]
+
+
+@pytest.mark.parametrize("interruption", (SystemExit(143), KeyboardInterrupt()))
+def test_gateway_container_interruption_recovers_identity_then_propagates(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, interruption: BaseException,
+) -> None:
+    recorded: list[OwnedDirectResource] = []
+
+    def completed(*arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        del check
+        if arguments[0] == "create":
+            Path(arguments[arguments.index("--cidfile") + 1]).write_text(
+                "created-id\n", encoding="ascii",
+            )
+            raise interruption
+        if arguments[:2] == ("container", "ls"):
+            return subprocess.CompletedProcess(arguments, 0, "created-id\n", "")
+        if arguments == ("container", "inspect", "created-id"):
+            payload = [{"Id": "created-id", "Config": {"Labels": {
+                "aegis.test.scope": "scope",
+                "aegis.test.resource": "owned-container",
+            }}}]
+            return subprocess.CompletedProcess(arguments, 0, json.dumps(payload), "")
+        raise AssertionError(arguments)
+
+    monkeypatch.setattr(f"{__name__}.docker", completed)
+    with pytest.raises(type(interruption)):
+        create_and_start_owned_container(
+            ["--name", "owned-container", "--label", "aegis.test.scope=scope", "image"],
+            tmp_path / "container.cid", "scope", recorded,
+        )
+    assert recorded == [OwnedDirectResource(
+        "container", "created-id", "aegis.test.scope", "scope",
+    )]
+
+
+@pytest.mark.parametrize("cid_failure", ("malformed", "symlink", "hardlink", "read-error"))
+def test_gateway_bad_optional_cid_still_uses_scoped_recovery_and_preserves_interrupt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cid_failure: str,
+) -> None:
+    identity = "d" * 64
+    recorded: list[OwnedDirectResource] = []
+    cidfile = tmp_path / "container.cid"
+    original_open = os.open
+    inspect_calls = 0
+
+    def completed(*arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        nonlocal inspect_calls
+        del check
+        if arguments[0] == "create":
+            if cid_failure == "malformed":
+                cidfile.write_text("not a container id!\n", encoding="ascii")
+            elif cid_failure in {"symlink", "hardlink"}:
+                outside = tmp_path / "outside-id"
+                outside.write_text(identity + "\n", encoding="ascii")
+                if cid_failure == "symlink":
+                    cidfile.symlink_to(outside)
+                else:
+                    os.link(outside, cidfile)
+            else:
+                cidfile.write_text(identity + "\n", encoding="ascii")
+            raise SystemExit(17)
+        if arguments[:2] == ("container", "ls"):
+            return subprocess.CompletedProcess(arguments, 0, identity[:12] + "\n", "")
+        if arguments == ("container", "inspect", identity[:12]):
+            inspect_calls += 1
+            payload = [{"Id": identity, "Config": {"Labels": {
+                "aegis.test.scope": "scope",
+                "aegis.test.resource": "owned-container",
+            }}}]
+            return subprocess.CompletedProcess(arguments, 0, json.dumps(payload), "")
+        raise AssertionError(arguments)
+
+    def safe_open(path: object, *args: object, **kwargs: object) -> int:
+        if cid_failure == "read-error" and Path(path) == cidfile:
+            raise OSError("cid read failed")
+        return original_open(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(f"{__name__}.docker", completed)
+    monkeypatch.setattr(os, "open", safe_open)
+    with pytest.raises(SystemExit) as caught:
+        create_and_start_owned_container(
+            ["--name", "owned-container", "--label", "aegis.test.scope=scope", "image"],
+            cidfile, "scope", recorded,
+        )
+    assert caught.value.code == 17
+    assert inspect_calls == 1
+    assert recorded == [OwnedDirectResource(
+        "container", identity, "aegis.test.scope", "scope",
+    )]
+
+
+@pytest.mark.parametrize("engine", ("docker", "podman"))
+def test_network_identity_is_recovered_before_failed_create_returns(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, engine: str,
+) -> None:
+    prefix = select_fake_engine(engine, tmp_path, monkeypatch)
+    monkeypatch.setattr(f"{__name__}.CONTAINER_COMMAND", prefix)
+    recorded: list[OwnedDirectResource] = []
+
+    def completed(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        assert command[:len(prefix)] == prefix
+        arguments = tuple(command[len(prefix):])
+        if arguments[:2] == ("network", "create"):
+            return subprocess.CompletedProcess(arguments, 125, "", "post-create failure")
+        if arguments[:2] == ("network", "ls"):
+            return subprocess.CompletedProcess(arguments, 0, "network-id\n", "")
+        if arguments == ("network", "inspect", "network-id"):
+            payload = [{"Id": "network-id", "Name": "owned-network",
+                        "Created": "2026-09-23T00:00:00Z", "Driver": "bridge", "Labels": {
+                "aegis.test.scope": "scope",
+                "aegis.test.resource": "owned-network",
+            }}]
+            if engine == "podman":
+                payload = [{key.lower(): value for key, value in payload[0].items()}]
+            return subprocess.CompletedProcess(arguments, 0, json.dumps(payload), "")
+        raise AssertionError(arguments)
+
+    monkeypatch.setattr(subprocess, "run", completed)
+    with pytest.raises(AssertionError, match="create failed"):
+        create_owned_network("owned-network", "scope", recorded)
+    assert recorded == [OwnedDirectResource(
+        "network", "network-id", "aegis.test.scope", "scope",
+    )]
 
 
 def wait_for_gateway(base_url: str, container_name: str) -> None:
@@ -119,22 +406,42 @@ def gateway(tmp_path_factory: pytest.TempPathFactory) -> Iterator[GatewayHarness
     upstream_name = f"{prefix}-upstream"
     gateway_name = f"{prefix}-nginx"
     static_root = tmp_path_factory.mktemp("gateway-static")
+    static_tree = record_fresh_test_tree(static_root)
     assets = static_root / "assets"
-    admin_css = static_root / "admin-static" / "admin" / "css"
     assets.mkdir()
-    admin_css.mkdir(parents=True)
+    record_created_test_path(static_tree, assets)
+    admin_static = static_root / "admin-static"
+    admin_static.mkdir()
+    record_created_test_path(static_tree, admin_static)
+    admin = admin_static / "admin"
+    admin.mkdir()
+    record_created_test_path(static_tree, admin)
+    admin_css = admin / "css"
+    admin_css.mkdir()
+    record_created_test_path(static_tree, admin_css)
     static_root.chmod(0o755)
     assets.chmod(0o755)
     admin_css.chmod(0o755)
-    (static_root / "index.html").write_text("spa-shell", encoding="utf-8")
-    (assets / "app-abcdefgh.js").write_text("asset-body", encoding="utf-8")
-    (admin_css / "base.css").write_text("admin-css", encoding="utf-8")
+    for target, contents in (
+        (static_root / "index.html", "spa-shell"),
+        (assets / "app-abcdefgh.js", "asset-body"),
+        (admin_css / "base.css", "admin-css"),
+    ):
+        target.write_text(contents, encoding="utf-8")
+        record_created_test_path(static_tree, target)
+    prepare_owned_test_inventory(record_test_tree_inventory(static_tree))
+    bind_root = tmp_path_factory.mktemp("gateway-binds")
+    bind_inputs = copy_bind_inputs(bind_root, {
+        "nginx.conf": NGINX_CONFIG,
+        "aegis-server.conf": NGINX_SERVER_CONFIG,
+        "gateway_upstream.py": UPSTREAM_FIXTURE,
+    })
+    recorded_networks: list[OwnedDirectResource] = []
+    recorded_containers: list[OwnedDirectResource] = []
 
     try:
-        docker("network", "create", "--label", f"aegis.test.scope={suffix}", network_name)
-        docker(
-            "run",
-            "--detach",
+        create_owned_network(network_name, suffix, recorded_networks)
+        create_and_start_owned_container([
             "--name",
             upstream_name,
             "--label",
@@ -155,14 +462,13 @@ def gateway(tmp_path_factory: pytest.TempPathFactory) -> Iterator[GatewayHarness
             "--env",
             "PYTHONDONTWRITEBYTECODE=1",
             "--mount",
-            f"type=bind,src={UPSTREAM_FIXTURE},dst=/fixture/gateway_upstream.py,readonly",
+            f"type=bind,src={bind_inputs['gateway_upstream.py']},"
+            "dst=/fixture/gateway_upstream.py,readonly",
             PYTHON_IMAGE,
             "python",
             "/fixture/gateway_upstream.py",
-        )
-        docker(
-            "run",
-            "--detach",
+        ], bind_root / "upstream.cid", suffix, recorded_containers)
+        create_and_start_owned_container([
             "--name",
             gateway_name,
             "--label",
@@ -189,16 +495,16 @@ def gateway(tmp_path_factory: pytest.TempPathFactory) -> Iterator[GatewayHarness
             "--publish",
             "127.0.0.1::8081",
             "--mount",
-            f"type=bind,src={NGINX_CONFIG},dst=/etc/nginx/nginx.conf,readonly",
+            f"type=bind,src={bind_inputs['nginx.conf']},dst=/etc/nginx/nginx.conf,readonly",
             "--mount",
             (
-                f"type=bind,src={NGINX_SERVER_CONFIG},"
+                f"type=bind,src={bind_inputs['aegis-server.conf']},"
                 "dst=/etc/nginx/aegis-server.conf,readonly"
             ),
             "--mount",
             f"type=bind,src={static_root},dst=/usr/share/nginx/html,readonly",
             NGINX_IMAGE,
-        )
+        ], bind_root / "gateway.cid", suffix, recorded_containers)
         binding = docker("port", gateway_name, "8080/tcp").stdout.strip()
         host, port = binding.rsplit(":", 1)
         assert host == "127.0.0.1"
@@ -212,9 +518,15 @@ def gateway(tmp_path_factory: pytest.TempPathFactory) -> Iterator[GatewayHarness
         wait_for_gateway(base_url, gateway_name)
         yield GatewayHarness(base_url, internal_base_url, prefix, gateway_name)
     finally:
-        remove_container(gateway_name)
-        remove_container(upstream_name)
-        remove_network(network_name)
+        resources = (*reversed(recorded_containers), *recorded_networks)
+        cleanup_owned_resources(
+            resources,
+            lambda *arguments: docker(*arguments, check=False),
+            scopes=(
+                OwnedDirectScope("container", "aegis.test.scope", suffix),
+                OwnedDirectScope("network", "aegis.test.scope", suffix),
+            ),
+        )
 
 
 @pytest.mark.parametrize("path", ("/api/v1/auth/login", "/api/request-id", "/admin/login/"))

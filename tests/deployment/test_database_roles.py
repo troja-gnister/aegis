@@ -37,6 +37,7 @@ from aegis_apps.operations.leases import (
 from aegis_apps.operations.models import Job, Operation
 from aegis_apps.operations.services import create_operation, enqueue_job
 from aegis_apps.roots.models import Root, RootGrant
+from aegisctl.container_engine import container_command
 from django.db import connection, transaction
 from django.db.models.functions import Now
 from django.test import override_settings
@@ -53,6 +54,7 @@ from tests.support.database_roles import (
     managed_role_database,
 )
 
+CONTAINER_COMMAND = container_command()
 pytestmark = [pytest.mark.integration, pytest.mark.django_db(transaction=True)]
 
 HEARTBEAT_FUNCTIONS = {
@@ -398,7 +400,8 @@ print('Installed wheel shared initialization: periodic and manual runtime login 
 """
     try:
         built = subprocess.run(
-            ["docker", "build", "--label", f"aegis.verify.owner={image_tag}", "--tag", image_tag,
+            [*CONTAINER_COMMAND, "build", "--label", f"aegis.verify.owner={image_tag}",
+             "--tag", image_tag,
              "--file", "docker/backend.Dockerfile", "."],
             cwd=repository, capture_output=True, text=True, timeout=300,
         )
@@ -410,7 +413,7 @@ print('Installed wheel shared initialization: periodic and manual runtime login 
         host = "host.docker.internal" if sys.platform == "darwin" else "127.0.0.1"
         network = [] if sys.platform == "darwin" else ["--network", "host"]
         result = subprocess.run(
-            ["docker", "run", "--rm", "--interactive", *network, "--workdir", "/tmp",
+            [*CONTAINER_COMMAND, "run", "--rm", "--interactive", *network, "--workdir", "/tmp",
              "--entrypoint", "python", image_tag, "-I", "-c", script],
             input=json.dumps({
                 "host": host, "port": role_database.port, "database": role_database.database_name,
@@ -425,12 +428,12 @@ print('Installed wheel shared initialization: periodic and manual runtime login 
         assert result.returncode == 0, result.stderr[-4000:]
         assert "runtime login round trip passed" in result.stdout
     finally:
-        inspected = subprocess.run(["docker", "image", "inspect", image_tag],
+        inspected = subprocess.run([*CONTAINER_COMMAND, "image", "inspect", image_tag],
                                    capture_output=True, text=True, timeout=30)
         if inspected.returncode == 0:
             info = json.loads(inspected.stdout)[0]
             assert info["Config"]["Labels"].get("aegis.verify.owner") == image_tag
-            subprocess.run(["docker", "image", "rm", image_tag],
+            subprocess.run([*CONTAINER_COMMAND, "image", "rm", image_tag],
                            check=True, capture_output=True, timeout=30)
 
 

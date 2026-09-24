@@ -21,6 +21,19 @@ from typing import TYPE_CHECKING, Literal, cast
 
 import yaml
 
+from aegisctl.container_engine import (
+    compose_command,
+    compose_environment,
+)
+from aegisctl.container_resources import (
+    ProjectInventory,
+    ProjectResourceError,
+    ProjectResourceRule,
+    admit_project_transition,
+    capture_project_inventory,
+    cleanup_project_inventory,
+    require_empty_project,
+)
 from aegisctl.host_mounts import HostTopologyError, darwin_mountpoints, darwin_path_forms
 
 if TYPE_CHECKING:
@@ -35,9 +48,6 @@ MAX_PATH_LENGTH = 4096
 MAX_IDENTITY_LENGTH = 512
 MAX_INTEGER = (1 << 63) - 1
 MAX_MOUNTINFO_BYTES = 1024 * 1024
-OBSERVER_STOP_TIMEOUT_SECONDS = 3
-OBSERVER_CLEANUP_TIMEOUT_SECONDS = 15
-OBSERVER_INSPECTION_TIMEOUT_SECONDS = 10
 SLOT_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 LOCAL_IDENTITY_RE = re.compile(r"^local:(0|[1-9][0-9]{0,18}):(0|[1-9][0-9]{0,18})$")
 REMOTE_IDENTITY_RE = re.compile(
@@ -88,6 +98,16 @@ class MountInfoRecord:
     mount_fingerprint: str
     filesystem_identity: tuple[str, str]
     filesystem_root: PurePosixPath
+
+
+@dataclass(frozen=True, slots=True)
+class ObserverPathIdentity:
+    device: int
+    inode: int
+    file_type: int
+    uid: int
+    gid: int
+    links: int
 
 
 def _safe_slot_error(slot_id: object, message: str) -> ConfigError:
@@ -830,71 +850,60 @@ def attest_mounts(
                 os.close(descriptor)
 
 
-def _observer_project_absent(
-    command: list[str], output_path: Path
-) -> bool:
+def _observer_path_identity(path: Path, *, directory: bool) -> ObserverPathIdentity:
     try:
-        _atomic_write(output_path, b"", 0o600)
-        with output_path.open("wb") as output:
-            result = subprocess.run(
-                command,
-                check=False,
-                stdin=subprocess.DEVNULL,
-                stdout=output,
-                stderr=subprocess.DEVNULL,
-                preexec_fn=set_observer_output_limit,
-                timeout=OBSERVER_INSPECTION_TIMEOUT_SECONDS,
-            )
-        with output_path.open("rb") as output:
-            raw = output.read(MAX_MOUNTINFO_BYTES + 1)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return result.returncode == 0 and len(raw) <= MAX_MOUNTINFO_BYTES and not raw.strip()
+        metadata = path.lstat()
+    except OSError as exc:
+        raise ConfigError("observer diagnostic inventory changed") from exc
+    expected_type = stat.S_IFDIR if directory else stat.S_IFREG
+    if (
+        stat.S_IFMT(metadata.st_mode) != expected_type
+        or metadata.st_uid != os.geteuid()
+        or (not directory and metadata.st_nlink != 1)
+    ):
+        raise ConfigError("observer diagnostic inventory changed")
+    return ObserverPathIdentity(
+        metadata.st_dev, metadata.st_ino, stat.S_IFMT(metadata.st_mode),
+        metadata.st_uid, metadata.st_gid, metadata.st_nlink,
+    )
 
 
-def _cleanup_observer_project(
-    project_name: str, compose_path: Path, work_directory: Path
-) -> bool:
+def _validate_observer_diagnostics(
+    root: Path, expected: Mapping[Path, ObserverPathIdentity],
+) -> None:
+    if expected.get(root) != _observer_path_identity(root, directory=True):
+        raise ConfigError("observer diagnostic inventory changed")
     try:
-        result = subprocess.run(
-            [
-                "docker",
-                "compose",
-                "--project-name",
-                project_name,
-                "-f",
-                str(compose_path),
-                "down",
-                "--timeout",
-                str(OBSERVER_STOP_TIMEOUT_SECONDS),
-                "--remove-orphans",
-                "--volumes",
-            ],
-            check=False,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=OBSERVER_CLEANUP_TIMEOUT_SECONDS,
-        )
-        down_succeeded = result.returncode == 0
-    except (OSError, subprocess.SubprocessError):
-        down_succeeded = False
-    label = f"label=com.docker.compose.project={project_name}"
-    checks = [
-        _observer_project_absent(
-            ["docker", "ps", "--all", "--quiet", "--filter", label],
-            work_directory / "containers.out",
-        ),
-        _observer_project_absent(
-            ["docker", "network", "ls", "--quiet", "--filter", label],
-            work_directory / "networks.out",
-        ),
-        _observer_project_absent(
-            ["docker", "volume", "ls", "--quiet", "--filter", label],
-            work_directory / "volumes.out",
-        ),
-    ]
-    return down_succeeded and all(checks)
+        current = {root, *(Path(entry.path) for entry in os.scandir(root))}
+    except OSError as exc:
+        raise ConfigError("observer diagnostic inventory changed") from exc
+    if current != set(expected):
+        raise ConfigError("observer diagnostic inventory changed")
+    for path, identity in expected.items():
+        if path == root:
+            continue
+        if _observer_path_identity(path, directory=False) != identity:
+            raise ConfigError("observer diagnostic inventory changed")
+
+
+def _remove_observer_diagnostics(
+    root: Path, expected: Mapping[Path, ObserverPathIdentity],
+) -> None:
+    _validate_observer_diagnostics(root, expected)
+    for path in sorted((path for path in expected if path != root), key=str):
+        path.unlink()
+    if _observer_path_identity(root, directory=True) != expected[root]:
+        raise ConfigError("observer diagnostic inventory changed")
+    try:
+        if any(os.scandir(root)):
+            raise ConfigError("observer diagnostic inventory changed")
+        root.rmdir()
+    except OSError as exc:
+        raise ConfigError("observer diagnostic inventory changed") from exc
+
+
+def _retained_observer_error(root: Path) -> ConfigError:
+    return ConfigError(f"container mount observation failed; diagnostics retained at {root}")
 
 
 def observe_mount_fingerprints(
@@ -940,61 +949,93 @@ def observe_mount_fingerprints(
             "/tmp",
         ))
         ensure_outputs_outside_originals((temp_parent,), tuple(slot.source for slot in slots))
-        with tempfile.TemporaryDirectory(prefix="aegis-mount-preflight-", dir=temp_parent) as temp:
-            compose_path = Path(temp) / "compose.yaml"
-            output_path = Path(temp) / "mountinfo.out"
-            compose_raw = yaml.safe_dump(
-                {"services": {"mount-observer": service}},
-                sort_keys=False,
-                allow_unicode=False,
-            ).encode("ascii")
-            _atomic_write(compose_path, compose_raw, 0o600)
-            _atomic_write(output_path, b"", 0o600)
-            command = [
-                "docker",
-                "compose",
-                "--project-name",
-                project_name,
-                "-f",
-                str(compose_path),
-                "run",
-                "--rm",
-                "--no-deps",
-                "--pull",
-                "never",
-                "--no-TTY",
-                "mount-observer",
-            ]
-            run_succeeded = False
-            try:
-                with output_path.open("wb") as observer_output:
-                    result = subprocess.run(
-                        command,
-                        check=False,
-                        stdin=subprocess.DEVNULL,
-                        stdout=observer_output,
-                        stderr=subprocess.DEVNULL,
-                        preexec_fn=set_observer_output_limit,
-                        timeout=30,
-                    )
-                run_succeeded = result.returncode == 0
-            except (OSError, subprocess.SubprocessError):
-                pass
-            finally:
-                cleanup_succeeded = _cleanup_observer_project(
-                    project_name, compose_path, Path(temp)
+        temp = Path(tempfile.mkdtemp(prefix="aegis-mount-preflight-", dir=temp_parent))
+        diagnostics: dict[Path, ObserverPathIdentity] = {
+            temp: _observer_path_identity(temp, directory=True),
+        }
+        compose_path = temp / "compose.yaml"
+        output_path = temp / "mountinfo.out"
+        compose_raw = yaml.safe_dump(
+            {"services": {"mount-observer": service}},
+            sort_keys=False,
+            allow_unicode=False,
+        ).encode("ascii")
+        _atomic_write(compose_path, compose_raw, 0o600)
+        diagnostics[compose_path] = _observer_path_identity(compose_path, directory=False)
+        _atomic_write(output_path, b"", 0o600)
+        diagnostics[output_path] = _observer_path_identity(output_path, directory=False)
+        command = compose_command(
+            "--project-name",
+            project_name,
+            "-f",
+            str(compose_path),
+            "run",
+            "--rm",
+            "--no-deps",
+            "--pull",
+            "never",
+            "--no-TTY",
+            "mount-observer",
+        )
+        try:
+            expected_resources = require_empty_project(project_name)
+        except ProjectResourceError as exc:
+            raise _retained_observer_error(temp) from exc
+        run_succeeded = False
+        run_error: BaseException | None = None
+        try:
+            with output_path.open("wb") as observer_output:
+                result = subprocess.run(
+                    command,
+                    env=compose_environment(os.environ),
+                    check=False,
+                    stdin=subprocess.DEVNULL,
+                    stdout=observer_output,
+                    stderr=subprocess.DEVNULL,
+                    preexec_fn=set_observer_output_limit,
+                    timeout=30,
                 )
-            if not run_succeeded or not cleanup_succeeded:
+            run_succeeded = result.returncode == 0
+        except BaseException as exc:
+            run_error = exc
+        try:
+            _validate_observer_diagnostics(temp, diagnostics)
+            _cleanup_observer_project(project_name, expected_resources)
+        except BaseException as recovery_error:
+            if isinstance(run_error, (SystemExit, KeyboardInterrupt)):
+                run_error.add_note(str(_retained_observer_error(temp)))
+                raise run_error from recovery_error
+            if isinstance(recovery_error, (SystemExit, KeyboardInterrupt)):
+                recovery_error.add_note(str(_retained_observer_error(temp)))
+                raise
+            raise _retained_observer_error(temp) from recovery_error
+        if run_error is not None:
+            if isinstance(run_error, (SystemExit, KeyboardInterrupt)):
+                run_error.add_note(str(_retained_observer_error(temp)))
+                raise run_error
+            raise _retained_observer_error(temp) from run_error
+        try:
+            if not run_succeeded:
                 raise ConfigError("container mount observation failed")
-            try:
-                with output_path.open("rb") as observer_output:
-                    raw = observer_output.read(MAX_MOUNTINFO_BYTES + 1)
-            except OSError as exc:
-                raise ConfigError("container mount observation failed") from exc
+            with output_path.open("rb") as observer_output:
+                raw = observer_output.read(MAX_MOUNTINFO_BYTES + 1)
+            observed = _validated_observer_slots(slots, raw)
+            _remove_observer_diagnostics(temp, diagnostics)
+        except (SystemExit, KeyboardInterrupt) as exc:
+            exc.add_note(str(_retained_observer_error(temp)))
+            raise
+        except (OSError, ConfigError) as exc:
+            raise _retained_observer_error(temp) from exc
+        return observed
     except ConfigError:
         raise
     except OSError as exc:
         raise ConfigError("container mount observation failed") from exc
+
+
+def _validated_observer_slots(
+    slots: tuple[ValidatedSlot, ...], raw: bytes,
+) -> tuple[ValidatedSlot, ...]:
     try:
         records = parse_mountinfo(raw)
     except MountAttestationError as exc:
@@ -1032,6 +1073,23 @@ def observe_mount_fingerprints(
     if len(records) != len(slots):
         raise ConfigError("container mount observation is ambiguous")
     return tuple(observed)
+
+
+def _cleanup_observer_project(
+    project_name: str, expected: ProjectInventory,
+) -> None:
+    created = admit_project_transition(
+        expected, capture_project_inventory(project_name), (
+            ProjectResourceRule("container", (
+                ("com.docker.compose.service", "mount-observer"),
+                ("com.docker.compose.oneoff", "True"),
+            )),
+            ProjectResourceRule("network", (
+                ("com.docker.compose.network", "default"),
+            )),
+        ),
+    )
+    cleanup_project_inventory(created)
 
 
 def set_observer_output_limit() -> None:

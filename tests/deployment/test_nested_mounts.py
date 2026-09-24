@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 import yaml
+from aegisctl.container_engine import container_command
 from aegisctl.mounts import (
     ConfigError,
     SlotSpec,
@@ -19,10 +20,20 @@ from aegisctl.mounts import (
     write_manifest,
 )
 
+from tests.support.container_runtime import (
+    copy_bind_inputs,
+    map_inventory_files_to_container_user,
+    prepare_owned_test_inventory,
+    record_created_test_path,
+    record_fresh_test_tree,
+    record_test_tree_inventory,
+)
+
 REPOSITORY = Path(__file__).resolve().parents[2]
+CONTAINER_COMMAND = container_command()
 GATEWAY_ATTEST = REPOSITORY / "deploy/nginx/entrypoint/10-aegis-mount-attestation.sh"
 NGINX_IMAGE = (
-    "nginxinc/nginx-unprivileged:1.30.4-alpine@"
+    "docker.io/nginxinc/nginx-unprivileged:1.30.4-alpine@"
     "sha256:45ce1e2e699234253d1def7baa96218a5d00b498d1ba0cbb1a17b6bdf73d1351"
 )
 
@@ -30,12 +41,21 @@ NGINX_IMAGE = (
 @pytest.fixture(scope="module")
 def leaf_fixture(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[str, Any]]:
     workspace = tmp_path_factory.mktemp("nested-mounts")
+    tree = record_fresh_test_tree(workspace)
     source, external = workspace / "original", workspace / "external"
-    (source / "nested").mkdir(parents=True)
-    (source / "deep/nested").mkdir(parents=True)
+    source.mkdir()
+    record_created_test_path(tree, source)
+    (source / "nested").mkdir()
+    record_created_test_path(tree, source / "nested")
+    (source / "deep").mkdir()
+    record_created_test_path(tree, source / "deep")
+    (source / "deep/nested").mkdir()
+    record_created_test_path(tree, source / "deep/nested")
     external.mkdir()
+    record_created_test_path(tree, external)
     sentinel = external / "keep"
     sentinel.write_bytes(b"synthetic original descendant")
+    record_created_test_path(tree, sentinel)
     before = sentinel.stat().st_ino
     config = workspace / "mounts.toml"
     config.write_text(
@@ -43,19 +63,35 @@ def leaf_fixture(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[str,
         'container_path = "/srv/aegis/roots/photos"\nmode = "read_only"\n'
         f'expected_identity = "{local_identity(source)}"\n',
     )
+    record_created_test_path(tree, config)
+    bind_inputs = copy_bind_inputs(workspace, {
+        "gateway-attest": GATEWAY_ATTEST,
+        "aegisctl": REPOSITORY / "backend/aegisctl",
+    }, parent_tree=tree)
+    prepare_owned_test_inventory(record_test_tree_inventory(tree))
     slots = preflight_slots([
         SlotSpec("photos", source, "/srv/aegis/roots/photos", "read_only", local_identity(source))
     ])
     observed = observe_mount_fingerprints(slots)
     manifest, attestation = workspace / "manifest.json", workspace / "gateway.attestation"
     digest = write_manifest(manifest, observed, uid=os.geteuid(), gid=os.getegid())
+    record_created_test_path(tree, manifest)
     rendered = render_artifacts(
         config, manifest, workspace / "compose.yaml", attestation,
         uid=os.geteuid(), gid=os.getegid(),
     )
+    record_created_test_path(tree, workspace / "compose.yaml")
+    record_created_test_path(tree, attestation)
+    inventory = record_test_tree_inventory(tree)
+    prepare_owned_test_inventory(inventory)
+    map_inventory_files_to_container_user(
+        inventory, (manifest,), uid=os.geteuid(), gid=os.getegid(),
+    )
     yield {
         "source": source, "external": external, "slots": slots, "manifest": manifest,
         "attestation": attestation, "digest": digest, "gateway_digest": rendered.gateway_digest,
+        "gateway_script": bind_inputs["gateway-attest"],
+        "aegisctl": bind_inputs["aegisctl"],
     }
     assert sentinel.read_bytes() == b"synthetic original descendant"
     assert sentinel.stat().st_ino == before
@@ -66,7 +102,7 @@ def leaf_fixture(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[str,
 
 def _runtime_arguments(fixture: dict[str, Any], role: str) -> list[str]:
     arguments = [
-        "docker", "run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL",
+        *CONTAINER_COMMAND, "run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges:true", "--mount",
         f"type=bind,src={fixture['source']},dst=/srv/aegis/roots/photos,readonly",
     ]
@@ -79,7 +115,8 @@ def _runtime_arguments(fixture: dict[str, Any], role: str) -> list[str]:
             "--mount",
             f"type=bind,src={fixture['attestation']},dst=/run/aegis/mounts.gateway.attestation,readonly",
             "--mount",
-            f"type=bind,src={GATEWAY_ATTEST},dst=/usr/local/bin/aegis-mount-attest,readonly",
+            f"type=bind,src={fixture['gateway_script']},"
+            "dst=/usr/local/bin/aegis-mount-attest,readonly",
             "--entrypoint", "/bin/sh", NGINX_IMAGE, "/usr/local/bin/aegis-mount-attest",
         ]
     return [
@@ -88,7 +125,7 @@ def _runtime_arguments(fixture: dict[str, Any], role: str) -> list[str]:
         "--env", f"AEGIS_MOUNT_MANIFEST_SHA256={fixture['digest']}", "--mount",
         f"type=bind,src={fixture['manifest']},dst=/run/aegis/mounts.manifest.json,readonly",
         "--mount",
-        f"type=bind,src={REPOSITORY / 'backend/aegisctl'},dst=/app/backend/aegisctl,readonly",
+        f"type=bind,src={fixture['aegisctl']},dst=/app/backend/aegisctl,readonly",
         "--entrypoint", "python", "aegis-backend", "-m", "aegisctl", "mounts", "attest",
         "--manifest", "/run/aegis/mounts.manifest.json", "--role", role,
     ]
@@ -131,7 +168,7 @@ def test_real_observer_rejects_descendant_mount_visible_only_in_container(
     real_run = subprocess.run
 
     def inject_child(arguments: list[str], **kwargs: Any) -> Any:
-        if arguments[:2] == ["docker", "compose"] and "run" in arguments:
+        if arguments[:2] == [*CONTAINER_COMMAND, "compose"] and "run" in arguments:
             path = Path(arguments[arguments.index("-f") + 1])
             document = yaml.safe_load(path.read_text())
             document["services"]["mount-observer"]["volumes"].append({
