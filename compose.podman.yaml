@@ -1,7 +1,6 @@
 # Explicitly selected by controlled Podman launch interfaces.
 x-podman-security: &podman-security
   security_opt:
-    - no-new-privileges:true
     - unmask=/sys/devices/virtual/powercap
 
 services:

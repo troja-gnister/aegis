@@ -682,7 +682,7 @@ def test_observer_gate_failure_precedes_original_bearing_compose(
     assert calls == [(original,)]
 
 
-def test_static_podman_overlay_has_exact_services_and_keeps_nnp() -> None:
+def test_static_podman_overlay_has_exact_services_and_mask_only() -> None:
     import yaml
 
     path = Path(__file__).resolve().parents[4] / "compose.podman.yaml"
@@ -699,7 +699,7 @@ def test_static_podman_overlay_has_exact_services_and_keeps_nnp() -> None:
         "caddy-local",
     }
     for service in document["services"].values():
-        assert service == {"security_opt": ["no-new-privileges:true", f"unmask={POWERCAP}"]}
+        assert service == {"security_opt": [f"unmask={POWERCAP}"]}
 
 
 @pytest.mark.parametrize(
@@ -801,7 +801,7 @@ def test_runtime_canonical_render_checks_effective_merge_before_gate(
         merged = deepcopy(services)
         if str(base.with_name("compose.podman.yaml")) in command:
             for name, service in merged.items():
-                service.update(overlay[name])
+                service["security_opt"].extend(overlay[name]["security_opt"])
         return subprocess.CompletedProcess(command, 0, json.dumps({"services": merged}), "")
 
     monkeypatch.setattr(launch, "_run", render)
