@@ -130,6 +130,8 @@ As of this implementation checkpoint: seven milestones defined, zero accepted. T
 | 2F | Planned | 0 | None yet |
 | 2G | Planned | 0 | None yet |
 
+September 24 pause: the [continuation handoff](../../../HANDOFF.md) records the preserved uncommitted PostgreSQL candidate, unresolved diagnostic-quoting review finding and stopped temporary test API. Checkpoint `f618bae` passed backend/frontend CI but failed deployment/browser journeys. No package or milestone acceptance advances; Phase 2A.1 remains 12 accepted tasks and 6 remaining.
+
 The README retains stable feature IDs and becomes the canonical milestone/status index. Package plans own executable task counts; this ledger links them as they are approved. A feature spanning several packages becomes Verified only after all its required behavior and acceptance checks pass. Writing a design or creating a fixture does not advance implementation status.
 
 ## 10. Review boundary
