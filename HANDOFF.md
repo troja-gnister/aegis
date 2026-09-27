@@ -1,13 +1,14 @@
 # Aegis continuation handoff — September 27, 2026
 
-Resume in `/var/home/troja/Dev/aegis` on **`main`**. The Linux/Podman PostgreSQL correction (not the prerequisite's full acceptance) is committed, verified, and pushed to `origin/main`; full prerequisite acceptance is still open. Docker CI for the pushed head has not yet been inspected. The next first actions are, in order: **inspect the CI run for the pushed head**, then **Caddy application configuration**, then **indexer test-fixture compatibility**, then full gates (`make verify`, `make verify-compose`, `make test-e2e`) and Docker CI resolution, then **Task 13**. **18 tasks: 12 accepted, 6 remaining. Task 13 has not started.** Do not restart Tasks 1–12 or expand this package into the full rewrite.
+Resume in `/var/home/troja/Dev/aegis` on **`main`**. The Linux/Podman PostgreSQL correction (not the prerequisite's full acceptance) is committed, verified, and pushed to `origin/main` as `1bb14e4`/`2d0ede2`; its Docker CI ([run 36346939037](https://github.com/troja-gnister/aegis/actions/runs/36346939037)) failed overall, backend/frontend passing and deployment/E2E failing. The Caddy application-configuration correction is also committed, verified, and pushed to `origin/main` as `240963a` and the following documentation commit; **Docker CI for this push has not yet been inspected**. Full prerequisite acceptance is still open, including an open rootless-Podman client-source-address gap. The next first actions are, in order: **inspect the CI run for the pushed head**, then **decide the client-source-address gap (O11)**, then **indexer test-fixture compatibility**, then **the stale core-services NNP assertion and `rendered_mounts` refusals**, then **obtain the Docker CI logs** for `2d0ede2`, then full gates (`make verify`, `make verify-compose`, `make test-e2e`), then **Task 13**. **18 tasks: 12 accepted, 6 remaining. Task 13 has not started.** Do not restart Tasks 1–12 or expand this package into the full rewrite.
 
 ## First actions in a new session
 
-1. Read this file and `docs/development-handoff.md`. Check `git status --short --branch`, `git remote -v`, and recent history before editing. Fetch origin; confirm local `main` matches pushed `origin/main` at the documentation commit on top of `1bb14e4`, not diverged. Never reset, force-push, auto-stash, or discard local work. Investigate any additional changes beyond that pushed state.
-2. The PostgreSQL prerequisite below is complete and independently reviewed; do not redispatch its correction. Verify the committed source against the manifests named in `progress.md` before building on it.
-3. Inspect the CI run for the pushed head (the documentation commit on top of `1bb14e4`) and record its result; do not assume a result before it is observed.
-4. Continue the prerequisite sequence: Caddy application configuration, then indexer test-fixture compatibility, then full gates and Docker CI resolution, then Task 13. Keep one source implementer active at a time; use independent specification/code-quality review and scoped correction review, as before.
+1. Read this file and `docs/development-handoff.md`. Check `git status --short --branch`, `git remote -v`, and recent history before editing. Fetch origin; confirm local `main` matches pushed `origin/main` at the documentation commit on top of `240963a`, not diverged elsewhere. Never reset, force-push, auto-stash, or discard local work. Investigate any additional changes beyond that pushed state.
+2. The PostgreSQL and Caddy prerequisite corrections below are complete and independently reviewed; do not redispatch either. Verify the committed source against the manifests named in `progress.md` before building on it.
+3. Inspect the CI run for the pushed head (the documentation commit on top of `240963a`) and record its result; do not assume a result before it is observed.
+4. Decide the client-source-address gap (O11, in the Caddy section below): rootless Podman's published ports do not preserve the real client address, so the gateway's readiness check is intermittently flaky and per-client rate limiting cannot rely on it. This is a networking/trust-model design question that needs a decision (accept as a documented limitation, or design a fix) before treating the Caddy slice as fully accepted.
+5. Continue the prerequisite sequence: indexer test-fixture compatibility, then the stale core-services NNP assertion and `rendered_mounts` refusals, then obtain authenticated Docker CI logs for `2d0ede2` (or reproduce its failure safely), then full gates and Docker CI resolution, then Task 13. Keep one source implementer active at a time; use independent specification/code-quality review and scoped correction review, as before.
 
 Authoritative documents:
 
@@ -23,19 +24,21 @@ Follow applicable `AGENTS.md` instructions if present. None was found during the
 
 ## Git checkpoint
 
-`1bb14e4` (the independently reviewed PostgreSQL private-tmpfs correction, 10 files, staged hashes matching the final reviewed manifest `34e4de97c3f96334c734e935283155d04e5cf6a7f6ebf97b245a5c7e92d99b62` recorded in `progress.md`) and the following documentation commit are pushed to `origin/main`, on top of the prior pushed documentation checkpoint `6e276345a5fee5e75243510c74cf1f43badd8445` (records the September 24 pause handoff). Docker CI for this pushed head has not yet been inspected.
+`origin/main` now has `240963a` and the following documentation commit pushed on top of `2d0ede2959e6393acc4bf42c1524e4b9a179b608` (itself the documentation commit on top of `1bb14e4`, the independently reviewed PostgreSQL private-tmpfs correction: 10 files, staged hashes matching the final reviewed manifest `34e4de97c3f96334c734e935283155d04e5cf6a7f6ebf97b245a5c7e92d99b62` recorded in `progress.md`). `2d0ede2`'s Docker CI, [run 36346939037](https://github.com/troja-gnister/aegis/actions/runs/36346939037), failed overall: backend/frontend passed, deployment/E2E failed; logs remain unavailable without authentication. `240963a` is the independently reviewed Caddy private-tmpfs/TLS-stack correction (6 files, staged hashes matching the reviewed fix-round-3 manifest recorded in `progress.md`); **Docker CI for the pushed head has not yet been inspected**.
 
 | Revision | Meaning |
 | --- | --- |
-| `1bb14e4d3d5e3ad8a8cda6e8c0d72fa927901dba` | Pushed to `origin/main` (with the following documentation commit): corrected PostgreSQL private-tmpfs prerequisite (10 files, D1 + R2–R5). Combined selection: 318 passed, 0 skipped. |
-| `6e276345a5fee5e75243510c74cf1f43badd8445` | Prior pushed documentation checkpoint, now the parent of the pushed head above. |
+| `240963a` | Pushed to `origin/main` (with the following documentation commit): Caddy private-tmpfs/TLS-stack correction (6 files). Runtime selection's best case: 111/112 TLS tests passing. Docker CI for this push has not yet been inspected. |
+| `2d0ede2959e6393acc4bf42c1524e4b9a179b608` | Pushed to `origin/main` (parent of `240963a`): documentation checkpoint on top of `1bb14e4`. Docker CI (run 36346939037) failed overall (backend/frontend passed, deployment/E2E failed). |
+| `1bb14e4d3d5e3ad8a8cda6e8c0d72fa927901dba` | Pushed (under `2d0ede2`): corrected PostgreSQL private-tmpfs prerequisite (10 files, D1 + R2–R5). Combined selection: 318 passed, 0 skipped. |
+| `6e276345a5fee5e75243510c74cf1f43badd8445` | Prior pushed documentation checkpoint (records the September 24 pause handoff). |
 | `f618bae3524befcffb2b907ff482be7ce0879330` | Prior pushed documentation checkpoint; records Podman merge/private-tmpfs evidence. |
 | `520cf1f5bb9d5126953d33b0ce37751080ef7db8` | Latest committed application source before the PostgreSQL correction: Podman overlay contributes only the mask option, preserving base NNP. |
 | `71da40ed34bbe05990093afbf12925df40462ccf` | Guarded duplicate-mask compatibility, with reviewed identity/behavior checks and focused actual mount evidence. |
 | `163c02563d95de8e4e3930ae68377e946feef3b8` | Explicit local-engine/verification tooling; latest complete local `make verify` evidence. |
 | `a82db75d9949170e1d22acfed0f08050f067edf2` | Last accepted Task 12 application change. |
 
-`1bb14e4` and this documentation commit are pushed to `origin/main`; inspect the CI run for the pushed head once it is available. The complete correction chain (D1 review, diagnostic execution, R2–R5 briefs/reviews/manifests) is recorded chronologically in `.superpowers/sdd/2026-09-14-phase-2a-indexed-browser/progress.md`; do not redispatch it.
+`240963a` and the following documentation commit are pushed to `origin/main`; inspect the CI run for the pushed head once it is available. The complete correction chains (D1/R2–R5 for PostgreSQL; the Caddy tmpfs/`:z`/sysctl/`CapDrop` fix rounds) are recorded chronologically in `.superpowers/sdd/2026-09-14-phase-2a-indexed-browser/progress.md`; do not redispatch either.
 
 ## PostgreSQL prerequisite: diagnosed and corrected
 
@@ -48,28 +51,54 @@ The corrected diagnostic then ran in a container and located the original bootst
 - **R5** sets the live test's data tmpfs to Docker's default mode `1777` explicitly, because Podman applies Compose's `mode=0` literally.
 - **R3** applies the same `/` rule to the direct role-init test wrapper, and gives the environment-probe fixture a data tmpfs, an `@integration` marker, and the production `DAC_OVERRIDE` capability.
 
-The combined PostgreSQL selection passed **318 tests, 0 skipped, in 523 seconds** under rootless Podman 5.8.7, crun 1.28, enforcing SELinux; Ruff and mypy (228 sources) passed. The ten candidate files are committed as `1bb14e4` (`fix: prepare PostgreSQL private tmpfs for rootless Podman`); `1bb14e4` and the following documentation commit are pushed to `origin/main` (previously at `6e27634`).
+The combined PostgreSQL selection passed **318 tests, 0 skipped, in 523 seconds** under rootless Podman 5.8.7, crun 1.28, enforcing SELinux; Ruff and mypy (228 sources) passed. The ten candidate files are committed as `1bb14e4` (`fix: prepare PostgreSQL private tmpfs for rootless Podman`); `1bb14e4` and the following documentation commit `2d0ede2` are pushed to `origin/main` (previously at `6e27634`). Docker CI for `2d0ede2` ([run 36346939037](https://github.com/troja-gnister/aegis/actions/runs/36346939037)) failed overall: backend/frontend passed, deployment/E2E failed; logs remain unavailable without authentication.
 
 Still open, before this prerequisite is fully accepted:
 
-- A resource-free `tests/deployment -m "not integration"` run under Podman shows pre-existing failures that also reproduce on committed `6e27634`: a stale Docker-only no-new-privileges assertion for core services in `test_compose.py`, and four `test_rendered_mounts.py` mask/observer refusals. There are also failures in the still-unimplemented Caddy and indexer slices. None of these are PostgreSQL regressions.
-- Docker CI for the pushed head has not yet been inspected.
+- A resource-free `tests/deployment -m "not integration"` run under Podman shows pre-existing failures that also reproduce on committed `6e27634`: a stale Docker-only no-new-privileges assertion for core services in `test_compose.py`, and four `test_rendered_mounts.py` mask/observer refusals. None of these are PostgreSQL regressions.
 - Full gates (`make verify`, `make verify-compose`, `make test-e2e`) have not run on this source.
 - Full Podman application compatibility is not accepted.
 
 Full chronological evidence, review reports, and manifests remain in `.superpowers/sdd/2026-09-14-phase-2a-indexed-browser/progress.md` and the files it names. Do not redispatch this correction.
 
+## Caddy prerequisite: diagnosed and corrected
+
+Base for this slice: pushed `origin/main` head `2d0ede2959e6393acc4bf42c1524e4b9a179b608`.
+
+**Tmpfs.** The Podman overlay replaces only Caddy and Caddy-local's `/config` and `/tmp` tmpfs with `U,notmpcopyup` variants, because Podman rejects `uid`/`gid` tmpfs options. The checked launcher admits exactly that.
+
+**SELinux relabel (O8, measured).** SELinux denied reading the `user_home_t` Caddyfile binds. The user approved `:z` on exactly the two Caddyfile binds in `compose.yaml`, which permanently relabels those two checkout files to `container_file_t`; no other bind, secret, or original receives `z`/`Z`/`U`.
+
+**Port 80 sysctl (measured).** After the relabel, rootless Podman denied Caddy's `:80` redirect listener. The Podman overlay adds `net.ipv4.ip_unprivileged_port_start=0` to the two Caddy services only, for parity with Docker's default.
+
+**CapDrop (O9, measured).** Podman reports `CapDrop` as an expanded 11-capability list (`CAP_CHOWN, CAP_DAC_OVERRIDE, CAP_FOWNER, CAP_FSETID, CAP_KILL, CAP_NET_BIND_SERVICE, CAP_SETFCAP, CAP_SETGID, CAP_SETPCAP, CAP_SETUID, CAP_SYS_CHROOT`) rather than Docker's `['ALL']`; the tests now pin the exact form per engine.
+
+**Evidence.** Runtime `test_compose.py` plus `test_tls_gateway.py` (via `scripts/verify.py deployment`) on rootless Podman 5.8.7 with SELinux enforcing: the best case was **111/112** `test_tls_gateway.py` tests passing (the one failure was the certificate-recreation test, caused by the readiness gap below). `test_compose.py` passes except the pre-existing, out-of-scope core-services NNP assertion. Logs: `.superpowers/toolchain/podman-caddy-runtime-20260927.log` (initial: 1 failed/169 passed/9 errors, `caddy-local` denied reading its Caddyfile), `.superpowers/toolchain/podman-caddy-runtime-f1-20260927.log` (after the `:z` relabel: 1 failed (out-of-scope NNP)/174 passed/9 errors, new cause `listen tcp :80: bind: permission denied`), `.superpowers/toolchain/podman-caddy-runtime-f2-20260927.log` (after the port-80 sysctl: 3 failed/182 passed, TLS stack up on Podman), and `.superpowers/toolchain/podman-caddy-runtime-f3b-20260927.log` (the rerun after the `CapDrop` fix, backing the 111/112 headline result: 111 passed, 1 failed on the recreation test). Cleanup was exact each time: no containers remained, and retained volumes stayed at 18.
+
+**Open gap (O11, measured).** Rootless Podman's published ports (netavark bridge plus rootlessport) do not preserve the host client's source address. Caddy sees its own tls-hop address as the client, so the gateway's anti-spoofing readiness check intermittently rejects readiness (about 1 in 3 fresh stacks), and per-client rate limiting cannot rely on real client IPs either. This reproduces identically in passing and failing runs; only the timing of the race differs. This is a networking/trust-model design question, escalated to and decided by the user: commit the fixes above and record the source-address gap as an open prerequisite. **Do not claim full Podman compatibility.**
+
+The Caddy slice is committed as `240963a` (`fix: run Caddy private tmpfs and TLS stack on rootless Podman`; 6 files, staged hashes matching the reviewed fix-round-3 manifest); `240963a` and the following documentation commit **are pushed** to `origin/main`, on top of `2d0ede2`. **Docker CI for this push has not yet been inspected.**
+
+Still open, before this prerequisite is fully accepted:
+
+- The client-source-address gap (O11) needs a decision: accept as a documented limitation, or design a fix (a different publish mode, a trusted-proxy header contract, or another way to preserve the real client address).
+- The Docker CI failure pattern for `2d0ede2` ([run 36346939037](https://github.com/troja-gnister/aegis/actions/runs/36346939037)): backend/frontend passed, deployment/E2E failed; logs remain unavailable without authentication.
+- Indexer test-fixture compatibility is unimplemented (see below).
+- The stale core-services NNP assertion in `test_compose.py` and the `test_rendered_mounts.py` refusals remain (pre-existing, not regressions from either the PostgreSQL or Caddy correction).
+- Full gates (`make verify`, `make verify-compose`, `make test-e2e`) have not run.
+- Task counts stay **12 accepted, 6 remaining**; Task 13 has not started.
+
+Full chronological evidence (implementation brief, fix rounds, reviews, and root measurements O8/O9/O11) remains in `.superpowers/sdd/2026-09-14-phase-2a-indexed-browser/progress.md`. Do not redispatch this correction.
+
 ## Subsequent prerequisite slices
 
-**Caddy application configuration is unimplemented.** Read `podman-caddy-tmpfs-design.md` and `podman-caddy-implementation-brief.md`. A prepared implementation agent may be resumable as `/root/podman_caddy_configuration`; it received no implementation GO.
-
-Isolated diagnostics already passed two native and two Compose generations with pinned image `ebbf5210d94567392591a0a07d61279a8be8c9041091c1713427ffa23e0f842b` (Linux amd64, Caddy 2.11.4), exact UID/GID 10001, absent file capabilities, zero kernel capabilities, NNP, empty distinct 16 MiB private mounts, 0700/1777 modes, protective flags, tiny write/read, empty recreation and the unchanged full strict mount parser. Fresh mask checks and exact cleanup passed. These probes used no server, host binds, secrets, network or published ports; OOM score remained inherited 100. They do not establish TLS, canonical configuration or general resource enforcement.
-
-The intended narrow Podman overlay uses `!override` only for Caddy/Caddy-local's private `/config` and `/tmp` mounts, adding `U,notmpcopyup` there. Keep Docker declarations unchanged, durable `/data` unchanged, and the `520cf1f` mask-only overlay contribution. Precisely validate the before/after service and every target/option/size/mode/user; no global `tmpfs` comparison exemption. Verify actual provider profile rendering, server/autosave, local TLS and certificate durability after recreation. `U` is for these newly owned private tmpfs mounts only, never originals or bind mounts.
-
-**Indexer test-fixture compatibility is unimplemented.** Read `podman-indexer-tmpfs-design.md`, `podman-indexer-cleanup-diagnosis.md` and `podman-indexer-tmpfs-implementation-brief.md` after Caddy is verified. Four native coordination test mounts need precise Podman options with Docker strings unchanged. Dynamic-user and 501:20 positive fixtures require actual metadata/coordination evidence; a deliberately misowned 0:0 fixture must remain misowned without `U`. Caddy's 10001 evidence does not prove these users work.
+**Indexer test-fixture compatibility is unimplemented.** Read `podman-indexer-tmpfs-design.md`, `podman-indexer-cleanup-diagnosis.md` and `podman-indexer-tmpfs-implementation-brief.md`. Four native coordination test mounts need precise Podman options with Docker strings unchanged. Dynamic-user and 501:20 positive fixtures require actual metadata/coordination evidence; a deliberately misowned 0:0 fixture must remain misowned without `U`. Caddy's 10001 evidence does not prove these users work.
 
 A separate concrete fake-runner reproduction found that four existing test cleanup fragments could accept and delete a same-name/same-label replacement. Fix these touched fixtures before executing them: record immutable image IID and workload CID at creation, validate the entire owned scope before the first deletion, refuse replacements/unknown creation/tag rebinding, remove only recorded identities, and confirm absence. Preserve diagnostics and the original failure on cleanup refusal. This is a newly evidenced test-fixture safety correction, not a reopening of accepted Task 7. Preserve actual orphan reaping, lease/heartbeat/replacement, read-only originals and source manifests; do not substitute an init process-name check.
+
+**The stale core-services NNP assertion and the `rendered_mounts` refusals are a separate later slice**, not owned by either the PostgreSQL or Caddy correction: a stale Docker-only no-new-privileges assertion for core services in `tests/deployment/test_compose.py`, and four `tests/deployment/test_rendered_mounts.py` mask/observer refusals. Both reproduce identically on committed `6e27634`, so they are pre-existing under Podman, not regressions.
+
+**Docker CI logs for `2d0ede2`** (run 36346939037) are not available through the inspected anonymous routes (403, sign-in required). Obtain authorized logs or reproduce the deployment/E2E failure safely; do not attribute it to a Podman-only observation without evidence.
 
 After the prerequisite slices, run resource-using gates sequentially:
 
@@ -120,9 +149,11 @@ No user library, original-file tree, operator database, preview, production depl
 
 Latest complete local `make verify` still belongs to **`163c025`**, not the PostgreSQL-corrected candidate: 1,452 backend tests, 147 frontend tests across 13 files, locked installs, Ruff, mypy (225 sources), Django checks/migrations, frontend lint/types/build and whitespace checks passed. The backend took 747.16s; frontend took 28.06s with one worker. Log: `.superpowers/toolchain/make-verify-round5-20260924.log`. `make verify`, `make verify-compose`, and `make test-e2e` have not been rerun on the PostgreSQL-corrected source; run them, in that order, as part of the next full-gates slice.
 
-The combined PostgreSQL selection at `1bb14e4` passed 318 tests with 0 skipped in 523 seconds under rootless Podman, with Ruff and mypy (228 sources) clean; full log `.superpowers/toolchain/podman-postgres-combined-20260927.log`. A resource-free run of `tests/deployment -m "not integration"` under Podman also reproduced pre-existing failures present on committed `6e27634` too: a stale Docker-only no-new-privileges assertion in `test_compose.py`'s core-services check, and four `test_rendered_mounts.py` mask/observer refusals; both remain open, along with failures in the still-unimplemented Caddy and indexer slices. None of these are PostgreSQL regressions.
+The combined PostgreSQL selection at `1bb14e4` passed 318 tests with 0 skipped in 523 seconds under rootless Podman, with Ruff and mypy (228 sources) clean; full log `.superpowers/toolchain/podman-postgres-combined-20260927.log`. A resource-free run of `tests/deployment -m "not integration"` under Podman also reproduced pre-existing failures present on committed `6e27634` too: a stale Docker-only no-new-privileges assertion in `test_compose.py`'s core-services check, and four `test_rendered_mounts.py` mask/observer refusals; both remain open. None of these are PostgreSQL regressions.
 
-Latest inspected pushed CI is still **`f618bae`**, [run 36038914373](https://github.com/troja-gnister/aegis/actions/runs/36038914373): **failed overall; backend/frontend passed, deployment/E2E failed**. No cause is established. Report: `.superpowers/toolchain/ci-read-f618bae-b07382f02e6e4c168a209f527039424a.json`. `1bb14e4` and the following documentation commit are pushed to `origin/main` (previously at `6e27634`); Docker CI for this push has not yet been inspected. Earlier runs `36027572227` (`2857a31`) and `35989701646` (`db6e107`) had the same job outcomes; their evidence remains historical and separate.
+The Caddy runtime selection (`test_compose.py` plus `test_tls_gateway.py`) reached a best case of 111/112 TLS tests passing at `240963a`, with `test_compose.py` passing except the same pre-existing core-services NNP assertion; logs `.superpowers/toolchain/podman-caddy-runtime-20260927.log`, `-f1-20260927.log`, and `-f2-20260927.log` record the fix-round progression, and `.superpowers/toolchain/podman-caddy-runtime-f3b-20260927.log` is the rerun that backs the 111/112 headline result. The one remaining `test_tls_gateway.py` failure (certificate recreation) is caused by the open client-source-address gap (O11), not a new defect.
+
+Latest inspected pushed CI is **`2d0ede2`**, [run 36346939037](https://github.com/troja-gnister/aegis/actions/runs/36346939037): **failed overall; backend/frontend passed, deployment/E2E failed**. No cause is established; logs remain unavailable without authentication. `1bb14e4` and `2d0ede2` are pushed to `origin/main` (previously at `6e27634`); `240963a` (the Caddy correction) and the following documentation commit are also pushed, on top of `2d0ede2`, and Docker CI for that push has not yet been inspected. Earlier runs `36038914373` (`f618bae`), `36027572227` (`2857a31`), and `35989701646` (`db6e107`) had the same job outcomes; their evidence remains historical and separate.
 
 For `2857a31`, public step metadata locates deployment failure at step 7 after config/build passed, and E2E at step 8 after locked dependencies/browser installation passed. Anonymous log download returned 403; the HTML required sign-in. No GitHub credentials or cookies were read. Do not repeatedly retry the same unauthenticated log routes or attribute Docker CI failures to a Podman observation. Obtain authorized logs or reproduce the exact failure safely.
 
@@ -138,10 +169,14 @@ Useful retained local evidence:
 | `toolchain/canonical-mask-merge-render-20260924.json` | Actual four-profile configuration rendering for committed merge fix. |
 | `toolchain/postgres-bootstrap-survey-f8c7d4148bd14c529a0c3a5f6bc07053.jsonl` | O2 survey: locates the `/` ancestor cause; measures rootless overlay root `0:0`/`555`; other 55 guards pass. |
 | `toolchain/podman-postgres-combined-20260927.log` | Combined PostgreSQL acceptance: 318 passed, 0 skipped, 523s; final containers empty, volumes 18. |
-| `toolchain/deployment-resource-free-names-20260927.log` | Resource-free `tests/deployment -m "not integration"` classification: pre-existing Caddy/indexer/NNP/rendered_mounts failures, none PostgreSQL regressions. |
-| `toolchain/caddy-runtime-f1aa7ca7b2684a09b44248b91a88c09d-l83511fx/evidence.jsonl` | Isolated four-profile Caddy runtime success and exact cleanup. |
+| `toolchain/deployment-resource-free-names-20260927.log` | Resource-free `tests/deployment -m "not integration"` classification: pre-existing indexer/NNP/rendered_mounts failures, none PostgreSQL regressions. |
+| `toolchain/caddy-runtime-f1aa7ca7b2684a09b44248b91a88c09d-l83511fx/evidence.jsonl` | Isolated four-profile Caddy runtime success and exact cleanup (pre-slice diagnostic). |
+| `toolchain/podman-caddy-runtime-20260927.log` | Caddy slice initial runtime: 1 failed/169 passed/9 errors; `caddy-local` denied reading its Caddyfile (pre-`:z`). |
+| `toolchain/podman-caddy-runtime-f1-20260927.log` | After the `:z` relabel: 1 failed (out-of-scope NNP)/174 passed/9 errors; new cause is the `:80` bind permission denial. |
+| `toolchain/podman-caddy-runtime-f2-20260927.log` | After the port-80 sysctl: 3 failed/182 passed; TLS stack up on Podman. |
+| `toolchain/podman-caddy-runtime-f3b-20260927.log` | After the `CapDrop` fix: 111 passed, 1 failed (recreation test) — the log backing the 111/112 headline result. |
 
-The passing Caddy diagnostic script is `toolchain/probe-caddy-runtime-r1-71da40e.py`, SHA-256 `1dc8079aaddfa8b56409d4b3f66ce379fe52dc7fc07f6431901b5b419f70e966`. It uses a coherent immutable helper bundle `toolchain/caddy-runtime-base-71da40e/manifest.json`, SHA-256 `6642c8a1caf5682f8b2e5eb295619780c0b88a1b85feb17fa92f33ff3017782a`. Do not mix stale helper snapshots or rerun earlier rejected probes unchanged. Full artifact/review history is in the working ledger (`progress.md`).
+The passing Caddy diagnostic script is `toolchain/probe-caddy-runtime-r1-71da40e.py`, SHA-256 `1dc8079aaddfa8b56409d4b3f66ce379fe52dc7fc07f6431901b5b419f70e966`. It uses a coherent immutable helper bundle `toolchain/caddy-runtime-base-71da40e/manifest.json`, SHA-256 `6642c8a1caf5682f8b2e5eb295619780c0b88a1b85feb17fa92f33ff3017782a`. Do not mix stale helper snapshots or rerun earlier rejected probes unchanged. Full artifact/review history, including the O8/O9/O11 root measurements and the final `CapDrop`-fix rerun (111 passed, 1 failed), is in the working ledger (`progress.md`).
 
 ## Remaining product tasks and acceptance boundaries
 

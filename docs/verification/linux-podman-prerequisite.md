@@ -171,17 +171,34 @@ Four independently reviewed corrections followed, each on the frozen candidate s
 
 The combined PostgreSQL selection passed **318 tests with 0 skipped in 523 seconds** under rootless Podman 5.8.7, crun 1.28, enforcing SELinux, and booted kernel `7.2.7-200.fc44`. It covers the provider render, the static exact-security assertion, the live bootstrap, staging, dropping to UID 70 with zero final capabilities, the diagnostic probes, reconciliation of an accepted base, invalid secrets, rotation, the complete role-init file, and the launch and tmpfs suites. Cleanup was exact: no containers remained after the run, and the count of previously retained volumes stayed at 18. Ruff passed; mypy passed on 228 sources.
 
-The ten PostgreSQL candidate files are committed as `1bb14e4` (`fix: prepare PostgreSQL private tmpfs for rootless Podman`); `1bb14e4` and the following documentation commit are pushed to `origin/main` (previously at `6e27634`).
+The ten PostgreSQL candidate files are committed as `1bb14e4` (`fix: prepare PostgreSQL private tmpfs for rootless Podman`); `1bb14e4` and the following documentation commit `2d0ede2959e6393acc4bf42c1524e4b9a179b608` are pushed to `origin/main` (previously at `6e27634`). Docker CI for `2d0ede2` ([run 36346939037](https://github.com/troja-gnister/aegis/actions/runs/36346939037)) failed overall: backend/frontend passed, deployment/E2E failed; logs remain unavailable without authentication.
 
-Still open:
+Still open after the PostgreSQL correction:
 
-- A resource-free run of the deployment suite under Podman shows pre-existing failures that also reproduce on committed `6e27634`: a stale Docker-only no-new-privileges assertion for the core services in `tests/deployment/test_compose.py`, and four `test_rendered_mounts.py` mask and observer refusals. Failures also remain in the still-unimplemented Caddy and indexer slices. None of these are regressions from the PostgreSQL correction.
-- Docker CI for the pushed head (`1bb14e4` plus the following documentation commit) has not yet been inspected.
+- A resource-free run of the deployment suite under Podman shows pre-existing failures that also reproduce on committed `6e27634`: a stale Docker-only no-new-privileges assertion for the core services in `tests/deployment/test_compose.py`, and four `test_rendered_mounts.py` mask and observer refusals. None of these are regressions from the PostgreSQL correction.
 - Full gates (`make verify`, `make verify-compose`, `make test-e2e`) have not run.
 - Full Podman application compatibility is not accepted.
 - Task counts stay **12 accepted, 6 remaining**; Task 13 has not started.
 
 A private rootless API service is running for this session; it will be stopped after an identity check at the next pause and must be recreated fresh in a later session. The host was rebooted on September 27, 2026; the booted kernel is now `7.2.7-200.fc44.x86_64`, revising the September 22–24 kernel observations above.
+
+## Caddy diagnosis and correction, September 27
+
+Base for the Caddy slice: pushed HEAD `2d0ede2959e6393acc4bf42c1524e4b9a179b608` (clean tree).
+
+**Tmpfs.** The Podman overlay replaces only Caddy and Caddy-local's `/config` and `/tmp` tmpfs with `U,notmpcopyup` variants, because Podman rejects `uid`/`gid` tmpfs options. The checked launcher admits exactly that.
+
+**SELinux relabel (O8, measured).** A root probe found SELinux denying container reads of the `user_home_t` Caddyfile binds (`compose.yaml`, the two Caddyfile bind mounts); an identical scratch copy relabeled `container_file_t` was readable. The user approved `:z` on exactly the two Caddyfile binds in `compose.yaml`, which permanently relabels those two checkout files to `container_file_t`; no other bind, secret, or original receives `z`/`Z`/`U`.
+
+**Port 80 sysctl (measured).** After the relabel, Caddy read its configuration but rootless Podman then denied the `caddy-local` service's `:80` auto-HTTPS redirect listener (unprivileged UID 10001, zero capabilities). The Podman overlay adds `net.ipv4.ip_unprivileged_port_start=0` to the `caddy` and `caddy-local` services only, for parity with Docker's default (set in-container since Docker 20.10).
+
+**CapDrop (O9, measured).** A native `--cap-drop ALL` probe against the pinned Caddy image showed Podman reporting `CapDrop` as the expanded 11-capability list `[CAP_CHOWN, CAP_DAC_OVERRIDE, CAP_FOWNER, CAP_FSETID, CAP_KILL, CAP_NET_BIND_SERVICE, CAP_SETFCAP, CAP_SETGID, CAP_SETPCAP, CAP_SETUID, CAP_SYS_CHROOT]` rather than Docker's `['ALL']`; the tests now pin the exact expected form per engine.
+
+**Evidence.** The runtime selection (`tests/deployment/test_compose.py` plus `tests/deployment/test_tls_gateway.py`, run through `scripts/verify.py deployment`) on rootless Podman 5.8.7 with SELinux enforcing reached a best case of **111 of 112** `test_tls_gateway.py` tests passing (one failure was the certificate-recreation test, caused by the readiness gap below). `test_compose.py` passes except the pre-existing, out-of-scope core-services no-new-privileges assertion. Logs: `.superpowers/toolchain/podman-caddy-runtime-20260927.log` (initial: 1 failed/169 passed/9 errors, `caddy-local` denied reading `/etc/caddy/Caddyfile`), `.superpowers/toolchain/podman-caddy-runtime-f1-20260927.log` (after the `:z` relabel: 1 failed (out-of-scope NNP)/174 passed/9 errors, new cause `listen tcp :80: bind: permission denied`), `.superpowers/toolchain/podman-caddy-runtime-f2-20260927.log` (after the port-80 sysctl: 3 failed/182 passed, TLS stack up on Podman), and the rerun after the `CapDrop` fix (111 passed, 1 failed on the recreation test due to readiness). Cleanup was exact each time: no containers remained, and the count of retained volumes stayed at 18.
+
+**Open gap (O11, measured).** Rootless Podman's published ports (netavark bridge plus rootlessport) do not preserve the host client's source address. Caddy sees its own tls-hop address as the client (`remote_ip` equals Caddy's own peer address), so the gateway's anti-spoofing check — which compares the forwarded address against the connection's real remote address — intermittently rejects readiness, in about 1 in 3 fresh stacks; the same loss of the real client address means per-client rate limiting cannot rely on it either. This reproduces identically in passing and failing runs; only the timing of the race differs. This is a networking/trust-model design question, escalated to and decided by the user: commit the Caddy fixes above and record the source-address gap as an open prerequisite. Full Podman compatibility is not established or claimed.
+
+The Caddy slice is committed as `240963a` (`fix: run Caddy private tmpfs and TLS stack on rootless Podman`; 6 files); `240963a` and the following documentation commit are pushed to `origin/main`, on top of `2d0ede2`. Docker CI for this push has not yet been inspected. Also open, beyond the source-address gap: the Docker CI failure pattern for `2d0ede2` above; the still-unimplemented indexer test-fixture compatibility; the stale core-services NNP assertion and the `test_rendered_mounts.py` refusals (separate from this slice); and full gates (`make verify`, `make verify-compose`, `make test-e2e`). Task counts stay 12 accepted, 6 remaining; Task 13 has not started.
 
 ## Cleanup disposition
 
