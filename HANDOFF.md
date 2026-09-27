@@ -1,15 +1,13 @@
-# Aegis continuation handoff — September 24, 2026
+# Aegis continuation handoff — September 27, 2026
 
-Development is paused at the user's request. Resume in `/var/home/troja/Dev/aegis` on **`main`**. Finish the separately scoped Linux/Podman prerequisite, then Phase 2A.1 Tasks **13–18**, in order. **18 tasks: 12 accepted, 6 remaining. Task 13 has not started.** Do not restart Tasks 1–12 or expand this package into the full rewrite.
-
-This file records both the pushed repository and unfinished local work. **Ten PostgreSQL candidate files remain deliberately uncommitted.** Preserve them. The temporary test API has been stopped, its recorded directory removed, and no Podman containers were running at pause. No implementation or resource harness is running.
+Resume in `/var/home/troja/Dev/aegis` on **`main`**. The Linux/Podman PostgreSQL correction (not the prerequisite's full acceptance) is committed, verified, and pushed to `origin/main`; full prerequisite acceptance is still open. Docker CI for the pushed head has not yet been inspected. The next first actions are, in order: **inspect the CI run for the pushed head**, then **Caddy application configuration**, then **indexer test-fixture compatibility**, then full gates (`make verify`, `make verify-compose`, `make test-e2e`) and Docker CI resolution, then **Task 13**. **18 tasks: 12 accepted, 6 remaining. Task 13 has not started.** Do not restart Tasks 1–12 or expand this package into the full rewrite.
 
 ## First actions in a new session
 
-1. Read this file and `docs/development-handoff.md`. Check `git status --short --branch`, `git remote -v`, and recent history before editing. Fetch origin; use `git pull --ff-only origin main` only when safe. Never reset, force-push, auto-stash, or discard local work. The source inventory below is expected; investigate any additional changes.
-2. Verify the local candidate against its frozen manifest and backup before resuming its correction. The immediate blocker is **D1: Compose serialization of the PostgreSQL test diagnostic**, described below. No production-helper fix is justified until an actual diagnostic establishes the bootstrap failure's cause.
-3. Read the complete authoritative documents and the relevant prerequisite brief/review. Keep one source implementer active at a time; use independent specification/code-quality review and scoped correction review. The user explicitly authorized this workflow and work on `main`. Existing agent handles are optional conveniences; all necessary state is in files.
-4. Finish D1, freeze and review the correction, then run the focused PostgreSQL checks with freshly owned resources. Continue PostgreSQL → Caddy → indexer fixture compatibility → full gates → Task 13. Do not execute the currently blocked diagnostic just to rediscover its rendering failure.
+1. Read this file and `docs/development-handoff.md`. Check `git status --short --branch`, `git remote -v`, and recent history before editing. Fetch origin; confirm local `main` matches pushed `origin/main` at the documentation commit on top of `1bb14e4`, not diverged. Never reset, force-push, auto-stash, or discard local work. Investigate any additional changes beyond that pushed state.
+2. The PostgreSQL prerequisite below is complete and independently reviewed; do not redispatch its correction. Verify the committed source against the manifests named in `progress.md` before building on it.
+3. Inspect the CI run for the pushed head (the documentation commit on top of `1bb14e4`) and record its result; do not assume a result before it is observed.
+4. Continue the prerequisite sequence: Caddy application configuration, then indexer test-fixture compatibility, then full gates and Docker CI resolution, then Task 13. Keep one source implementer active at a time; use independent specification/code-quality review and scoped correction review, as before.
 
 Authoritative documents:
 
@@ -23,130 +21,43 @@ Authoritative documents:
 
 Follow applicable `AGENTS.md` instructions if present. None was found during the existing work. Read each task's complete requirements before implementation; this handoff does not replace them.
 
-## Git checkpoint and unfinished files
+## Git checkpoint
 
-Immediately before this documentation-only pause checkpoint, freshly fetched `HEAD` and `origin/main` both pointed to **`f618bae3524befcffb2b907ff482be7ce0879330`**, zero ahead/behind. Origin is `git@github.com:troja-gnister/aegis.git`. The commit containing this handoff adds documentation only; use `git log` to identify its final hash.
+`1bb14e4` (the independently reviewed PostgreSQL private-tmpfs correction, 10 files, staged hashes matching the final reviewed manifest `34e4de97c3f96334c734e935283155d04e5cf6a7f6ebf97b245a5c7e92d99b62` recorded in `progress.md`) and the following documentation commit are pushed to `origin/main`, on top of the prior pushed documentation checkpoint `6e276345a5fee5e75243510c74cf1f43badd8445` (records the September 24 pause handoff). Docker CI for this pushed head has not yet been inspected.
 
 | Revision | Meaning |
 | --- | --- |
-| `f618bae3524befcffb2b907ff482be7ce0879330` | Last pushed documentation checkpoint before this pause; records merge/private-tmpfs evidence. |
-| `520cf1f5bb9d5126953d33b0ce37751080ef7db8` | Latest committed source: Podman overlay contributes only the mask option, preserving base NNP without a duplicate Compose merge. |
+| `1bb14e4d3d5e3ad8a8cda6e8c0d72fa927901dba` | Pushed to `origin/main` (with the following documentation commit): corrected PostgreSQL private-tmpfs prerequisite (10 files, D1 + R2–R5). Combined selection: 318 passed, 0 skipped. |
+| `6e276345a5fee5e75243510c74cf1f43badd8445` | Prior pushed documentation checkpoint, now the parent of the pushed head above. |
+| `f618bae3524befcffb2b907ff482be7ce0879330` | Prior pushed documentation checkpoint; records Podman merge/private-tmpfs evidence. |
+| `520cf1f5bb9d5126953d33b0ce37751080ef7db8` | Latest committed application source before the PostgreSQL correction: Podman overlay contributes only the mask option, preserving base NNP. |
 | `71da40ed34bbe05990093afbf12925df40462ccf` | Guarded duplicate-mask compatibility, with reviewed identity/behavior checks and focused actual mount evidence. |
 | `163c02563d95de8e4e3930ae68377e946feef3b8` | Explicit local-engine/verification tooling; latest complete local `make verify` evidence. |
-| `ab57e3037b9daed79aeb691eb486a4d2397ae4aa` | Original accepted portable handoff, present in history. |
-| `a82db75d9949170e1d22acfed0f08050f067edf2` | Last accepted Task 12 application change, present in history. |
+| `a82db75d9949170e1d22acfed0f08050f067edf2` | Last accepted Task 12 application change. |
 
-These ten local source files are the PostgreSQL candidate, **not accepted runtime compatibility**:
+`1bb14e4` and this documentation commit are pushed to `origin/main`; inspect the CI run for the pushed head once it is available. The complete correction chain (D1 review, diagnostic execution, R2–R5 briefs/reviews/manifests) is recorded chronologically in `.superpowers/sdd/2026-09-14-phase-2a-indexed-browser/progress.md`; do not redispatch it.
 
-| Status | File |
-| --- | --- |
-| Modified | `compose.yaml` |
-| Modified | `deploy/postgres/entrypoint.sh` |
-| Modified | `docker/postgres.Dockerfile` |
-| Modified | `tests/deployment/test_container_boundaries.py` |
-| Modified | `tests/deployment/test_postgres_role_init.py` |
-| New, untracked | `deploy/postgres/private-tmpfs.sh` |
-| New, untracked | `tests/deployment/test_postgres_launch.py` |
-| New, untracked | `tests/deployment/test_postgres_tmpfs.py` |
-| New, untracked | `tests/support/postgres-role-init-tmpfs.sh` |
-| New, untracked | `tests/support/postgres_tmpfs.py` |
+## PostgreSQL prerequisite: diagnosed and corrected
 
-All **54** relevant live sources matched the frozen diagnostic manifest at pause:
+Diagnostic-quoting finding D1 (Compose serialization of the bootstrap diagnostic) is corrected and independently reviewed: the assembled bootstrap program is encoded for Compose exactly once, and the pre-start check compares both the rendered Compose form and the inspected literal entrypoint vector. A resource-free check using the actual selected provider's `config --format json` render was added.
 
-```text
-.superpowers/sdd/2026-09-14-phase-2a-indexed-browser/podman-postgres-diagnostic-source/manifest.json
-SHA256 93e28319460fd54383d3c0e213fccf366f80ffee3e6bd2c28ef090295d562185
-```
+The corrected diagnostic then ran in a container and located the original bootstrap `exit 1` at the helper's `/` ancestor check. An independently reviewed survey measured rootless Podman's read-only overlay root as owned `0:0` with mode `555`; the other 55 validation guards passed. Four independently reviewed corrections followed:
 
-The manifest maps repository-relative paths directly to SHA-256 strings. Verify its own hash, then hash every listed file; do not assume a previous review covers later edits.
+- **R2** accepts mode `755` (Docker) or `555` (measured rootless Podman) for `/` only, in the production helper.
+- **R4** declares the canonical PostgreSQL socket tmpfs at `/run/postgresql` instead of the `/var/run` alias, because Podman's inspection drops a declaration made under that alias once the container has started.
+- **R5** sets the live test's data tmpfs to Docker's default mode `1777` explicitly, because Podman applies Compose's `mode=0` literally.
+- **R3** applies the same `/` rule to the direct role-init test wrapper, and gives the environment-probe fixture a data tmpfs, an `@integration` marker, and the production `DAC_OVERRIDE` capability.
 
-An additional local backup preserves all ten files, their source modes/hashes, and a complete patch against `f618bae`:
+The combined PostgreSQL selection passed **318 tests, 0 skipped, in 523 seconds** under rootless Podman 5.8.7, crun 1.28, enforcing SELinux; Ruff and mypy (228 sources) passed. The ten candidate files are committed as `1bb14e4` (`fix: prepare PostgreSQL private tmpfs for rootless Podman`); `1bb14e4` and the following documentation commit are pushed to `origin/main` (previously at `6e27634`).
 
-```text
-.superpowers/handoff/2026-09-24/manifest.json
-SHA256 0ffe3b25ad4ff8f70e0d18228ea31140617c11d139892d9859d061c1b2fb30d5
-.superpowers/handoff/2026-09-24/postgres-candidate.patch
-SHA256 d254a7f20093c5095a4518c7245ca8f74ea9485f3268215a80216a97b5071c12
-.superpowers/handoff/2026-09-24/source/
-```
+Still open, before this prerequisite is fully accepted:
 
-`git apply --check --reverse` passed against the live worktree without applying anything. **Do not apply the patch to the current tree: its changes are already present.** Backup copies use private file permissions; the manifest records original working modes. These backups, source freezes, toolchains and detailed reports are ignored local files. They survive a new session on this computer but are absent from a fresh clone. This documentation commit does not publish the unfinished source; a different computer needs a deliberate transfer or later verified source commit.
+- A resource-free `tests/deployment -m "not integration"` run under Podman shows pre-existing failures that also reproduce on committed `6e27634`: a stale Docker-only no-new-privileges assertion for core services in `test_compose.py`, and four `test_rendered_mounts.py` mask/observer refusals. There are also failures in the still-unimplemented Caddy and indexer slices. None of these are PostgreSQL regressions.
+- Docker CI for the pushed head has not yet been inspected.
+- Full gates (`make verify`, `make verify-compose`, `make test-e2e`) have not run on this source.
+- Full Podman application compatibility is not accepted.
 
-## Immediate blocker: PostgreSQL diagnostic D1
-
-Working artifacts live under:
-
-```text
-.superpowers/sdd/2026-09-14-phase-2a-indexed-browser/
-```
-
-Read these complete files before editing:
-
-- `progress.md` — chronological recovery ledger; accepted tasks stay accepted.
-- `podman-postgres-implementation-brief.md`
-- `podman-postgres-compatibility-design-review.md` — including September 24 supplement.
-- `podman-postgres-provenance-review.md` — prior R1 correction passed.
-- `podman-postgres-diagnostic-report.md`
-- **`podman-postgres-diagnostic-review.md`** — current independent review, changes requested.
-
-The current review's SHA-256 is `8e5010f87bddd21af9f6b2a11bbe0e4d4be96b2d17c95d83ee3d00d63facf6fd`. It found **one P1 issue, D1**, and no additional diagnostic privacy/control-flow/cleanup/security-assertion finding. No correction for D1 has been started.
-
-The bootstrap-only diagnostic embeds Bash expressions (`${target-}`, `${#FUNCNAME[@]}`, `$frame`, `$?`, `$LINENO`) directly into a Compose entrypoint. The actual selected Compose 2.39.4 provider rejects the full command during `config`, before a diagnostic container starts. Encoding each dollar once as `$$` renders successfully, but the provider's JSON retains the escaped representation. The expected process arguments therefore must remain distinct from the serialized Compose representation. The current fake provider uses the same string for both and misses this boundary.
-
-Required correction, as one bounded change:
-
-1. Encode the **complete assembled owned bootstrap program exactly once** for Compose, protecting all expressions against host environment interpolation.
-2. Retain the intended literal argument vector separately. Before start, compare the inspected `Config.Entrypoint` with that exact intended vector. Preserve strict normal-entrypoint/command checks; no ignored comparison or repeated generic unescaping.
-3. Add a resource-free check using the actual selected provider's `config --format json`, the complete program and explicit `--env-file /dev/null`. Assert successful rendering and the precise escaped representation.
-4. Model rendered configuration and inspected process arguments separately in the fake provider. Cover correct literal arguments, altered arguments refusing **before start**, and preserved variable/status/array expressions. Keep diagnostic privacy bounds, cleanup and no-start-on-refusal behavior.
-
-The review retained its pure-provider reproduction at `/tmp/aegis-pg-diagnostic-compose-review-632w8nbp/`; treat that as optional scratch evidence, not a durable dependency. Existing correction agents, if available: `/root/podman_postgres` and `/root/podman_postgres_review`. Resume the implementer for D1, then the reviewer for D1 closure and introduced regressions only. Neither is running at pause.
-
-Preserve the current `93e283…` freeze and all earlier reports. Create a new full source manifest, correction-only diff against it, and RED/GREEN report. No production-helper change, container launch, host change, public acceptance claim or broad re-review is part of D1.
-
-### PostgreSQL design that must remain intact
-
-The shared Docker/Podman declarations omit unsupported tmpfs `uid/gid` options. The candidate prepares only fixed, newly created private tmpfs roots using the existing root bootstrap and capabilities `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETGID`, `SETUID`.
-
-- `/run/aegis-source-secrets`: root-owned 0700, validated only; six read-only, regular, nonempty, bounded input files. No ownership/permission mutation there.
-- `/run/secrets`: 70:70, 0700; six staged files 70:70, 0400.
-- `/run/postgresql`: 70:70, bootstrap 0775; the unchanged official entrypoint later makes the live socket directory 03775.
-- `/tmp`: 70:70, 1777; `/var/run` must be the literal `../run` link.
-- Validate the entire fixed target/source set before any mutation or copy. Change only the three empty directory inodes nonrecursively. Preserve bounded metadata parsing, physical identities, alias/ancestor/nested-mount checks, rechecks, UID 70 source denial, zero final capabilities, marker/HBA/environment privacy, reconciliation and rotation.
-
-Container-visible mount metadata alone cannot distinguish every host tmpfs-root bind. The already reviewed R1 correction therefore records creation and checks effective engine provenance, image/configuration/security/source identity and the complete owned inventory **before native start of the exact recorded CID**. All launch phases use that order. Do not restore `compose up` before inspection. Direct role-init fixtures use their separately reviewed fixed-path test-only wrapper, not a generalized production selector.
-
-The current diagnostic changes only the test bootstrap override: allowlisted target identifiers, at most six function/line frames, bounded ERR location/status, no shell tracing, no command/environment/secret dump. Logs come from the exact CID with `--tail 32` and a 30-second timeout before asserting bootstrap exit status. Accepted combined UTF-8 output is limited to 8192 bytes; this is **finite-tail collection followed by validation**, not a streaming byte cap.
-
-### PostgreSQL evidence and next actual commands
-
-| Scope / snapshot | Observed result |
-| --- | --- |
-| Original helper/fixture candidate | Parent: **153 passed in 90.40s**, zero skips; resource-free evidence. |
-| R1 recorded-create/inspect/start correction, `a77c0a…` | Parent: **93 passed in 3.33s**, zero skips; independent review passed. |
-| First canonical actual static/live run on R1 | **2 failed in 1.12s**: duplicate NNP prevented rendering, before application bootstrap. |
-| R1 plus committed merge correction, `1ee640…` | **2 failed in 15.77s**: stale static security assertion; bootstrap passed provenance checks, then exited 1. Logs were fetched too late to establish its cause. |
-| Current diagnostic/static correction, `93e283…` | Implementer: **126 passed in 8.77s**, zero skips; static checks passed. Actual-provider review then found D1. The diagnostic has never executed in a container. |
-
-Do not aggregate these overlapping selections or report them as full acceptance. Both actual failed runs removed their disposable databases and recorded containers; final container inventories were empty. The production bootstrap's exit cause is still **unknown**. An 18-digit inode bound, image utility behavior and metadata guards are hypotheses, not measured diagnoses.
-
-After D1 review passes, recheck ownership, socket, ports and source hashes, then capture a new complete log for:
-
-```bash
-uv run --locked python scripts/verify.py deployment \
-  --test-target tests/deployment/test_container_boundaries.py::test_postgres_stages_fixed_source_secrets_into_uid_70_private_tmpfs \
-  --test-target tests/deployment/test_container_boundaries.py::test_live_postgres_stages_secrets_and_drops_to_uid_70
-```
-
-Use the diagnostic to establish the actual cause; make the smallest evidenced correction with regression tests and independent review. After the bootstrap/live checks pass, cover initialization, existing-state reconciliation, accepted-base behavior, invalid secrets and rotation, including:
-
-```bash
-uv run --locked python scripts/verify.py deployment \
-  --test-target tests/deployment/test_container_boundaries.py::test_postgres_reconciles_populated_accepted_base_and_rotated_secrets \
-  --test-target tests/deployment/test_postgres_role_init.py
-```
-
-Retain original-file/secret-source manifests after stopping owned workers. Commit only the verified scoped PostgreSQL change, synchronize the public docs, and push before proceeding to the next prerequisite.
+Full chronological evidence, review reports, and manifests remain in `.superpowers/sdd/2026-09-14-phase-2a-indexed-browser/progress.md` and the files it names. Do not redispatch this correction.
 
 ## Subsequent prerequisite slices
 
@@ -156,7 +67,7 @@ Isolated diagnostics already passed two native and two Compose generations with 
 
 The intended narrow Podman overlay uses `!override` only for Caddy/Caddy-local's private `/config` and `/tmp` mounts, adding `U,notmpcopyup` there. Keep Docker declarations unchanged, durable `/data` unchanged, and the `520cf1f` mask-only overlay contribution. Precisely validate the before/after service and every target/option/size/mode/user; no global `tmpfs` comparison exemption. Verify actual provider profile rendering, server/autosave, local TLS and certificate durability after recreation. `U` is for these newly owned private tmpfs mounts only, never originals or bind mounts.
 
-**Indexer test-fixture compatibility is unimplemented.** Read `podman-indexer-tmpfs-design.md`, `podman-indexer-cleanup-diagnosis.md` and `podman-indexer-tmpfs-implementation-brief.md` after PostgreSQL/Caddy are verified. Four native coordination test mounts need precise Podman options with Docker strings unchanged. Dynamic-user and 501:20 positive fixtures require actual metadata/coordination evidence; a deliberately misowned 0:0 fixture must remain misowned without `U`. Caddy's 10001 evidence does not prove these users work.
+**Indexer test-fixture compatibility is unimplemented.** Read `podman-indexer-tmpfs-design.md`, `podman-indexer-cleanup-diagnosis.md` and `podman-indexer-tmpfs-implementation-brief.md` after Caddy is verified. Four native coordination test mounts need precise Podman options with Docker strings unchanged. Dynamic-user and 501:20 positive fixtures require actual metadata/coordination evidence; a deliberately misowned 0:0 fixture must remain misowned without `U`. Caddy's 10001 evidence does not prove these users work.
 
 A separate concrete fake-runner reproduction found that four existing test cleanup fragments could accept and delete a same-name/same-label replacement. Fix these touched fixtures before executing them: record immutable image IID and workload CID at creation, validate the entire owned scope before the first deletion, refuse replacements/unknown creation/tag rebinding, remove only recorded identities, and confirm absence. Preserve diagnostics and the original failure on cleanup refusal. This is a newly evidenced test-fixture safety correction, not a reopening of accepted Task 7. Preserve actual orphan reaping, lease/heartbeat/replacement, read-only originals and source manifests; do not substitute an init process-name check.
 
@@ -173,9 +84,9 @@ Docker CI failures must also be resolved. No prerequisite is accepted based only
 
 ## Host, locked tools and restart requirements
 
-Observed host: Fedora Silverblue **44.20260922.0**, booted kernel **7.2.6-200.fc44.x86_64**, Intel i7-1355U (10 cores / 12 threads), about 30 GiB RAM, Btrfs. A newer deployment/kernel was staged but not booted; do not report it as active. Latest measured checkout free space was about **36 GiB**. `/tmp` is a 16 GiB tmpfs and is unsuitable for the million-entry database/source workload. Recheck capacity and inodes before creating any large fixture. This computer is **not the calibrated N100 reference host**.
+Observed host: Fedora Silverblue **44.20260922.0**, Intel i7-1355U (10 cores / 12 threads), about 30 GiB RAM, Btrfs. The host was rebooted on September 27, 2026; the booted kernel is now **7.2.7-200.fc44.x86_64** (previously 7.2.6-200.fc44.x86_64). Only the kernel has been reconfirmed since the reboot — recheck the distribution build, free space, and inode capacity before large-fixture work. `/tmp` is a 16 GiB tmpfs and is unsuitable for the million-entry database/source workload. This computer is **not the calibrated N100 reference host**.
 
-Rootless Podman **5.8.7**, crun **1.28**, cgroup v2/systemd, netavark **1.17.2**, aardvark **1.17.1**, pasta; SELinux was **Enforcing**. Rootless container UID 0 maps to host UID 1000; subordinate IDs start at 524288. The selected external provider is Docker Compose **2.39.4**, SHA-256 `7af95166a730b87e172d4fc9aefea8725d3c6c7327d59149267b452114ddb7d4`. Native engine commands explicitly use `podman --remote=false`; provider API 1.44 versus Podman API 5.8.7 is recorded valid behavior. Revalidate current versions and the guarded policy before launches.
+Rootless Podman **5.8.7**, crun **1.28**, cgroup v2/systemd, netavark **1.17.2**, aardvark **1.17.1**, pasta; SELinux is **Enforcing**. Rootless container UID 0 maps to host UID 1000; subordinate IDs start at 524288. The selected external provider is Docker Compose **2.39.4**, SHA-256 `7af95166a730b87e172d4fc9aefea8725d3c6c7327d59149267b452114ddb7d4`. Native engine commands explicitly use `podman --remote=false`; provider API 1.44 versus Podman API 5.8.7 is recorded valid behavior. Revalidate current versions and the guarded policy before launches.
 
 Use the existing locked local toolchain, not the host's Python 3.14 / Node 22:
 
@@ -191,27 +102,29 @@ export VITEST_MAX_WORKERS=1
 
 Python is **3.13.15**, uv **0.12.8**, Node **24.20.0**, PostgreSQL **18**; use tracked `uv.lock` and npm lock. Do not upgrade dependencies incidentally. `VITEST_MAX_WORKERS=1` belongs to measured local verification; it does not erase earlier frontend timeout evidence.
 
-**`AEGIS_PODMAN_SOCKET` must point to a newly created, identity-recorded, private rootless Unix service before resource tests. No such service is running now.** Do not reuse the old socket path or owner record as a live connection. Create only a fresh 0700 owned directory and 0600 socket with restrictive umask, record process/directory/socket identities, use foreground `podman --remote=false system service --time=0 unix://…`, and stop it with identity checks at the next pause. Preserve the committed executable/socket/provider/image attestation and fresh four-profile behavior checks. Do not enable a persistent/rootful/TCP API or mount its socket into application containers.
+**`AEGIS_PODMAN_SOCKET` must point to a newly created, identity-recorded, private rootless Unix service before resource tests.** Do not reuse an old socket path or owner record as a live connection. Create only a fresh 0700 owned directory and 0600 socket with restrictive umask, record process/directory/socket identities, use foreground `podman --remote=false system service --time=0 unix://…`, and stop it with identity checks at the next pause. Preserve the committed executable/socket/provider/image attestation and fresh four-profile behavior checks. Do not enable a persistent/rootful/TCP API or mount its socket into application containers.
 
 Locked Playwright is **1.63.0**; synthetic Chromium **153.0.8010.12** checks passed locally. Host WebKit **26.6** lacked the required ICU/JPEG/libav libraries. A separately reviewed isolated Noble runtime passed a synthetic WebKit probe and was removed. Its ignored controller is `.superpowers/toolchain/browser-runtime.py`; inspect its ownership records and lifecycle before reuse. The validated `E2E_WEBKIT_WS_ENDPOINT` is loopback-only with a bounded port and 32-hex path, applies only to WebKit, and rejects `PW_TEST_CONNECT*` overrides. Chromium keeps its local sandbox. The trusted development-browser host-network exception is not application no-egress evidence. No real Podman application browser gate has passed.
 
-## Resource state at pause
+## Resource state
 
-The owned foreground API was interrupted through its recorded execution session **3046**; it exited 0. PID **372508** was then absent, and the exact command was absent. Its socket had already been removed by the service. Directory `/tmp/aegis-podman-api.20baw5r0` matched device 59 / inode 108838 / UID-GID 1000 / mode 0700, was empty and was removed. It is a historical identity, not a resource to recreate by name.
+A private rootless API service is running for this session: identity record `.superpowers/toolchain/podman-api-owner-x0e4r4i0.json`. Root will stop this service and verify its process/directory/socket identities at the next pause; do not reuse this identity as a live connection in a later session. Create a fresh, identity-recorded 0700 directory and 0600 socket before any resource test in a new session.
 
-The local owner record now says `stopped`. Cleanup evidence is `.superpowers/toolchain/podman-api-stop-20260924.json`. Native `podman --remote=false ps --format json` returned `[]`; reserved ports **18080** and **55432** had no listeners. Other host services were left untouched. Recheck before starting the `aegis-phase1-e2e` harness or any database/container test.
+Prior sessions' owned API services (sessions/records `3046`, `41151`, `89377`, and `7l5gxcb_`) are all stopped or ended by the host reboot; their identity records are archived under `.superpowers/toolchain/`. Native `podman --remote=false ps --format json` returned `[]` and reserved ports **18080** and **55432** had no listeners at last check.
 
-**Retained resources are not cleanup targets.** The first failed deployment run left 18 volumes and 23 test networks, plus an unrelated default network. Its later inventory, `.superpowers/toolchain/podman-deployment-first-run-retained.json`, is an observation, not a creation-time ownership ledger. Do not delete by name, label, prefix or a newly relaxed admission rule. Older refusal-test diagnostics, build caches and recorded images are retained. Unknown contents or changed identities must stop cleanup and preserve evidence. No broad container/volume/system prune or indiscriminate Compose teardown is authorized.
+**Retained resources are not cleanup targets.** The first failed deployment run left 18 volumes and 23 test networks, plus the unrelated default Podman network. Two separate leaks occurred during PostgreSQL correction work, each independently identified by exact creation time/label absence and removed by exact name, with the retained-volume count returning to 18 both times: the O4 root minimal-compose probe's own image `VOLUME` created two anonymous volumes, both removed; separately, the environment-probe fixture (missing a `/var/lib/postgresql` tmpfs) leaked one anonymous volume, which was also removed — R3 has since fixed that fixture. Do not delete by name, label, prefix, or a newly relaxed admission rule otherwise. Older refusal-test diagnostics, build caches, and recorded images are retained. Unknown contents or changed identities must stop cleanup and preserve evidence. No broad container/volume/system prune or indiscriminate Compose teardown is authorized.
 
-No user library, original-file tree, operator database, preview, production deployment, release tag or million-entry fixture was touched as part of this pause.
+No user library, original-file tree, operator database, preview, production deployment, release tag, or million-entry fixture was touched as part of this work.
 
 ## Verification and CI state
 
-Latest complete local `make verify` belongs to **`163c025`**, not the current candidate: 1,452 backend tests, 147 frontend tests across 13 files, locked installs, Ruff, mypy (225 sources), Django checks/migrations, frontend lint/types/build and whitespace checks passed. The backend took 747.16s; frontend took 28.06s with one worker. Log: `.superpowers/toolchain/make-verify-round5-20260924.log`. Disposable resources were removed.
+Latest complete local `make verify` still belongs to **`163c025`**, not the PostgreSQL-corrected candidate: 1,452 backend tests, 147 frontend tests across 13 files, locked installs, Ruff, mypy (225 sources), Django checks/migrations, frontend lint/types/build and whitespace checks passed. The backend took 747.16s; frontend took 28.06s with one worker. Log: `.superpowers/toolchain/make-verify-round5-20260924.log`. `make verify`, `make verify-compose`, and `make test-e2e` have not been rerun on the PostgreSQL-corrected source; run them, in that order, as part of the next full-gates slice.
 
-Latest inspected pushed CI is **`f618bae`**, [run 36038914373](https://github.com/troja-gnister/aegis/actions/runs/36038914373): **failed overall; backend/frontend passed, deployment/E2E failed**. No cause is established. Report: `.superpowers/toolchain/ci-read-f618bae-b07382f02e6e4c168a209f527039424a.json`. Earlier runs `36027572227` (`2857a31`) and `35989701646` (`db6e107`) had the same job outcomes; their evidence remains historical and separate. The new documentation-only pause commit may trigger another run; its status is not inferred here.
+The combined PostgreSQL selection at `1bb14e4` passed 318 tests with 0 skipped in 523 seconds under rootless Podman, with Ruff and mypy (228 sources) clean; full log `.superpowers/toolchain/podman-postgres-combined-20260927.log`. A resource-free run of `tests/deployment -m "not integration"` under Podman also reproduced pre-existing failures present on committed `6e27634` too: a stale Docker-only no-new-privileges assertion in `test_compose.py`'s core-services check, and four `test_rendered_mounts.py` mask/observer refusals; both remain open, along with failures in the still-unimplemented Caddy and indexer slices. None of these are PostgreSQL regressions.
 
-For `2857a31`, public step metadata locates deployment failure at step 7 after config/build passed, and E2E at step 8 after locked dependencies/browser installation passed. Anonymous log download returned 403; the HTML required sign-in. No GitHub credentials or cookies were read. A prior request for sanitized first errors/pytest summaries/cleanup output remains unanswered. Do not repeatedly retry the same unauthenticated log routes or attribute Docker CI failures to a Podman observation. Obtain authorized logs or reproduce the exact failure safely.
+Latest inspected pushed CI is still **`f618bae`**, [run 36038914373](https://github.com/troja-gnister/aegis/actions/runs/36038914373): **failed overall; backend/frontend passed, deployment/E2E failed**. No cause is established. Report: `.superpowers/toolchain/ci-read-f618bae-b07382f02e6e4c168a209f527039424a.json`. `1bb14e4` and the following documentation commit are pushed to `origin/main` (previously at `6e27634`); Docker CI for this push has not yet been inspected. Earlier runs `36027572227` (`2857a31`) and `35989701646` (`db6e107`) had the same job outcomes; their evidence remains historical and separate.
+
+For `2857a31`, public step metadata locates deployment failure at step 7 after config/build passed, and E2E at step 8 after locked dependencies/browser installation passed. Anonymous log download returned 403; the HTML required sign-in. No GitHub credentials or cookies were read. Do not repeatedly retry the same unauthenticated log routes or attribute Docker CI failures to a Podman observation. Obtain authorized logs or reproduce the exact failure safely.
 
 Read-only helper `.venv/bin/python .superpowers/toolchain/read-aegis-ci.py <full-sha>` retrieves public run metadata. `read-aegis-ci-steps.py` is fixed to the historical `2857a31` jobs, not a generic latest-run helper. Neither provides unavailable logs.
 
@@ -223,13 +136,12 @@ Useful retained local evidence:
 | `toolchain/podman-mask-mount-regressions-tz-20260924.log` | 25 passed / 1 stale assertion failed; includes 21 actual and four fake cases. |
 | `toolchain/podman-observer-cause-runtime-20260924.log` | Corrected affected actual nested-mount observer test: 1 passed in 37.35s. |
 | `toolchain/canonical-mask-merge-render-20260924.json` | Actual four-profile configuration rendering for committed merge fix. |
-| `toolchain/podman-postgres-parent-resource-free-20260924.log` | 153 helper/fixture tests; no live PostgreSQL acceptance. |
-| `toolchain/podman-postgres-live-r1-20260924.log` | First two actual failures before merge fix. |
-| `toolchain/podman-postgres-live-merge-20260924.log` | Two failures after merge fix, bootstrap cause unknown. |
-| `sdd/2026-09-14-phase-2a-indexed-browser/podman-postgres-diagnostic-green2.log` | 126 current fake/static diagnostic tests; D1 still blocks runtime. |
+| `toolchain/postgres-bootstrap-survey-f8c7d4148bd14c529a0c3a5f6bc07053.jsonl` | O2 survey: locates the `/` ancestor cause; measures rootless overlay root `0:0`/`555`; other 55 guards pass. |
+| `toolchain/podman-postgres-combined-20260927.log` | Combined PostgreSQL acceptance: 318 passed, 0 skipped, 523s; final containers empty, volumes 18. |
+| `toolchain/deployment-resource-free-names-20260927.log` | Resource-free `tests/deployment -m "not integration"` classification: pre-existing Caddy/indexer/NNP/rendered_mounts failures, none PostgreSQL regressions. |
 | `toolchain/caddy-runtime-f1aa7ca7b2684a09b44248b91a88c09d-l83511fx/evidence.jsonl` | Isolated four-profile Caddy runtime success and exact cleanup. |
 
-The passing Caddy diagnostic script is `toolchain/probe-caddy-runtime-r1-71da40e.py`, SHA-256 `1dc8079aaddfa8b56409d4b3f66ce379fe52dc7fc07f6431901b5b419f70e966`. It uses a coherent immutable helper bundle `toolchain/caddy-runtime-base-71da40e/manifest.json`, SHA-256 `6642c8a1caf5682f8b2e5eb295619780c0b88a1b85feb17fa92f33ff3017782a`. Do not mix stale helper snapshots or rerun earlier rejected probes unchanged. Full artifact/review history is in the working ledger.
+The passing Caddy diagnostic script is `toolchain/probe-caddy-runtime-r1-71da40e.py`, SHA-256 `1dc8079aaddfa8b56409d4b3f66ce379fe52dc7fc07f6431901b5b419f70e966`. It uses a coherent immutable helper bundle `toolchain/caddy-runtime-base-71da40e/manifest.json`, SHA-256 `6642c8a1caf5682f8b2e5eb295619780c0b88a1b85feb17fa92f33ff3017782a`. Do not mix stale helper snapshots or rerun earlier rejected probes unchanged. Full artifact/review history is in the working ledger (`progress.md`).
 
 ## Remaining product tasks and acceptance boundaries
 

@@ -156,6 +156,33 @@ The [repository-root handoff](../../HANDOFF.md) records the exact local state an
 
 Pushed checkpoint `f618bae3524befcffb2b907ff482be7ce0879330` failed [CI run 36038914373](https://github.com/troja-gnister/aegis/actions/runs/36038914373): backend and frontend passed; deployment and browser journeys failed. Detailed errors remain unavailable through the inspected anonymous routes, so no cause is assigned. The documentation-only pause checkpoint does not claim a new application gate or additional task acceptance.
 
+## PostgreSQL diagnosis and correction, September 27
+
+The pending diagnostic-quoting finding D1 (Compose serialization of the bootstrap diagnostic) is corrected and independently reviewed. The complete assembled bootstrap program is now encoded for Compose exactly once, protecting all expressions against host environment interpolation; the pre-start check compares both the rendered Compose form and the inspected literal entrypoint vector before start. A resource-free check using the actual selected provider's `config --format json` render was added.
+
+The corrected diagnostic then executed in a container. It located the original bootstrap `exit 1` at the helper's `/` ancestor check. A follow-on, independently reviewed survey measured rootless Podman's read-only overlay root as owned `0:0` with mode `555`; the other 55 validation guards (mount snapshot, all fourteen stats, alias, node/empty/tmpfs checks for all four targets, source layout, and all six sources) passed.
+
+Four independently reviewed corrections followed, each on the frozen candidate source:
+
+- **R2:** the production helper's `/` ancestor check now accepts mode `755` (Docker) or `555` (measured rootless Podman) for `/` only; `/var` and `/run` keep the existing exact `755` requirement.
+- **R4:** the canonical PostgreSQL socket tmpfs is now declared at `/run/postgresql` rather than the `/var/run` alias, because Podman's inspection drops a tmpfs declaration made under the `/var/run` alias once the container has started; this was measured directly.
+- **R5:** the live test's data tmpfs now sets Docker's default mode `1777` explicitly, because Podman applies Compose's `mode=0` literally instead of substituting a default.
+- **R3:** the direct role-init test wrapper applies the same `/` acceptance rule as R2. The environment-probe fixture gains a data tmpfs, an `@integration` marker, and the production `DAC_OVERRIDE` capability, matching the production bootstrap's capability set.
+
+The combined PostgreSQL selection passed **318 tests with 0 skipped in 523 seconds** under rootless Podman 5.8.7, crun 1.28, enforcing SELinux, and booted kernel `7.2.7-200.fc44`. It covers the provider render, the static exact-security assertion, the live bootstrap, staging, dropping to UID 70 with zero final capabilities, the diagnostic probes, reconciliation of an accepted base, invalid secrets, rotation, the complete role-init file, and the launch and tmpfs suites. Cleanup was exact: no containers remained after the run, and the count of previously retained volumes stayed at 18. Ruff passed; mypy passed on 228 sources.
+
+The ten PostgreSQL candidate files are committed as `1bb14e4` (`fix: prepare PostgreSQL private tmpfs for rootless Podman`); `1bb14e4` and the following documentation commit are pushed to `origin/main` (previously at `6e27634`).
+
+Still open:
+
+- A resource-free run of the deployment suite under Podman shows pre-existing failures that also reproduce on committed `6e27634`: a stale Docker-only no-new-privileges assertion for the core services in `tests/deployment/test_compose.py`, and four `test_rendered_mounts.py` mask and observer refusals. Failures also remain in the still-unimplemented Caddy and indexer slices. None of these are regressions from the PostgreSQL correction.
+- Docker CI for the pushed head (`1bb14e4` plus the following documentation commit) has not yet been inspected.
+- Full gates (`make verify`, `make verify-compose`, `make test-e2e`) have not run.
+- Full Podman application compatibility is not accepted.
+- Task counts stay **12 accepted, 6 remaining**; Task 13 has not started.
+
+A private rootless API service is running for this session; it will be stopped after an identity check at the next pause and must be recreated fresh in a later session. The host was rebooted on September 27, 2026; the booted kernel is now `7.2.7-200.fc44.x86_64`, revising the September 22–24 kernel observations above.
+
 ## Cleanup disposition
 
 The isolated browser container was stopped and removed only after checking its recorded full ID and owner label; container absence and listener disappearance were confirmed. Its uniquely owned image/build cache is retained and recorded locally. The focused PostgreSQL probe and full-gate outer database containers were removed. The isolated mount probes also completed exact cleanup, with empty container inventories confirmed. No original or large fixture was changed. Private diagnostic directories from refusal tests and the earlier CID cleanup failure are retained; names alone do not authorize their removal.
