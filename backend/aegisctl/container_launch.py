@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import collections
+import copy
 import json
 import os
 from collections.abc import Mapping, Sequence
@@ -35,6 +36,37 @@ CANONICAL_SERVICES = frozenset(
         "caddy-local",
     }
 )
+# The only admitted Podman service-field transformation beyond the mask option, for
+# Caddy alone: its two private tmpfs mounts replace Docker's uid/gid (rejected by Podman)
+# with U (owner from the fixed process user) and notmpcopyup (initially empty mounts),
+# and it gains exactly one sysctl, ip_unprivileged_port_start=0.
+CADDY_SERVICES = frozenset({"caddy", "caddy-local"})
+_CADDY_USER = "10001:10001"
+_CADDY_TMPFS_MODES = (("/config", "0700"), ("/tmp", "1777"))
+_TmpfsOptions = tuple[tuple[str, str | None], ...]
+
+
+def _caddy_tmpfs_contract(ownership: _TmpfsOptions) -> tuple[tuple[str, _TmpfsOptions], ...]:
+    return tuple(
+        (
+            target,
+            (
+                ("size", "16m"),
+                ("noexec", None),
+                ("nosuid", None),
+                ("nodev", None),
+                *ownership,
+                ("mode", mode),
+            ),
+        )
+        for target, mode in _CADDY_TMPFS_MODES
+    )
+
+
+_CADDY_CANONICAL_TMPFS = _caddy_tmpfs_contract((("uid", "10001"), ("gid", "10001")))
+_CADDY_PODMAN_TMPFS = _caddy_tmpfs_contract((("U", None), ("notmpcopyup", None)))
+# Docker's default per-netns value; rootless Podman needs it for capability-free :80/:443.
+_CADDY_PODMAN_SYSCTLS = {"net.ipv4.ip_unprivileged_port_start": "0"}
 _NATIVE_FLAGS = frozenset(
     {
         "--rm",
@@ -265,6 +297,66 @@ def _render(
     return value
 
 
+def _caddy_tmpfs(entries: object) -> tuple[tuple[str, _TmpfsOptions], ...]:
+    """Parse rendered short-syntax tmpfs strings exactly; no normalization is admitted."""
+    if not isinstance(entries, list):
+        raise PodmanMaskError("Caddy tmpfs declaration is not an exact list")
+    parsed: list[tuple[str, _TmpfsOptions]] = []
+    for entry in entries:
+        if not isinstance(entry, str):
+            raise PodmanMaskError("Caddy tmpfs declaration is not an exact list")
+        target, separator, raw = entry.partition(":")
+        if not separator or not target.startswith("/"):
+            raise PodmanMaskError("malformed Caddy tmpfs declaration")
+        options: list[tuple[str, str | None]] = []
+        for option in raw.split(","):
+            key, assigned, value = option.partition("=")
+            if not key or (assigned and not value) or key in {name for name, _ in options}:
+                raise PodmanMaskError("ambiguous or duplicate Caddy tmpfs option")
+            options.append((key, value if assigned else None))
+        parsed.append((target, tuple(options)))
+    return tuple(parsed)
+
+
+def _serialized_tmpfs(entries: tuple[tuple[str, _TmpfsOptions], ...]) -> list[str]:
+    return [
+        f"{target}:" + ",".join(key if value is None else f"{key}={value}" for key, value in items)
+        for target, items in entries
+    ]
+
+
+def _podman_ownership(options: _TmpfsOptions) -> _TmpfsOptions:
+    """Replace the validated uid/gid pair in place by U plus notmpcopyup."""
+    replaced: list[tuple[str, str | None]] = []
+    for key, value in options:
+        if key == "uid":
+            replaced.extend((("U", None), ("notmpcopyup", None)))
+        elif key != "gid":
+            replaced.append((key, value))
+    return tuple(replaced)
+
+
+def _expected_caddy_service(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    """Validate both Caddy contracts and build the only admitted effective service."""
+    if before.get("user") != _CADDY_USER:
+        raise PodmanMaskError("Caddy process identity differs from the canonical contract")
+    if "sysctls" in before:
+        raise PodmanMaskError("canonical Caddy declares sysctls before the Podman overlay")
+    if after.get("sysctls") != _CADDY_PODMAN_SYSCTLS:
+        raise PodmanMaskError("Podman Caddy sysctls differ from the admitted setting")
+    canonical = _caddy_tmpfs(before.get("tmpfs"))
+    if canonical != _CADDY_CANONICAL_TMPFS:
+        # Includes earlier-overlay drift that the final !override would otherwise erase.
+        raise PodmanMaskError("canonical Caddy tmpfs contract differs before the Podman overlay")
+    transformed = tuple((target, _podman_ownership(options)) for target, options in canonical)
+    if transformed != _CADDY_PODMAN_TMPFS or _caddy_tmpfs(after.get("tmpfs")) != transformed:
+        raise PodmanMaskError("Podman Caddy tmpfs differs from the admitted transformation")
+    expected = copy.deepcopy(before)
+    expected["tmpfs"] = _serialized_tmpfs(transformed)
+    expected["sysctls"] = dict(_CADDY_PODMAN_SYSCTLS)
+    return expected
+
+
 def _checked_compose_inputs(
     original: list[str],
     selected: list[str],
@@ -286,9 +378,10 @@ def _checked_compose_inputs(
             expected_options.append(MASK_OPTION)
         if collections.Counter(options) != collections.Counter(expected_options):
             raise PodmanMaskError("Podman overlay changed existing security options")
-        before_settings = {
-            key: value for key, value in before[name].items() if key != "security_opt"
-        }
+        expected = before[name]
+        if name in CADDY_SERVICES:
+            expected = _expected_caddy_service(before[name], service)
+        before_settings = {key: value for key, value in expected.items() if key != "security_opt"}
         after_settings = {key: value for key, value in service.items() if key != "security_opt"}
         if before_settings != after_settings:
             raise PodmanMaskError("Podman overlay changed existing service settings")

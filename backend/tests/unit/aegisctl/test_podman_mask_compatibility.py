@@ -682,11 +682,39 @@ def test_observer_gate_failure_precedes_original_bearing_compose(
     assert calls == [(original,)]
 
 
-def test_static_podman_overlay_has_exact_services_and_mask_only() -> None:
+CADDY_SERVICES = ("caddy", "caddy-local")
+CADDY_DOCKER_TMPFS = [
+    "/config:size=16m,noexec,nosuid,nodev,uid=10001,gid=10001,mode=0700",
+    "/tmp:size=16m,noexec,nosuid,nodev,uid=10001,gid=10001,mode=1777",
+]
+CADDY_PODMAN_TMPFS = [
+    "/config:size=16m,noexec,nosuid,nodev,U,notmpcopyup,mode=0700",
+    "/tmp:size=16m,noexec,nosuid,nodev,U,notmpcopyup,mode=1777",
+]
+# Docker sets this per network namespace by default; rootless Podman does not.
+CADDY_PODMAN_SYSCTLS = {"net.ipv4.ip_unprivileged_port_start": "0"}
+
+
+def load_podman_overlay() -> dict[str, Any]:
+    """Load the overlay, keeping Compose's explicit !override replacement visible."""
     import yaml
 
+    class OverlayLoader(yaml.SafeLoader):
+        pass
+
+    def override(loader: yaml.SafeLoader, node: yaml.Node) -> dict[str, Any]:
+        assert isinstance(node, yaml.SequenceNode)
+        return {"!override": loader.construct_sequence(node, deep=True)}
+
+    OverlayLoader.add_constructor("!override", override)
     path = Path(__file__).resolve().parents[4] / "compose.podman.yaml"
-    document = yaml.safe_load(path.read_text())
+    document = yaml.load(path.read_text(), Loader=OverlayLoader)
+    assert isinstance(document, dict)
+    return document
+
+
+def test_static_podman_overlay_has_exact_services_and_mask_only() -> None:
+    document = load_podman_overlay()
     assert set(document["services"]) == {
         "postgres",
         "migrate",
@@ -695,11 +723,23 @@ def test_static_podman_overlay_has_exact_services_and_mask_only() -> None:
         "indexer",
         "media",
         "gateway",
-        "caddy",
-        "caddy-local",
+        *CADDY_SERVICES,
     }
-    for service in document["services"].values():
-        assert service == {"security_opt": [f"unmask={POWERCAP}"]}
+    for name, service in document["services"].items():
+        if name not in CADDY_SERVICES:
+            assert service == {"security_opt": [f"unmask={POWERCAP}"]}
+
+
+def test_static_podman_overlay_replaces_only_caddy_private_tmpfs() -> None:
+    document = load_podman_overlay()
+    for name in CADDY_SERVICES:
+        # Mask-only security contribution (base NNP is merged, never repeated), the one
+        # explicit Caddy private-tmpfs replacement and the unprivileged-port sysctl.
+        assert document["services"][name] == {
+            "security_opt": [f"unmask={POWERCAP}"],
+            "tmpfs": {"!override": CADDY_PODMAN_TMPFS},
+            "sysctls": CADDY_PODMAN_SYSCTLS,
+        }
 
 
 @pytest.mark.parametrize(
@@ -781,15 +821,18 @@ def test_runtime_canonical_render_checks_effective_merge_before_gate(
     mask_engine: tuple[Any, MaskEngine],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import yaml
-
     _, fake = mask_engine
     launch = launch_module()
     base = Path(__file__).resolve().parents[4] / "compose.yaml"
-    overlay = yaml.safe_load(base.with_name("compose.podman.yaml").read_text())["services"]
-    services = {
+    overlay = load_podman_overlay()["services"]
+    services: dict[str, dict[str, Any]] = {
         "web": {"security_opt": ["no-new-privileges:true"], "profiles": []},
-        "caddy-local": {"security_opt": ["no-new-privileges:true"], "profiles": ["tls-local"]},
+        "caddy-local": {
+            "security_opt": ["no-new-privileges:true"],
+            "profiles": ["tls-local"],
+            "user": "10001:10001",
+            "tmpfs": list(CADDY_DOCKER_TMPFS),
+        },
     }
     renders: list[list[str]] = []
 
@@ -802,6 +845,10 @@ def test_runtime_canonical_render_checks_effective_merge_before_gate(
         if str(base.with_name("compose.podman.yaml")) in command:
             for name, service in merged.items():
                 service["security_opt"].extend(overlay[name]["security_opt"])
+                if "tmpfs" in overlay[name]:
+                    service["tmpfs"] = list(overlay[name]["tmpfs"]["!override"])
+                if "sysctls" in overlay[name]:
+                    service["sysctls"] = dict(overlay[name]["sysctls"])
         return subprocess.CompletedProcess(command, 0, json.dumps({"services": merged}), "")
 
     monkeypatch.setattr(launch, "_run", render)
@@ -849,6 +896,335 @@ def test_runtime_compose_refuses_effective_drift_before_gate(
             canonical_base=base,
         )
     assert not fake.created
+
+
+def canonical_caddy_service(profile: str, data: str, caddyfile: str) -> dict[str, Any]:
+    """Provider-shaped effective Caddy service before the Podman overlay."""
+    return {
+        "image": "aegis-caddy",
+        "build": {"context": "/repository", "dockerfile": "docker/caddy.Dockerfile"},
+        "profiles": [profile],
+        "command": ["caddy", "run"],
+        "user": "10001:10001",
+        "networks": {"edge": None, "tls-hop": None},
+        "ports": [{"mode": "ingress", "target": 8443, "published": "8443", "protocol": "tcp"}],
+        "volumes": [
+            {
+                "type": "bind",
+                "source": f"/repository/deploy/caddy/{caddyfile}",
+                "target": "/etc/caddy/Caddyfile",
+                "read_only": True,
+                "bind": {"create_host_path": True, "selinux": "z"},
+            },
+            {"type": "volume", "source": data, "target": "/data", "volume": {}},
+        ],
+        "read_only": True,
+        "tmpfs": list(CADDY_DOCKER_TMPFS),
+        "cap_drop": ["ALL"],
+        "security_opt": ["no-new-privileges:true"],
+        "restart": "unless-stopped",
+    }
+
+
+def canonical_caddy_services() -> dict[str, dict[str, Any]]:
+    return {
+        "web": {
+            "security_opt": ["no-new-privileges:true"],
+            "profiles": [],
+            "user": "10001:10001",
+            "read_only": True,
+        },
+        "caddy": canonical_caddy_service("tls", "caddy-data", "Caddyfile"),
+        "caddy-local": canonical_caddy_service("tls-local", "caddy-local-data", "Caddyfile.local"),
+    }
+
+
+def podman_caddy_merge(services: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Model the provider-proven effective merge of the exact overlay."""
+    merged = deepcopy(services)
+    for name, service in merged.items():
+        service["security_opt"] = [*service["security_opt"], f"unmask={POWERCAP}"]
+        if name in CADDY_SERVICES:
+            service["tmpfs"] = list(CADDY_PODMAN_TMPFS)
+            service["sysctls"] = dict(CADDY_PODMAN_SYSCTLS)
+    return merged
+
+
+def install_caddy_renders(
+    launch: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    base: Path,
+    *,
+    before: Any = None,
+    after: Any = None,
+) -> None:
+    def render(options: Any, environment: Any, directory: Any = None) -> dict[str, Any]:
+        del environment, directory
+        services = canonical_caddy_services()
+        if before is not None:
+            before(services)
+        if str(base.with_name("compose.podman.yaml")) in options:
+            services = podman_caddy_merge(services)
+            if after is not None:
+                after(services)
+        return {"services": services}
+
+    monkeypatch.setattr(launch, "_render", render)
+
+
+def caddy_up(launch: Any, base: Path) -> list[str]:
+    result: list[str] = launch.controlled_container_argv(
+        [
+            "podman", "--remote=false", "compose", "-f", str(base),
+            "--profile", "tls", "--profile", "tls-local", "up",
+        ],
+        canonical_base=base,
+    )
+    return result
+
+
+def test_canonical_caddy_private_tmpfs_transformation_is_admitted_exactly(
+    mask_engine: tuple[Any, MaskEngine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, fake = mask_engine
+    launch = launch_module()
+    base = Path(__file__).resolve().parents[4] / "compose.yaml"
+    boundaries: list[tuple[Path, ...]] = []
+    install_caddy_renders(launch, monkeypatch, base)
+
+    def check(*args: Any, originals: tuple[Path, ...]) -> tuple[str, ...]:
+        boundaries.append(originals)
+        return (f"unmask={POWERCAP}",)
+
+    monkeypatch.setattr(launch, "require_podman_mask_compatibility", check)
+    result = caddy_up(launch, base)
+    assert result[-3:] == ["-f", str(base.with_name("compose.podman.yaml")), "up"]
+    assert boundaries == [(
+        Path("/repository/deploy/caddy/Caddyfile"),
+        Path("/repository/deploy/caddy/Caddyfile.local"),
+    )]
+    assert not fake.created
+
+
+def _replace_tmpfs(name: str, index: int, old: str, new: str) -> Any:
+    def mutate(services: dict[str, dict[str, Any]]) -> None:
+        entry = services[name]["tmpfs"][index]
+        assert old in entry
+        services[name]["tmpfs"][index] = entry.replace(old, new, 1)
+
+    return mutate
+
+
+def _set(name: str, key: str, value: Any) -> Any:
+    def mutate(services: dict[str, dict[str, Any]]) -> None:
+        services[name][key] = deepcopy(value)
+
+    return mutate
+
+
+def _both(*mutations: Any) -> Any:
+    def mutate(services: dict[str, dict[str, Any]]) -> None:
+        for mutation in mutations:
+            mutation(services)
+
+    return mutate
+
+
+def _volume_option(services: dict[str, dict[str, Any]]) -> None:
+    services["caddy"]["volumes"][1]["volume"] = {"nocopy": True, "subpath": "U"}
+
+
+def _bind_relabel(services: dict[str, dict[str, Any]]) -> None:
+    services["caddy-local"]["volumes"][0]["bind"] = {"create_host_path": True, "selinux": "Z"}
+
+
+def _bind_relabel_dropped(services: dict[str, dict[str, Any]]) -> None:
+    services["caddy"]["volumes"][0]["bind"] = {"create_host_path": True}
+
+
+def _data_relabel(services: dict[str, dict[str, Any]]) -> None:
+    services["caddy"]["volumes"][1]["volume"] = {"selinux": "z"}
+
+
+def _earlier_third_tmpfs(services: dict[str, dict[str, Any]]) -> None:
+    services["caddy"]["tmpfs"].append("/run:size=1m,noexec,nosuid,nodev,uid=0,gid=0,mode=0700")
+
+
+def _web_borrows_caddy_transformation(services: dict[str, dict[str, Any]]) -> None:
+    services["web"]["tmpfs"] = list(CADDY_DOCKER_TMPFS)
+
+
+def _web_borrowed_after(services: dict[str, dict[str, Any]]) -> None:
+    services["web"]["tmpfs"] = list(CADDY_PODMAN_TMPFS)
+
+
+CADDY_AFTER_DRIFT = {
+    "changed-user": _set("caddy", "user", "10002:10002"),
+    "root-user": _set("caddy-local", "user", "0:0"),
+    "wrong-mode": _replace_tmpfs("caddy", 0, "mode=0700", "mode=0755"),
+    "wrong-sticky-mode": _replace_tmpfs("caddy-local", 1, "mode=1777", "mode=0777"),
+    "wrong-size": _replace_tmpfs("caddy", 1, "size=16m", "size=32m"),
+    "dropped-noexec": _replace_tmpfs("caddy", 0, ",noexec", ""),
+    "dropped-nosuid": _replace_tmpfs("caddy-local", 1, ",nosuid", ""),
+    "dropped-nodev": _replace_tmpfs("caddy", 1, ",nodev", ""),
+    "missing-notmpcopyup": _replace_tmpfs("caddy", 0, ",notmpcopyup", ""),
+    "duplicate-notmpcopyup": _replace_tmpfs("caddy", 0, ",notmpcopyup", ",notmpcopyup,notmpcopyup"),
+    "tmpcopyup": _replace_tmpfs("caddy-local", 0, ",notmpcopyup", ",tmpcopyup"),
+    "added-tmpcopyup": _replace_tmpfs("caddy", 1, ",notmpcopyup", ",notmpcopyup,tmpcopyup"),
+    "missing-U": _replace_tmpfs("caddy", 1, ",U,", ","),
+    "duplicate-U": _replace_tmpfs("caddy-local", 0, ",U,", ",U,U,"),
+    "leftover-uid": _replace_tmpfs("caddy", 0, ",U,", ",U,uid=10001,"),
+    "leftover-gid": _replace_tmpfs("caddy-local", 1, ",U,", ",U,gid=10001,"),
+    "unknown-option": _replace_tmpfs("caddy", 0, ",U,", ",U,nr_inodes=64,"),
+    "exec-option": _replace_tmpfs("caddy", 1, ",noexec", ",exec"),
+    "duplicate-key": _replace_tmpfs("caddy-local", 0, "size=16m,", "size=16m,size=16m,"),
+    "empty-option": _replace_tmpfs("caddy", 0, ",U,", ",U,,"),
+    "extra-target": lambda services: services["caddy"]["tmpfs"].append(
+        "/run:size=16m,noexec,nosuid,nodev,U,notmpcopyup,mode=0700"
+    ),
+    "data-tmpfs": lambda services: services["caddy"]["tmpfs"].append(
+        "/data:size=16m,noexec,nosuid,nodev,U,notmpcopyup,mode=0700"
+    ),
+    "duplicate-target": _set("caddy-local", "tmpfs", [CADDY_PODMAN_TMPFS[0]] * 2),
+    "missing-target": _set("caddy", "tmpfs", [CADDY_PODMAN_TMPFS[0]]),
+    "reordered-targets": _set("caddy", "tmpfs", list(reversed(CADDY_PODMAN_TMPFS))),
+    "untransformed": _set("caddy-local", "tmpfs", list(CADDY_DOCKER_TMPFS)),
+    "string-tmpfs": _set("caddy", "tmpfs", CADDY_PODMAN_TMPFS[0]),
+    "volume-option": _volume_option,
+    "bind-relabel": _bind_relabel,
+    "bind-relabel-dropped": _bind_relabel_dropped,
+    "data-relabel": _data_relabel,
+    "profile": _set("caddy", "profiles", ["tls", "tls-local"]),
+    "image": _set("caddy-local", "image", "aegis-backend"),
+    "network": _set("caddy", "networks", {"edge": None, "backend": None}),
+    "caps": _set("caddy", "cap_drop", []),
+    "read-only": _set("caddy-local", "read_only", False),
+    "port": _set("caddy", "ports", []),
+    "command": _set("caddy-local", "command", ["sh"]),
+    "nnp": _set("caddy", "security_opt", [f"unmask={POWERCAP}"]),
+    "privileged": _set("caddy", "privileged", True),
+    "web-borrows-transformation": _web_borrowed_after,
+    "sysctl-missing": lambda services: services["caddy-local"].pop("sysctls"),
+    "sysctl-other-value": _set(
+        "caddy", "sysctls", {"net.ipv4.ip_unprivileged_port_start": "1024"}
+    ),
+    "sysctl-numeric-value": _set(
+        "caddy-local", "sysctls", {"net.ipv4.ip_unprivileged_port_start": 0}
+    ),
+    "sysctl-other-key": _set(
+        "caddy", "sysctls", {**CADDY_PODMAN_SYSCTLS, "net.ipv4.ping_group_range": "0 0"}
+    ),
+    "sysctl-replaced-key": _set("caddy-local", "sysctls", {"net.ipv4.ping_group_range": "0 0"}),
+    "sysctl-other-service": _set("web", "sysctls", dict(CADDY_PODMAN_SYSCTLS)),
+}
+
+
+@pytest.mark.parametrize("drift", sorted(CADDY_AFTER_DRIFT))
+def test_canonical_caddy_transformation_refuses_effective_drift_before_gate(
+    mask_engine: tuple[Any, MaskEngine],
+    monkeypatch: pytest.MonkeyPatch,
+    drift: str,
+) -> None:
+    policy, fake = mask_engine
+    launch = launch_module()
+    base = Path(__file__).resolve().parents[4] / "compose.yaml"
+    install_caddy_renders(launch, monkeypatch, base, after=CADDY_AFTER_DRIFT[drift])
+    monkeypatch.setattr(
+        launch, "require_podman_mask_compatibility", lambda *a, **k: pytest.fail("gate reached")
+    )
+    with pytest.raises(policy.PodmanMaskError):
+        caddy_up(launch, base)
+    assert not fake.created
+
+
+CADDY_BEFORE_DRIFT = {
+    # An earlier overlay changed the canonical Caddy contract; the final !override must
+    # never silently erase that drift.
+    "earlier-third-tmpfs": _earlier_third_tmpfs,
+    "earlier-user": _set("caddy", "user", "0:0"),
+    "earlier-group": _set("caddy-local", "user", "10001:0"),
+    "earlier-mode": _replace_tmpfs("caddy", 0, "mode=0700", "mode=0777"),
+    "earlier-size": _replace_tmpfs("caddy-local", 1, "size=16m", "size=1g"),
+    "earlier-uid": _replace_tmpfs("caddy", 1, "uid=10001", "uid=0"),
+    "earlier-gid": _replace_tmpfs("caddy-local", 0, "gid=10001", "gid=0"),
+    "earlier-dropped-flag": _replace_tmpfs("caddy", 0, ",nosuid", ""),
+    "earlier-extra-option": _replace_tmpfs("caddy", 1, ",mode=", ",exec,mode="),
+    "earlier-duplicate-key": _replace_tmpfs("caddy-local", 1, "uid=10001", "uid=10001,uid=10001"),
+    "earlier-missing-target": _set("caddy", "tmpfs", [CADDY_DOCKER_TMPFS[1]]),
+    "earlier-tmpfs-removed": lambda services: services["caddy-local"].pop("tmpfs"),
+    # The final overlay would silently override an earlier sysctl value.
+    "earlier-sysctl": _set(
+        "caddy", "sysctls", {"net.ipv4.ip_unprivileged_port_start": "1024"}
+    ),
+    "web-borrows-before-contract": _both(
+        _web_borrows_caddy_transformation, _set("web", "user", "10001:10001")
+    ),
+}
+
+
+@pytest.mark.parametrize("drift", sorted(CADDY_BEFORE_DRIFT))
+def test_canonical_caddy_transformation_refuses_earlier_overlay_drift(
+    mask_engine: tuple[Any, MaskEngine],
+    monkeypatch: pytest.MonkeyPatch,
+    drift: str,
+) -> None:
+    policy, fake = mask_engine
+    launch = launch_module()
+    base = Path(__file__).resolve().parents[4] / "compose.yaml"
+
+    def replace_after(services: dict[str, dict[str, Any]]) -> None:
+        # The final overlay's !override yields the exact Podman list regardless of drift.
+        for name in CADDY_SERVICES:
+            if name in services:
+                services[name]["tmpfs"] = list(CADDY_PODMAN_TMPFS)
+        if drift == "web-borrows-before-contract":
+            services["web"]["tmpfs"] = list(CADDY_PODMAN_TMPFS)
+
+    install_caddy_renders(
+        launch, monkeypatch, base, before=CADDY_BEFORE_DRIFT[drift], after=replace_after
+    )
+    monkeypatch.setattr(
+        launch, "require_podman_mask_compatibility", lambda *a, **k: pytest.fail("gate reached")
+    )
+    with pytest.raises(policy.PodmanMaskError):
+        caddy_up(launch, base)
+    assert not fake.created
+
+
+def test_non_caddy_tmpfs_change_remains_whole_field_refusal(
+    mask_engine: tuple[Any, MaskEngine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy, fake = mask_engine
+    launch = launch_module()
+    base = Path(__file__).resolve().parents[4] / "compose.yaml"
+
+    def before(services: dict[str, dict[str, Any]]) -> None:
+        services["web"]["tmpfs"] = ["/tmp:size=16m,noexec,nosuid,nodev,mode=1777"]
+
+    def after(services: dict[str, dict[str, Any]]) -> None:
+        services["web"]["tmpfs"] = ["/tmp:size=16m,noexec,nosuid,nodev,U,notmpcopyup,mode=1777"]
+
+    install_caddy_renders(launch, monkeypatch, base, before=before, after=after)
+    with pytest.raises(policy.PodmanMaskError, match="changed existing service settings"):
+        caddy_up(launch, base)
+    assert not fake.created
+
+
+def test_docker_canonical_compose_is_unchanged_without_render(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launch = launch_module()
+    monkeypatch.setenv("AEGIS_CONTAINER_ENGINE", "docker")
+    monkeypatch.setattr(launch, "_render", lambda *a, **k: pytest.fail("Docker rendered"))
+    monkeypatch.setattr(
+        launch, "require_podman_mask_compatibility", lambda *a, **k: pytest.fail("Docker gated")
+    )
+    base = Path(__file__).resolve().parents[4] / "compose.yaml"
+    command = ["docker", "compose", "-f", str(base), "--profile", "tls-local", "up"]
+    assert launch.controlled_container_argv(command, canonical_base=base) == command
+    assert launch.canonical_compose_arguments(command[2:], base) == command[2:]
 
 
 def test_failed_create_cannot_adopt_or_delete_wrong_image(

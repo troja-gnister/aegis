@@ -245,7 +245,7 @@ services:
     ports:
       - "${AEGIS_HTTPS_PORT:-443}:8443"
     volumes:
-      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro,z
       - caddy-data:/data
     read_only: true
     tmpfs:
@@ -270,7 +270,7 @@ services:
     ports:
       - "${AEGIS_LOCAL_HTTPS_PORT:-8443}:8443"
     volumes:
-      - ./deploy/caddy/Caddyfile.local:/etc/caddy/Caddyfile:ro
+      - ./deploy/caddy/Caddyfile.local:/etc/caddy/Caddyfile:ro,z
       - caddy-local-data:/data
     read_only: true
     tmpfs:

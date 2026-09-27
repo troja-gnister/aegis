@@ -10,9 +10,11 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+import yaml
 from aegis_apps.common import runtime_checks
 from aegisctl.container_engine import compose_environment as validated_compose_environment
-from aegisctl.container_engine import container_command
+from aegisctl.container_engine import container_command, selected_engine
+from aegisctl.container_launch import _checked_compose_inputs, canonical_compose_arguments
 from aegisctl.container_resources import (
     ProjectInventory,
     ProjectResource,
@@ -22,6 +24,7 @@ from aegisctl.container_resources import (
     cleanup_project_inventory,
     require_empty_project,
 )
+from aegisctl.podman_mask_compatibility import MASK_OPTION
 from django.test import override_settings
 
 from tests.support.container_runtime import copy_bind_inputs
@@ -47,6 +50,28 @@ CADDY_IMAGE = (
     "sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648"
 )
 PUBLIC_TLS_HOST = "files.operator-domain.dev"
+CADDY_TMPFS_MODES = (("/config", "0700"), ("/tmp", "1777"))
+
+
+def expected_security_options() -> list[str]:
+    """Base NNP everywhere; Podman's explicit overlay contributes only the mask."""
+    return ["no-new-privileges:true", *([MASK_OPTION] if selected_engine() == "podman" else [])]
+
+
+def expected_caddy_sysctls() -> dict[str, str] | None:
+    """Podman-only: Docker already defaults the netns to unprivileged low ports."""
+    if selected_engine() == "podman":
+        return {"net.ipv4.ip_unprivileged_port_start": "0"}
+    return None
+
+
+def expected_caddy_tmpfs() -> list[str]:
+    """Docker keeps canonical uid/gid; Podman's overlay replaces them with U+notmpcopyup."""
+    ownership = "U,notmpcopyup" if selected_engine() == "podman" else "uid=10001,gid=10001"
+    return [
+        f"{target}:size=16m,noexec,nosuid,nodev,{ownership},mode={mode}"
+        for target, mode in CADDY_TMPFS_MODES
+    ]
 
 
 INVALID_TLS_RULES = (
@@ -480,8 +505,13 @@ def test_caddy_data_is_durable_and_runtime_identity_is_fixed() -> None:
     for service in (caddy, local):
         assert service["read_only"] is True
         assert service["cap_drop"] == ["ALL"]
-        assert service["security_opt"] == ["no-new-privileges:true"]
+        assert service["security_opt"] == expected_security_options()
         assert set(service["networks"]) == {"edge", "tls-hop"}
+        # /config and /tmp are volatile private tmpfs; only /data is durable.
+        assert service["tmpfs"] == expected_caddy_tmpfs()
+        assert {mount["target"] for mount in service["volumes"]} == {
+            "/etc/caddy/Caddyfile", "/data",
+        }
     assert {mount["target"]: mount["source"] for mount in caddy["volumes"]}["/data"] == (
         "caddy-data"
     )
@@ -672,7 +702,7 @@ def test_caddy_build_removes_unneeded_file_capability_without_weakening_policy()
         "dockerfile": "docker/caddy.Dockerfile",
     }
     assert caddy["cap_drop"] == ["ALL"]
-    assert caddy["security_opt"] == ["no-new-privileges:true"]
+    assert caddy["security_opt"] == expected_security_options()
     assert (
         "FROM docker.io/library/caddy:2.11.4-alpine@"
         "sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648"
@@ -683,6 +713,94 @@ def test_caddy_build_removes_unneeded_file_capability_without_weakening_policy()
         "COPY --chmod=0755 deploy/caddy/aegis-caddy-start "
         "/usr/local/bin/aegis-caddy-start"
     ) in dockerfile
+
+
+@pytest.mark.parametrize("profiles", [("tls",), ("tls-local",), ("tls", "tls-local")])
+def test_caddy_private_tmpfs_render_is_engine_specific_and_admitted(
+    profiles: tuple[str, ...],
+) -> None:
+    environment = dict(os.environ) | {
+        "AEGIS_RELEASE_ID": "test-release-identity",
+        "AEGIS_TLS_HOST": PUBLIC_TLS_HOST,
+    }
+    services = rendered_compose(*profiles, environment=environment)["services"]
+    selected = {name for name, profile in (("caddy", "tls"), ("caddy-local", "tls-local"))
+                if profile in profiles}
+    assert {"caddy", "caddy-local"} & set(services) == selected
+    assert {name for name, service in services.items() if "sysctls" in service} == (
+        selected if selected_engine() == "podman" else set()
+    )
+    for name in selected:
+        assert services[name].get("sysctls") == expected_caddy_sysctls()
+        assert services[name]["user"] == "10001:10001"
+        assert services[name]["tmpfs"] == expected_caddy_tmpfs()
+        assert services[name]["security_opt"] == expected_security_options()
+        # Only the read-only Caddyfile bind carries the shared SELinux relabel (z); no
+        # ownership option reaches it, and the durable named volume carries neither.
+        assert [
+            (mount["type"], mount.get("read_only"), mount.get("bind"), mount.get("volume"))
+            for mount in services[name]["volumes"]
+        ] == [
+            ("bind", True, {"create_host_path": True, "selinux": "z"}, None),
+            ("volume", None, None, {}),
+        ]
+    base = REPOSITORY / "compose.yaml"
+    options = [
+        *(argument for profile in profiles for argument in ("--profile", profile)),
+        "-f", str(base),
+    ]
+    arguments = canonical_compose_arguments(
+        options, base, environment, working_directory=REPOSITORY,
+    )
+    if selected_engine() == "docker":
+        assert arguments == options
+        return
+    assert arguments == [*options, "-f", str(REPOSITORY / "compose.podman.yaml")]
+    # Actual provider renders (config only): the effective comparator admits exactly the
+    # two Caddy tmpfs transformations and every other service/setting stays unchanged.
+    roots = _checked_compose_inputs(options, arguments, environment, REPOSITORY)
+    caddyfiles = {
+        REPOSITORY / "deploy" / "caddy" / file
+        for name, file in (("caddy", "Caddyfile"), ("caddy-local", "Caddyfile.local"))
+        if name in selected
+    }
+    assert caddyfiles <= set(roots)
+
+
+def test_only_the_two_caddyfile_binds_are_relabeled_shared_read_only() -> None:
+    declared = yaml.safe_load((REPOSITORY / "compose.yaml").read_text(encoding="utf-8"))
+    relabeled = set()
+    for name, service in declared["services"].items():
+        for entry in service.get("volumes", []):
+            assert isinstance(entry, str)
+            fields = entry.split(":")
+            options = set(fields[2].split(",")) if len(fields) == 3 else set()
+            assert not options & {"Z", "U"}
+            if "z" in options:
+                relabeled.add((name, entry))
+    assert relabeled == {
+        ("caddy", "./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro,z"),
+        ("caddy-local", "./deploy/caddy/Caddyfile.local:/etc/caddy/Caddyfile:ro,z"),
+    }
+
+    services = rendered_compose(
+        "tls", "tls-local", environment={"AEGIS_TLS_HOST": PUBLIC_TLS_HOST}
+    )["services"]
+    rendered = []
+    for name, service in sorted(services.items()):
+        for mount in service.get("volumes", []):
+            assert "selinux" not in mount.get("volume", {})
+            if "selinux" in mount.get("bind", {}):
+                rendered.append(
+                    (name, mount["source"], mount["target"], mount.get("read_only"),
+                     mount["bind"])
+                )
+    caddy = REPOSITORY / "deploy" / "caddy"
+    relabel = {"create_host_path": True, "selinux": "z"}
+    assert rendered == [
+        ("caddy", str(caddy / "Caddyfile"), "/etc/caddy/Caddyfile", True, relabel),
+        ("caddy-local", str(caddy / "Caddyfile.local"), "/etc/caddy/Caddyfile", True, relabel),
+    ]
 
 
 def test_only_core_gateway_joins_non_internal_edge_network_for_host_ingress() -> None:

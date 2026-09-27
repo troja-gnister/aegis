@@ -11,5 +11,24 @@ services:
   indexer: *podman-security
   media: *podman-security
   gateway: *podman-security
-  caddy: *podman-security
-  caddy-local: *podman-security
+  # Caddy's two private tmpfs mounts only: Podman rejects uid/gid tmpfs options, so U
+  # derives ownership from the fixed 10001:10001 process user and notmpcopyup keeps each
+  # mount initially empty. Docker already defaults each network namespace to
+  # ip_unprivileged_port_start=0 (so capability-free Caddy can bind :80/:443); rootless
+  # Podman does not, so only Caddy gets it here. The checked launcher admits exactly these.
+  caddy:
+    security_opt:
+      - unmask=/sys/devices/virtual/powercap
+    tmpfs: !override
+      - /config:size=16m,noexec,nosuid,nodev,U,notmpcopyup,mode=0700
+      - /tmp:size=16m,noexec,nosuid,nodev,U,notmpcopyup,mode=1777
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: "0"
+  caddy-local:
+    security_opt:
+      - unmask=/sys/devices/virtual/powercap
+    tmpfs: !override
+      - /config:size=16m,noexec,nosuid,nodev,U,notmpcopyup,mode=0700
+      - /tmp:size=16m,noexec,nosuid,nodev,U,notmpcopyup,mode=1777
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: "0"

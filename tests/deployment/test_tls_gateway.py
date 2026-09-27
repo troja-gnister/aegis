@@ -13,10 +13,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 import pytest
 import yaml
@@ -37,6 +37,8 @@ from aegisctl.container_resources import (
     require_empty_project,
     require_project_inventory,
 )
+from aegisctl.mounts import MountAttestationError, parse_mountinfo
+from aegisctl.podman_mask_compatibility import POWERCAP
 
 from tests.support.container_runtime import (
     OwnedDirectResource,
@@ -548,6 +550,305 @@ class CaddyRecreator(Protocol):
 def recreate_caddy(stack: CaddyRecreator) -> None:
     stack.remove_compose_service(CADDY_SERVICE)
     stack.compose(["up", "--detach", "--no-deps", CADDY_SERVICE])
+
+
+CADDY_PRIVATE_TMPFS = (("/config", "0700"), ("/tmp", "1777"))
+CADDY_STATUS_PROGRAM = (
+    "stat -c '%u:%g:%a:%n' /config /tmp && "
+    "grep -E '^(Uid|Gid|CapInh|CapPrm|CapEff|CapBnd|CapAmb|NoNewPrivs):' /proc/1/status && "
+    "printf 'ip_unprivileged_port_start:\\t%s\\n' "
+    "\"$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start)\""
+)
+ZERO_CAPABILITIES = "0000000000000000"
+# Inspect representation of `cap_drop: [ALL]`. Docker keeps ["ALL"]; rootless Podman 5.8.7
+# expands it to its default set, in this order (root-measured native create/inspect of the
+# pinned Caddy image, never started). The /proc zero-capability sets are the effective proof.
+PODMAN_CAP_DROP_ALL = (
+    "CAP_CHOWN", "CAP_DAC_OVERRIDE", "CAP_FOWNER", "CAP_FSETID", "CAP_KILL",
+    "CAP_NET_BIND_SERVICE", "CAP_SETFCAP", "CAP_SETGID", "CAP_SETPCAP", "CAP_SETUID",
+    "CAP_SYS_CHROOT",
+)
+
+
+def expected_inspected_cap_drop(engine: str) -> list[str]:
+    return list(PODMAN_CAP_DROP_ALL) if engine == "podman" else ["ALL"]
+
+
+def expected_caddy_runtime_tmpfs(engine: str) -> dict[str, str]:
+    """Exact poststart HostConfig.Tmpfs; never a tolerance for arbitrary option drift.
+
+    Docker records the canonical uid/gid declaration. For Podman 5.8.7 the reviewed
+    isolated Caddy runtime probe measured one lifecycle only: prestart inspection keeps U
+    plus the rprivate default with notmpcopyup consumed; after start U is replaced by the
+    process uid/gid. These assertions run only after start, so only that form is accepted.
+    """
+    ownership = "uid=10001,gid=10001"
+    suffix = ",rprivate" if engine == "podman" else ""
+    return {
+        target: f"size=16m,noexec,nosuid,nodev,{ownership},mode={mode}{suffix}"
+        for target, mode in CADDY_PRIVATE_TMPFS
+    }
+
+
+def validate_caddy_private_runtime(
+    engine: str, info: Mapping[str, Any], image_id: str, observed: str, mountinfo: bytes,
+) -> None:
+    """Validate a started Caddy container's identity and private tmpfs provenance."""
+    host = info["HostConfig"]
+    assert info["Image"] == image_id, "Caddy container is not the built pinned image"
+    assert info["Config"]["User"] == "10001:10001"
+    assert host["ReadonlyRootfs"] is True
+    assert host.get("Privileged", False) is False
+    assert host["CapDrop"] == expected_inspected_cap_drop(engine)
+    assert not host.get("CapAdd")
+    assert host["SecurityOpt"] == (
+        ["no-new-privileges"] if engine == "podman" else ["no-new-privileges:true"]
+    )
+    if engine == "podman":
+        assert ":container_t:" in info["ProcessLabel"]
+        assert ":container_file_t:" in info["MountLabel"]
+    assert host["Tmpfs"] == expected_caddy_runtime_tmpfs(engine)
+    private = {target for target, _ in CADDY_PRIVATE_TMPFS}
+    destinations = [mount["Destination"] for mount in info["Mounts"]]
+    assert not any(
+        destination == target or destination.startswith(f"{target}/")
+        for destination in destinations
+        for target in private
+    ), "a bind or named volume substitutes Caddy private tmpfs"
+    caddyfile = [
+        mount for mount in info["Mounts"] if mount["Destination"] == "/etc/caddy/Caddyfile"
+    ]
+    assert len(caddyfile) == 1 and caddyfile[0]["Type"] == "bind"
+    assert caddyfile[0]["RW"] is False
+    data = [mount for mount in info["Mounts"] if mount["Destination"] == "/data"]
+    assert len(data) == 1 and data[0]["Type"] == "volume"
+    assert data[0]["Name"].endswith(f"_{CADDY_SERVICE}-data")
+
+    lines = observed.splitlines()
+    assert lines[:2] == ["10001:10001:700:/config", "10001:10001:1777:/tmp"]
+    status = dict(line.split(":\t", 1) for line in lines[2:])
+    assert status == {
+        "Uid": "10001\t10001\t10001\t10001",
+        "Gid": "10001\t10001\t10001\t10001",
+        "CapInh": ZERO_CAPABILITIES,
+        "CapPrm": ZERO_CAPABILITIES,
+        "CapEff": ZERO_CAPABILITIES,
+        "CapBnd": ZERO_CAPABILITIES,
+        "CapAmb": ZERO_CAPABILITIES,
+        "NoNewPrivs": "1",
+        # Effective netns value lets 10001 bind :80/:443 with zero capabilities: Docker's
+        # default, and the Podman overlay's sysctl. HostConfig.Sysctls is not pinned.
+        "ip_unprivileged_port_start": "0",
+    }
+
+    records = parse_mountinfo(mountinfo)  # the unchanged strict parser
+    if engine == "podman":
+        assert POWERCAP in records, "the retained powercap mask is absent"
+    rows = [line.split(" ") for line in mountinfo.decode("ascii").splitlines()]
+    for target in sorted(private):
+        assert target in records, "Caddy private tmpfs is not a separate mount"
+        assert records[target].filesystem_identity[1] == "tmpfs"
+        assert records[target].effective_mode == "read_write"
+        (row,) = [fields for fields in rows if fields[4] == target]
+        superblock = row[row.index("-") + 3]
+        assert {"nosuid", "nodev", "noexec"} <= set(row[5].split(","))
+        # Ownership is asserted by in-container stat, never by raw superblock uid fields.
+        assert "size=16384k" in superblock.split(",")
+
+
+def assert_caddy_private_runtime(container: str) -> None:
+    info = json.loads(run_command([*CONTAINER_COMMAND, "inspect", container]).stdout)[0]
+    image = json.loads(
+        run_command([*CONTAINER_COMMAND, "image", "inspect", "aegis-caddy"]).stdout
+    )[0]
+    observed = run_command(
+        [*CONTAINER_COMMAND, "exec", container, "sh", "-c", CADDY_STATUS_PROGRAM]
+    ).stdout
+    mountinfo = run_command(
+        [*CONTAINER_COMMAND, "exec", container, "cat", "/proc/self/mountinfo"]
+    ).stdout.encode("ascii")
+    validate_caddy_private_runtime(
+        selected_engine(), info, image["Id"], observed, mountinfo,
+    )
+
+
+def _caddy_runtime_fixture(engine: str) -> tuple[dict[str, Any], str, bytes]:
+    info: dict[str, Any] = {
+        "Image": "caddy-image-id",
+        "Config": {"User": "10001:10001"},
+        "HostConfig": {
+            "ReadonlyRootfs": True,
+            "Privileged": False,
+            "CapDrop": expected_inspected_cap_drop(engine),
+            "CapAdd": [] if engine == "podman" else None,
+            "SecurityOpt": (
+                ["no-new-privileges"] if engine == "podman" else ["no-new-privileges:true"]
+            ),
+            "Tmpfs": expected_caddy_runtime_tmpfs(engine),
+        },
+        "ProcessLabel": "system_u:system_r:container_t:s0:c1,c2",
+        "MountLabel": "system_u:object_r:container_file_t:s0:c1,c2",
+        "Mounts": [
+            {"Type": "bind", "Destination": "/etc/caddy/Caddyfile", "RW": False},
+            {"Type": "volume", "Destination": "/data", "Name": f"p_{CADDY_SERVICE}-data"},
+        ],
+    }
+    observed = "\n".join([
+        "10001:10001:700:/config",
+        "10001:10001:1777:/tmp",
+        "Uid:\t10001\t10001\t10001\t10001",
+        "Gid:\t10001\t10001\t10001\t10001",
+        *(f"{name}:\t{ZERO_CAPABILITIES}"
+          for name in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb")),
+        "NoNewPrivs:\t1",
+        "ip_unprivileged_port_start:\t0",
+    ]) + "\n"
+    mountinfo = (
+        "1 0 0:1 / / ro,relatime - overlay overlay ro\n"
+        "2 1 0:2 / /config rw,nosuid,nodev,noexec,relatime - tmpfs tmpfs "
+        "rw,size=16384k,mode=700,uid=524288,gid=524288\n"
+        "3 1 0:3 / /tmp rw,nosuid,nodev,noexec,relatime - tmpfs tmpfs "
+        "rw,size=16384k,mode=1777,uid=524288,gid=524288\n"
+        "4 1 0:4 / /data rw,relatime - xfs /dev/vda rw\n"
+        f"5 1 0:5 /crun/.empty-directory {POWERCAP} ro,relatime - tmpfs tmpfs ro\n"
+    ).encode("ascii")
+    return info, observed, mountinfo
+
+
+@pytest.mark.parametrize("engine", ("docker", "podman"))
+def test_caddy_private_runtime_accepts_exact_poststart_contract(engine: str) -> None:
+    info, observed, mountinfo = _caddy_runtime_fixture(engine)
+    validate_caddy_private_runtime(engine, info, "caddy-image-id", observed, mountinfo)
+
+
+def _podman_prestart(info: dict[str, Any]) -> None:
+    info["HostConfig"]["Tmpfs"] = {
+        target: f"size=16m,noexec,nosuid,nodev,U,mode={mode},rprivate"
+        for target, mode in CADDY_PRIVATE_TMPFS
+    }
+
+
+def _tmpfs_option(old: str, new: str) -> Callable[[dict[str, Any]], None]:
+    def mutate(info: dict[str, Any]) -> None:
+        declared = info["HostConfig"]["Tmpfs"]["/config"]
+        assert old in declared
+        info["HostConfig"]["Tmpfs"]["/config"] = declared.replace(old, new, 1)
+
+    return mutate
+
+
+CADDY_RUNTIME_INSPECT_DRIFT: dict[str, Callable[[dict[str, Any]], None]] = {
+    "prestart-form-after-start": _podman_prestart,
+    "tmpcopyup": _tmpfs_option(",mode=", ",tmpcopyup,mode="),
+    "notmpcopyup-left": _tmpfs_option(",mode=", ",notmpcopyup,mode="),
+    "extra-option": _tmpfs_option(",mode=", ",nr_inodes=64,mode="),
+    "wrong-mode": _tmpfs_option("mode=0700", "mode=0755"),
+    "wrong-size": _tmpfs_option("size=16m", "size=32m"),
+    "dropped-flag": _tmpfs_option(",noexec", ""),
+    "extra-tmpfs": lambda info: info["HostConfig"]["Tmpfs"].update({"/run": "size=1m"}),
+    "config-bind": lambda info: info["Mounts"].append(
+        {"Type": "bind", "Destination": "/config"}
+    ),
+    "tmp-volume": lambda info: info["Mounts"].append(
+        {"Type": "volume", "Destination": "/tmp/caddy", "Name": "other"}
+    ),
+    "data-tmpfs": lambda info: info["Mounts"].__setitem__(1, {
+        "Type": "tmpfs", "Destination": "/data", "Name": "",
+    }),
+    "user": lambda info: info["Config"].__setitem__("User", "0:0"),
+    "image": lambda info: info.__setitem__("Image", "other-image"),
+    "writable-root": lambda info: info["HostConfig"].__setitem__("ReadonlyRootfs", False),
+    "capability": lambda info: info["HostConfig"].__setitem__("CapAdd", ["NET_BIND_SERVICE"]),
+    "security": lambda info: info["HostConfig"].__setitem__("SecurityOpt", []),
+    "writable-caddyfile": lambda info: info["Mounts"][0].__setitem__("RW", True),
+    "missing-caddyfile": lambda info: info["Mounts"].pop(0),
+}
+
+
+CADDY_CAP_DROP_DRIFT: dict[str, tuple[str, list[str]]] = {
+    "podman-missing": ("podman", list(PODMAN_CAP_DROP_ALL[:-1])),
+    "podman-extra": ("podman", [*PODMAN_CAP_DROP_ALL, "CAP_NET_RAW"]),
+    "podman-reordered": ("podman", sorted(PODMAN_CAP_DROP_ALL, reverse=True)),
+    "podman-duplicate": ("podman", [*PODMAN_CAP_DROP_ALL, "CAP_KILL"]),
+    "podman-docker-form": ("podman", ["ALL"]),
+    "docker-podman-form": ("docker", list(PODMAN_CAP_DROP_ALL)),
+    "docker-empty": ("docker", []),
+    "podman-empty": ("podman", []),
+}
+
+
+@pytest.mark.parametrize("drift", sorted(CADDY_CAP_DROP_DRIFT))
+def test_caddy_private_runtime_refuses_inspected_cap_drop_drift(drift: str) -> None:
+    engine, cap_drop = CADDY_CAP_DROP_DRIFT[drift]
+    info, observed, mountinfo = _caddy_runtime_fixture(engine)
+    info["HostConfig"]["CapDrop"] = cap_drop
+    with pytest.raises(AssertionError):
+        validate_caddy_private_runtime(engine, info, "caddy-image-id", observed, mountinfo)
+
+
+@pytest.mark.parametrize("engine", ("docker", "podman"))
+@pytest.mark.parametrize("drift", sorted(CADDY_RUNTIME_INSPECT_DRIFT))
+def test_caddy_private_runtime_refuses_inspection_drift(engine: str, drift: str) -> None:
+    info, observed, mountinfo = _caddy_runtime_fixture(engine)
+    CADDY_RUNTIME_INSPECT_DRIFT[drift](info)
+    with pytest.raises(AssertionError):
+        validate_caddy_private_runtime(engine, info, "caddy-image-id", observed, mountinfo)
+
+
+CADDY_RUNTIME_OBSERVED_DRIFT: dict[str, tuple[str, str]] = {
+    "config-owner": ("10001:10001:700:/config", "0:0:700:/config"),
+    "config-mode": ("10001:10001:700:/config", "10001:10001:755:/config"),
+    "tmp-mode": ("10001:10001:1777:/tmp", "10001:10001:777:/tmp"),
+    "process-uid": ("Uid:\t10001\t10001\t10001\t10001", "Uid:\t0\t0\t0\t0"),
+    "effective-capability": (f"CapEff:\t{ZERO_CAPABILITIES}", "CapEff:\t0000000000000400"),
+    "bounding-capability": (f"CapBnd:\t{ZERO_CAPABILITIES}", "CapBnd:\t0000000000000400"),
+    "nnp": ("NoNewPrivs:\t1", "NoNewPrivs:\t0"),
+    "privileged-ports": ("ip_unprivileged_port_start:\t0", "ip_unprivileged_port_start:\t1024"),
+}
+
+
+@pytest.mark.parametrize("drift", sorted(CADDY_RUNTIME_OBSERVED_DRIFT))
+def test_caddy_private_runtime_refuses_in_container_drift(drift: str) -> None:
+    info, observed, mountinfo = _caddy_runtime_fixture("podman")
+    old, new = CADDY_RUNTIME_OBSERVED_DRIFT[drift]
+    assert old in observed
+    with pytest.raises(AssertionError):
+        validate_caddy_private_runtime(
+            "podman", info, "caddy-image-id", observed.replace(old, new, 1), mountinfo,
+        )
+
+
+CADDY_RUNTIME_MOUNTINFO_DRIFT: dict[str, tuple[str, str]] = {
+    "not-tmpfs": ("/ /config rw,nosuid,nodev,noexec,relatime - tmpfs tmpfs",
+                  "/ /config rw,nosuid,nodev,noexec,relatime - xfs /dev/vda"),
+    "exec": ("/tmp rw,nosuid,nodev,noexec,", "/tmp rw,nosuid,nodev,"),
+    "read-only": ("/config rw,nosuid", "/config ro,nosuid"),
+    "size": ("rw,size=16384k,mode=1777", "rw,size=32768k,mode=1777"),
+    "missing-mask": (f"{POWERCAP} ro,relatime - tmpfs tmpfs ro\n", ""),
+    "duplicate-mask": (
+        f"{POWERCAP} ro,relatime - tmpfs tmpfs ro\n",
+        f"{POWERCAP} ro,relatime - tmpfs tmpfs ro\n"
+        f"6 5 0:5 /crun/.empty-directory {POWERCAP} ro,relatime - tmpfs tmpfs ro\n",
+    ),
+    "duplicate-config": (
+        "4 1 0:4 / /data",
+        "6 2 0:6 / /config rw,nosuid,nodev,noexec,relatime - tmpfs tmpfs rw,size=16384k\n"
+        "4 1 0:4 / /data",
+    ),
+}
+
+
+@pytest.mark.parametrize("drift", sorted(CADDY_RUNTIME_MOUNTINFO_DRIFT))
+def test_caddy_private_runtime_refuses_mountinfo_drift(drift: str) -> None:
+    info, observed, mountinfo = _caddy_runtime_fixture("podman")
+    old, new = CADDY_RUNTIME_MOUNTINFO_DRIFT[drift]
+    text = mountinfo.decode("ascii")
+    assert old in text
+    with pytest.raises((AssertionError, MountAttestationError)):
+        validate_caddy_private_runtime(
+            "podman", info, "caddy-image-id", observed,
+            text.replace(old, new, 1).encode("ascii"),
+        )
 
 
 def test_tls_compose_preserves_validated_selection_and_strips_remote_operator_env(
@@ -1515,8 +1816,8 @@ def test_caddy_starts_unprivileged_and_output_omits_canaries(tls_stack: TlsStack
     assert status == 200
     assert info["Config"]["User"] == "10001:10001"
     assert capabilities == ""
-    assert info["HostConfig"]["CapDrop"] == ["ALL"]
-    assert info["HostConfig"]["SecurityOpt"] == ["no-new-privileges:true"]
+    assert info["HostConfig"]["CapDrop"] == expected_inspected_cap_drop(selected_engine())
+    assert_caddy_private_runtime(caddy)
     assert run_command(
         [*CONTAINER_COMMAND, "exec", caddy, "test", "-f",
          "/data/caddy/pki/authorities/local/root.crt"],
@@ -1541,6 +1842,15 @@ def test_local_caddy_preserves_ca_and_certificate_across_recreation(
     before = run_command(
         [*CONTAINER_COMMAND, "exec", original, "sha256sum", *certificate_paths]
     ).stdout
+    # Tiny scratch write/read as 10001 inside each private tmpfs only; /config and /tmp
+    # are volatile, so a fresh container must not see these entries (or copied content).
+    sentinel = f"aegis-recreation-{uuid.uuid4().hex}"
+    sentinels = [f"/config/{sentinel}", f"/tmp/{sentinel}"]
+    written = run_command([
+        *CONTAINER_COMMAND, "exec", original, "sh", "-c",
+        'for path; do printf %s "${path##*/}" > "$path" && cat "$path" && echo; done',
+        "sh", *sentinels,
+    ]).stdout
 
     recreate_caddy(tls_stack)
     tls_stack.wait_until_ready()
@@ -1549,10 +1859,16 @@ def test_local_caddy_preserves_ca_and_certificate_across_recreation(
     after = run_command(
         [*CONTAINER_COMMAND, "exec", recreated, "sha256sum", *certificate_paths]
     ).stdout
+    retained = run_command(
+        [*CONTAINER_COMMAND, "exec", recreated, "ls", "-A", "/config", "/tmp"]
+    ).stdout
     status, _, body = tls_stack.request("/admin/login/", tls=True)
 
+    assert written == f"{sentinel}\n{sentinel}\n"
     assert recreated != original
     assert after == before
+    assert sentinel not in retained
+    assert_caddy_private_runtime(recreated)
     assert status == 200
     assert b"csrfmiddlewaretoken" in body
 
