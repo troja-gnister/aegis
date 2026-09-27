@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import subprocess
 import time
@@ -10,7 +11,12 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from aegisctl.container_engine import compose_environment, container_command
+from aegisctl.container_engine import (
+    compose_environment,
+    container_command,
+    podman_compose_provider,
+    selected_engine,
+)
 from aegisctl.container_resources import (
     ProjectInventory,
     ProjectResource,
@@ -21,6 +27,7 @@ from aegisctl.container_resources import (
     require_empty_project,
     require_project_inventory,
 )
+from aegisctl.podman_mask_compatibility import MASK_OPTION
 
 from tests.support.container_runtime import (
     FreshTestTree,
@@ -31,6 +38,11 @@ from tests.support.container_runtime import (
 )
 from tests.support.container_runtime import (
     run_deployment_process as run_container,
+)
+from tests.support.postgres_tmpfs import (
+    POSTGRES_PRIVATE_TMPFS,
+    assert_private_tmpfs_provenance,
+    source_metadata_snapshot,
 )
 
 REPOSITORY = Path(__file__).resolve().parents[2]
@@ -50,6 +62,58 @@ POSTGRES_BASE_IMAGE = (
     "docker.io/library/postgres:18.6-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2"
 )
 PROJECT_INVENTORIES: dict[str, ProjectInventory] = {}
+# Installed only in the test's overridden bootstrap entrypoint, after sourcing
+# the unchanged helper. It never surrounds staging or the normal entrypoint.
+POSTGRES_BOOTSTRAP_DIAGNOSTIC = r"""
+aegis_pg_refuse() {
+    local frame target_id=unavailable
+    printf '%s\n' 'database secret staging refused' >&2
+    case "${target-}" in
+        /|/var|/run|/var/run|/run/aegis-source-secrets|/run/secrets|/run/postgresql|/tmp|final|\
+        postgres_superuser_password|db_migrator_password|db_web_password|\
+        db_operations_password|db_indexer_password|db_media_password|\
+        /run/aegis-source-secrets/postgres_superuser_password|\
+        /run/aegis-source-secrets/db_migrator_password|/run/aegis-source-secrets/db_web_password|\
+        /run/aegis-source-secrets/db_operations_password|/run/aegis-source-secrets/db_indexer_password|\
+        /run/aegis-source-secrets/db_media_password) target_id=$target ;;
+    esac
+    printf 'bootstrap-refusal target=%.64s\n' "$target_id" >&2
+    for ((frame=1; frame<${#FUNCNAME[@]} && frame<=6; frame++)); do
+        printf 'bootstrap-refusal frame=%d function=%.64s line=%.10s\n' \
+            "$frame" "${FUNCNAME[frame]}" "${BASH_LINENO[frame-1]}" >&2
+    done
+    exit 1
+}
+aegis_pg_bootstrap_error() {
+    local status=$1
+    printf 'bootstrap-error line=%.10s status=%.3s\n' "$2" "$status" >&2
+    return "$status"
+}
+trap 'aegis_pg_bootstrap_error "$?" "$LINENO"' ERR
+"""
+# The complete overridden bootstrap program and its literal process arguments.
+POSTGRES_BOOTSTRAP_PROGRAM = (
+    "set -Eeuo pipefail; "
+    "source /usr/local/libexec/aegis-postgres-private-tmpfs.sh; "
+    + POSTGRES_BOOTSTRAP_DIAGNOSTIC
+    + "\naegis_prepare_postgres_tmpfs; "
+    "stat -c '%u:%g:%a:%n' /run/aegis-source-secrets /run/secrets "
+    "/run/postgresql /tmp"
+)
+POSTGRES_BOOTSTRAP_ENTRYPOINT = ("bash", "-c", POSTGRES_BOOTSTRAP_PROGRAM)
+
+
+def compose_encoded(arguments: tuple[str, ...]) -> list[str]:
+    """Encode every literal dollar exactly once, so Compose interpolates nothing."""
+    return [argument.replace("$", "$$") for argument in arguments]
+
+
+# Written to the override: Compose renders this form; the process receives the literal.
+POSTGRES_BOOTSTRAP_COMPOSE_ENTRYPOINT = compose_encoded(POSTGRES_BOOTSTRAP_ENTRYPOINT)
+
+
+def expected_security_options() -> list[str]:
+    return ["no-new-privileges:true", *([MASK_OPTION] if selected_engine() == "podman" else [])]
 
 
 def _boundary_up_rules(arguments: tuple[str, ...]) -> tuple[ProjectResourceRule, ...]:
@@ -109,7 +173,7 @@ def test_application_services_have_fail_closed_container_isolation() -> None:
         service = services[name]
         assert service["read_only"] is True
         assert service["cap_drop"] == ["ALL"]
-        assert service["security_opt"] == ["no-new-privileges:true"]
+        assert service["security_opt"] == expected_security_options()
         assert service["user"] not in ("", "0", "0:0", "root")
         assert service.get("privileged", False) is False
         assert "pid" not in service
@@ -246,7 +310,7 @@ def test_postgres_stages_fixed_source_secrets_into_uid_70_private_tmpfs() -> Non
     assert postgres["command"] == ["postgres"]
     assert postgres["user"] == "0:0"
     assert postgres["read_only"] is True
-    assert postgres["security_opt"] == ["no-new-privileges:true"]
+    assert postgres["security_opt"] == expected_security_options()
     assert postgres["environment"]["POSTGRES_PASSWORD_FILE"] == (
         "/run/secrets/postgres_superuser_password"
     )
@@ -259,20 +323,12 @@ def test_postgres_stages_fixed_source_secrets_into_uid_70_private_tmpfs() -> Non
     }
 
     tmpfs = set(postgres["tmpfs"])
-    assert any(
-        mount.startswith("/run/aegis-source-secrets:")
-        and "uid=0" in mount
-        and "gid=0" in mount
-        and "mode=0700" in mount
-        for mount in tmpfs
-    )
-    assert any(
-        mount.startswith("/run/secrets:")
-        and "uid=70" in mount
-        and "gid=70" in mount
-        and "mode=0700" in mount
-        for mount in tmpfs
-    )
+    assert tmpfs == {
+        "/run/aegis-source-secrets:size=64k,noexec,nosuid,nodev,mode=0700",
+        "/run/secrets:size=64k,noexec,nosuid,nodev,mode=0700",
+        "/run/postgresql:size=16m,noexec,nosuid,nodev,mode=0775",
+        "/tmp:size=16m,noexec,nosuid,nodev,mode=1777",
+    }
     for mount in tmpfs:
         assert "size=" in mount
         assert "noexec" in mount
@@ -308,6 +364,43 @@ def test_postgres_staging_wrapper_never_reads_secret_values_into_shell_state() -
         assert name.replace("-", "_") in source
 
 
+def test_selected_provider_renders_bootstrap_program_without_interpolation(
+    tmp_path: Path,
+) -> None:
+    """Resource-free: only the provider's config path; no engine, API, or socket."""
+    project = tmp_path / "compose.bootstrap-render.json"
+    project.write_text(json.dumps({"services": {"postgres": {
+        "image": "aegis-bootstrap-render-only:unused",
+        "entrypoint": POSTGRES_BOOTSTRAP_COMPOSE_ENTRYPOINT,
+        "command": [],
+    }}}), encoding="utf-8")
+    provider = (
+        [str(podman_compose_provider())] if selected_engine() == "podman"
+        else ["docker", "compose"]
+    )
+    # Explicit environment without DOCKER_HOST/CONTAINER_HOST: a host value for
+    # every Bash name in the program, none of which may reach the rendered model.
+    canaries = {
+        name: f"aegis-host-canary-{name}"
+        for name in ("target", "target_id", "frame", "status", "FUNCNAME", "BASH_LINENO", "LINENO")
+    }
+    rendered = run_container(
+        [
+            *provider, "--env-file", "/dev/null", "--project-directory", str(tmp_path),
+            "--project-name", "aegis-bootstrap-render", "-f", str(project),
+            "config", "--format", "json",
+        ],
+        check=False, capture_output=True, text=True, timeout=60,
+        env={"PATH": os.environ.get("PATH", os.defpath), **canaries},
+    )
+    assert rendered.returncode == 0, rendered.stderr
+    assert rendered.stderr == "", "Compose reported interpolation warnings or errors"
+    entrypoint = json.loads(rendered.stdout)["services"]["postgres"]["entrypoint"]
+    assert entrypoint == POSTGRES_BOOTSTRAP_COMPOSE_ENTRYPOINT
+    assert entrypoint != list(POSTGRES_BOOTSTRAP_ENTRYPOINT)
+    assert not any(value in rendered.stdout for value in canaries.values())
+
+
 def test_web_and_migrate_have_no_original_mount_and_every_root_consumer_is_read_only() -> None:
     services = rendered_compose()["services"]
 
@@ -340,7 +433,7 @@ def docker_compose(
             inventory, frozenset(kinds),
         )
         return subprocess.CompletedProcess(arguments, 0, "", "")
-    mutation = bool(arguments) and arguments[0] == "up"
+    mutation = bool(arguments) and arguments[0] in {"up", "create"}
     try:
         result = run_container(
             [
@@ -426,14 +519,16 @@ def protected_volume_created_at() -> str | None:
 
 def wait_for_postgres_health(
     project: str,
-    override: Path,
+    container_id: str,
     *,
     timeout: float = 90,
 ) -> str:
-    identity = docker_compose(project, override, "ps", "--quiet", "postgres")
-    assert identity.returncode == 0
-    container_id = identity.stdout.strip()
-    assert container_id
+    inventory = PROJECT_INVENTORIES[project]
+    require_project_inventory(inventory)
+    assert any(
+        resource.kind == "container" and resource.immutable_id == container_id
+        for resource in inventory.resources
+    ), "PostgreSQL health target was not recorded at creation"
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         health = run_container(
@@ -508,6 +603,126 @@ def run_database_probe(
     )
 
 
+def inspect_postgres_private_tmpfs(container_id: str) -> None:
+    inspected = run_container(
+        [*CONTAINER_COMMAND, "container", "inspect", container_id],
+        check=True, capture_output=True, text=True,
+    )
+    payload = json.loads(inspected.stdout)
+    assert isinstance(payload, list) and len(payload) == 1
+    assert_private_tmpfs_provenance(payload[0], POSTGRES_PRIVATE_TMPFS)
+
+
+def _postgres_image_identity(value: str) -> str:
+    identity = value.removeprefix("sha256:")
+    assert re.fullmatch(r"[0-9a-f]{64}", identity), "PostgreSQL image identity unavailable"
+    return identity
+
+
+def build_postgres_image(project: str, override: Path) -> str:
+    """Record the built image before any canonical preparation container exists."""
+    built = docker_compose(project, override, "build", "postgres")
+    assert built.returncode == 0, "disposable PostgreSQL image build failed"
+    inspected = run_container(
+        [*CONTAINER_COMMAND, "image", "inspect", "aegis-postgres"],
+        check=True, capture_output=True, text=True,
+    )
+    payload = json.loads(inspected.stdout)
+    assert isinstance(payload, list) and len(payload) == 1
+    return _postgres_image_identity(payload[0]["Id"])
+
+
+def start_postgres_with_private_tmpfs(
+    project: str, override: Path, image: str,
+    *, process_entrypoint: tuple[str, ...] | None = None,
+) -> str:
+    """Admit an unstarted exact container; prove private targets before root bootstrap.
+
+    Compose ps need not list created/stopped containers. Only the immutable
+    identity recorded by the bounded create transition can become a start target.
+    The same project inventory must survive start; it cannot admit new resources.
+    A literal process entrypoint (the bootstrap) must render as its once-encoded
+    Compose form and be inspected unchanged. Otherwise, the inspected entrypoint
+    must equal the rendered one.
+    """
+    rendered = docker_compose(project, override, "config", "--format", "json")
+    assert rendered.returncode == 0
+    config = json.loads(rendered.stdout)
+    service = config["services"]["postgres"]
+    assert service["image"] == "aegis-postgres"
+    assert service["user"] == "0:0" and service["read_only"] is True
+    assert not any(
+        resource.kind == "container" for resource in PROJECT_INVENTORIES[project].resources
+    ), "PostgreSQL creation requires the previous owned container to be removed"
+    expected_sources = {
+        f"/run/aegis-source-secrets/{name.replace('-', '_')}": config["secrets"][name]["file"]
+        for name in POSTGRES_SECRET_SOURCES
+    }
+    assert len(service["secrets"]) == len(expected_sources)
+    assert {
+        item["target"]: config["secrets"][item["source"]]["file"]
+        for item in service["secrets"]
+    } == expected_sources, "canonical PostgreSQL source configuration changed"
+
+    # The finally in docker_compose records permitted partial creates too. A
+    # failure never proceeds to start, but known owned resources remain cleanable.
+    created = docker_compose(
+        project, override, "create", "--no-build", "--pull", "never", "postgres",
+    )
+    assert created.returncode == 0, "disposable PostgreSQL creation failed"
+    inventory = PROJECT_INVENTORIES[project]
+    containers = [resource for resource in inventory.resources if resource.kind == "container"]
+    assert len(containers) == 1, "PostgreSQL creation identity is missing or ambiguous"
+    recorded = containers[0]
+    assert re.fullmatch(r"[0-9a-f]{64}", recorded.immutable_id)
+    require_project_inventory(inventory)
+    inspected = run_container(
+        [*CONTAINER_COMMAND, "container", "inspect", recorded.immutable_id],
+        check=True, capture_output=True, text=True,
+    )
+    payload = json.loads(inspected.stdout)
+    assert isinstance(payload, list) and len(payload) == 1 and isinstance(payload[0], dict)
+    info = payload[0]
+    fingerprint = {key: info.get(key) for key in ("Id", "Created", "Name", "Image")}
+    fingerprint["Labels"] = info.get("Config", {}).get("Labels") or {}
+    assert fingerprint == json.loads(recorded.fingerprint), "PostgreSQL creation identity changed"
+    assert all(fingerprint["Labels"].get(key) == value for key, value in {
+        "com.docker.compose.project": project,
+        "com.docker.compose.service": "postgres",
+        "com.docker.compose.oneoff": "False",
+    }.items()), "PostgreSQL creation ownership changed"
+    assert _postgres_image_identity(info["Image"]) == _postgres_image_identity(image), (
+        "PostgreSQL image changed after build"
+    )
+    actual = info["Config"]
+    assert actual.get("User") == service["user"], "PostgreSQL bootstrap user changed"
+    if process_entrypoint is None:
+        assert actual.get("Entrypoint") == service["entrypoint"], "PostgreSQL entrypoint changed"
+    else:
+        assert service["entrypoint"] == compose_encoded(process_entrypoint), (
+            "PostgreSQL Compose entrypoint changed"
+        )
+        assert actual.get("Entrypoint") == list(process_entrypoint), "PostgreSQL entrypoint changed"
+    assert (actual.get("Cmd") or []) == (service["command"] or []), "PostgreSQL command changed"
+    assert info["HostConfig"].get("ReadonlyRootfs") is True
+    assert info["HostConfig"].get("Privileged") is False
+    assert_private_tmpfs_provenance(info, POSTGRES_PRIVATE_TMPFS)
+    assert {
+        mount["Destination"]: mount.get("Source")
+        for mount in info["Mounts"] if mount["Destination"] in expected_sources
+    } == expected_sources, "PostgreSQL source mount was substituted"
+    require_project_inventory(inventory)
+    try:
+        started = run_container(
+            [*CONTAINER_COMMAND, "start", recorded.immutable_id],
+            check=True, capture_output=True, text=True, timeout=60,
+        )
+        assert started.returncode == 0
+    finally:
+        require_project_inventory(inventory)
+    return recorded.immutable_id
+
+
 @pytest.mark.integration
 def test_live_postgres_stages_secrets_and_drops_to_uid_70(tmp_path: Path) -> None:
     tree = record_fresh_test_tree(tmp_path)
@@ -541,7 +756,9 @@ def test_live_postgres_stages_secrets_and_drops_to_uid_70(tmp_path: Path) -> Non
                             {
                                 "type": "tmpfs",
                                 "target": "/var/lib/postgresql",
-                                "tmpfs": {"size": 268_435_456},
+                                # Explicit mode: Podman applies Compose's default mode=0
+                                # literally, unlike Docker's documented 1777 default.
+                                "tmpfs": {"size": 268_435_456, "mode": 0o1777},
                             }
                         ],
                     }
@@ -552,7 +769,17 @@ def test_live_postgres_stages_secrets_and_drops_to_uid_70(tmp_path: Path) -> Non
         encoding="utf-8",
     )
     record_created_test_path(tree, override)
+    bootstrap_override = tmp_path / "compose.bootstrap.json"
+    bootstrap_config = json.loads(override.read_text(encoding="utf-8"))
+    bootstrap_config["services"]["postgres"].update({
+        "entrypoint": POSTGRES_BOOTSTRAP_COMPOSE_ENTRYPOINT,
+        "command": [], "restart": "no", "healthcheck": {"disable": True},
+    })
+    bootstrap_override.write_text(json.dumps(bootstrap_config), encoding="utf-8")
+    record_created_test_path(tree, bootstrap_override)
     prepare_owned_test_inventory(record_test_tree_inventory(tree))
+    inputs = [Path(path) for path in secret_files.values()]
+    source_snapshot = source_metadata_snapshot(inputs)
 
     container_id = ""
     try:
@@ -566,35 +793,48 @@ def test_live_postgres_stages_secrets_and_drops_to_uid_70(tmp_path: Path) -> Non
         )
         assert data_mount["type"] == "tmpfs"
         assert data_mount.get("source") != "postgres-data"
+        # Compose renders tmpfs mode as an integer (verified via the actual
+        # provider's `config --format json` on a scratch project: mode=0o1777
+        # comes back as 1023, not an octal string). The real provider renders
+        # size as a string while the fake double preserves the Python int
+        # given in the override, so compare it numerically.
+        assert data_mount["tmpfs"]["mode"] == 0o1777
+        assert int(data_mount["tmpfs"]["size"]) == 268_435_456
 
-        started = docker_compose(project, override, "up", "--detach", "--build", "postgres")
-        assert started.returncode == 0
-        identity = docker_compose(project, override, "ps", "--quiet", "postgres")
-        assert identity.returncode == 0
-        container_id = identity.stdout.strip()
-        assert container_id
+        # Same canonical mounts/image, with an owned diagnostic command that
+        # stops before staging or the official entrypoint. This measures the
+        # bootstrap 0775 socket mode separately from the live upstream 03775.
+        image = build_postgres_image(project, override)
+        bootstrap_id = start_postgres_with_private_tmpfs(
+            project, bootstrap_override, image, process_entrypoint=POSTGRES_BOOTSTRAP_ENTRYPOINT,
+        )
+        waited = run_container(
+            [*CONTAINER_COMMAND, "wait", bootstrap_id],
+            check=True, capture_output=True, text=True, timeout=30,
+        )
+        # Capture the metadata-only diagnostic before any exit assertion and
+        # before the outer finally removes this exact owned bootstrap container.
+        bootstrap_metadata = run_container(
+            [*CONTAINER_COMMAND, "logs", "--tail", "32", bootstrap_id],
+            check=False, capture_output=True, text=True, timeout=30,
+        )
+        diagnostic = bootstrap_metadata.stdout + bootstrap_metadata.stderr
+        if len(diagnostic.encode("utf-8")) > 8192:
+            # An assertion expression would let pytest expand the rejected log.
+            raise AssertionError("bootstrap diagnostic logs exceeded 8192 bytes")
+        assert bootstrap_metadata.returncode == 0, "bootstrap diagnostic log collection failed"
+        assert waited.stdout.strip() == "0", f"PostgreSQL bootstrap failed:\n{diagnostic}"
+        inspect_postgres_private_tmpfs(bootstrap_id)
+        assert bootstrap_metadata.stdout.splitlines() == [
+            "0:0:700:/run/aegis-source-secrets", "70:70:700:/run/secrets",
+            "70:70:775:/run/postgresql", "70:70:1777:/tmp",
+        ]
+        stopped_probe = docker_compose(project, bootstrap_override, "down", "--remove-orphans")
+        assert stopped_probe.returncode == 0
+        assert source_metadata_snapshot(inputs) == source_snapshot
 
-        deadline = time.monotonic() + 90
-        while time.monotonic() < deadline:
-            health = run_container(
-                [
-                    *CONTAINER_COMMAND,
-                    "inspect",
-                    container_id,
-                    "--format",
-                    "{{if .State.Health}}{{.State.Health.Status}}{{end}}",
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            if health.stdout.strip() == "healthy":
-                break
-            if health.stdout.strip() == "unhealthy":
-                pytest.fail("disposable PostgreSQL became unhealthy", pytrace=False)
-            time.sleep(0.25)
-        else:
-            pytest.fail("disposable PostgreSQL did not become healthy", pytrace=False)
+        container_id = start_postgres_with_private_tmpfs(project, override, image)
+        wait_for_postgres_health(project, container_id)
 
         mounts = run_container(
             [*CONTAINER_COMMAND, "inspect", container_id, "--format", "{{json .Mounts}}"],
@@ -606,6 +846,16 @@ def test_live_postgres_stages_secrets_and_drops_to_uid_70(tmp_path: Path) -> Non
             mount.get("Name") != "aegis_postgres-data" for mount in json.loads(mounts.stdout)
         )
         assert all(mount.get("Type") != "volume" for mount in json.loads(mounts.stdout))
+        inspect_postgres_private_tmpfs(container_id)
+        directory_metadata = run_container(
+            [*CONTAINER_COMMAND, "exec", container_id, "stat", "-c", "%u:%g:%a:%n",
+             "/run/aegis-source-secrets", "/run/secrets", "/run/postgresql", "/tmp"],
+            check=True, capture_output=True, text=True,
+        )
+        assert directory_metadata.stdout.splitlines() == [
+            "0:0:700:/run/aegis-source-secrets", "70:70:700:/run/secrets",
+            "70:70:3775:/run/postgresql", "70:70:1777:/tmp",
+        ]
 
         process_status = run_container(
             [
@@ -738,6 +988,7 @@ def test_live_postgres_stages_secrets_and_drops_to_uid_70(tmp_path: Path) -> Non
             timeout=60,
         )
         assert stopped.returncode == 0
+        assert source_metadata_snapshot(inputs) == source_snapshot
         if container_id:
             assert (
                 run_container(
@@ -798,18 +1049,14 @@ def test_postgres_reconciles_populated_accepted_base_and_rotated_secrets(
     record_created_test_path(tree, override)
     prepare_owned_test_inventory(record_test_tree_inventory(tree))
     all_sensitive_values = tuple(initial_values.values()) + tuple(rotated_values.values())
+    inputs = list(secret_files.values())
+    source_snapshot = source_metadata_snapshot(inputs)
     container_ids: list[str] = []
     try:
-        first_start = docker_compose(
-            project,
-            override,
-            "up",
-            "--detach",
-            "--build",
-            "postgres",
-        )
-        assert first_start.returncode == 0
-        container_ids.append(wait_for_postgres_health(project, override))
+        image = build_postgres_image(project, override)
+        container_ids.append(start_postgres_with_private_tmpfs(project, override, image))
+        wait_for_postgres_health(project, container_ids[-1])
+        inspect_postgres_private_tmpfs(container_ids[-1])
 
         accepted_base_state = docker_compose(
             project,
@@ -849,43 +1096,38 @@ def test_postgres_reconciles_populated_accepted_base_and_rotated_secrets(
 
         stopped = docker_compose(project, override, "down", "--remove-orphans")
         assert stopped.returncode == 0
+        assert source_metadata_snapshot(inputs) == source_snapshot
 
         for name, value in rotated_values.items():
             secret_files[name].write_text(value + "\n", encoding="utf-8")
             secret_files[name].chmod(0o600)
         secret_files["db-web-password"].write_text("", encoding="utf-8")
+        source_snapshot = source_metadata_snapshot(inputs)
 
-        invalid_start = docker_compose(project, override, "up", "--detach", "postgres")
-        assert invalid_start.returncode == 0
+        invalid_container_id = start_postgres_with_private_tmpfs(project, override, image)
+        container_ids.append(invalid_container_id)
         time.sleep(1)
-        invalid_identity = docker_compose(project, override, "ps", "--quiet", "postgres")
-        invalid_container_id = invalid_identity.stdout.strip()
-        if invalid_container_id:
-            container_ids.append(invalid_container_id)
-            invalid_logs = run_container(
-                [*CONTAINER_COMMAND, "logs", invalid_container_id],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            assert "database secret staging refused" in (
-                invalid_logs.stdout + invalid_logs.stderr
-            )
-            assert not any(
-                value in invalid_logs.stdout + invalid_logs.stderr
-                for value in all_sensitive_values
-            )
+        invalid_logs = run_container(
+            [*CONTAINER_COMMAND, "logs", invalid_container_id],
+            check=True, capture_output=True, text=True,
+        )
+        assert "database secret staging refused" in (invalid_logs.stdout + invalid_logs.stderr)
+        assert not any(
+            value in invalid_logs.stdout + invalid_logs.stderr for value in all_sensitive_values
+        )
         stopped = docker_compose(project, override, "down", "--remove-orphans")
         assert stopped.returncode == 0
+        assert source_metadata_snapshot(inputs) == source_snapshot
 
         secret_files["db-web-password"].write_text(
             rotated_values["db-web-password"] + "\n",
             encoding="utf-8",
         )
         secret_files["db-web-password"].chmod(0o600)
-        restarted = docker_compose(project, override, "up", "--detach", "postgres")
-        assert restarted.returncode == 0
-        container_ids.append(wait_for_postgres_health(project, override))
+        source_snapshot = source_metadata_snapshot(inputs)
+        container_ids.append(start_postgres_with_private_tmpfs(project, override, image))
+        wait_for_postgres_health(project, container_ids[-1])
+        inspect_postgres_private_tmpfs(container_ids[-1])
 
         roles = ("migrator", "web", "operations", "indexer", "media")
         for role in roles:
@@ -951,4 +1193,5 @@ def test_postgres_reconciles_populated_accepted_base_and_rotated_secrets(
         docker_compose(
             project, override, "down", "--remove-orphans", "--volumes", timeout=60,
         )
+        assert source_metadata_snapshot(inputs) == source_snapshot
         assert protected_volume_created_at() == protected_created_at

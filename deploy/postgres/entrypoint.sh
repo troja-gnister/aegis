@@ -99,18 +99,8 @@ fi
 if [[ "$(id -u)" != '0' || "$(id -g)" != '0' ]]; then
     fail_closed
 fi
-if [[ -L "$readonly_source_dir" || ! -d "$readonly_source_dir" ]]; then
-    fail_closed
-fi
-if [[ -L "$staged_secret_dir" || ! -d "$staged_secret_dir" ]]; then
-    fail_closed
-fi
-if [[ "$(stat -c '%u:%g:%a' "$readonly_source_dir")" != '0:0:700' ]]; then
-    fail_closed
-fi
-if [[ "$(stat -c '%u:%g:%a' "$staged_secret_dir")" != '70:70:700' ]]; then
-    fail_closed
-fi
+source /usr/local/libexec/aegis-postgres-private-tmpfs.sh
+aegis_prepare_postgres_tmpfs
 
 umask 077
 for secret_name in \

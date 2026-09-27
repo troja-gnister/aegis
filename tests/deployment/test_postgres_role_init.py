@@ -31,10 +31,20 @@ from tests.support.container_runtime import (
     run_deployment_process as run_container,
 )
 from tests.support.fake_container_engine import select_fake_engine
+from tests.support.postgres_tmpfs import (
+    assert_private_tmpfs_provenance,
+    source_metadata_snapshot,
+)
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 CONTAINER_COMMAND = container_command()
 SCRIPT = REPOSITORY / "deploy" / "postgres" / "init" / "001-roles.sh"
+TMPFS_VALIDATOR = REPOSITORY / "deploy/postgres/private-tmpfs.sh"
+TMPFS_FIXTURE = REPOSITORY / "tests/support/postgres-role-init-tmpfs.sh"
+PREPARE_ROLE_TMPFS = (
+    "source /aegis-init/private-tmpfs.sh; "
+    "source /aegis-init/role-init-tmpfs.sh; aegis_prepare_role_init_tmpfs; "
+)
 DATABASE_NAME = "aegis_role_init_test"
 POSTGRES_IMAGE = (
     "docker.io/library/postgres:18.6-alpine@"
@@ -270,6 +280,11 @@ def _create_role_init_resource(
     if result is None or result.returncode:
         raise AssertionError("disposable PostgreSQL create failed after identity recovery")
     _assert_values_absent(result, sensitive_values)
+    inspection = _docker("container", "inspect", resource.immutable_id)
+    _require_success(inspection, "inspect private role-init tmpfs before start")
+    payload = json.loads(inspection.stdout)
+    assert isinstance(payload, list) and len(payload) == 1
+    assert_private_tmpfs_provenance(payload[0], {"/run/secrets": (65_536, 0o700)})
     started = _docker("start", resource.immutable_id)
     _require_success(started, "start disposable PostgreSQL")
     return resource
@@ -364,10 +379,12 @@ def role_init_database(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Rol
     bootstrap_file.write_text(bootstrap_password, encoding="utf-8")
     bootstrap_file.chmod(0o600)
     record_created_test_path(tree, bootstrap_file)
-    script_copy = copy_bind_inputs(
-        scratch, {"001-roles.sh": SCRIPT}, parent_tree=tree,
-    )["001-roles.sh"]
+    scripts = copy_bind_inputs(scratch, {
+        "001-roles.sh": SCRIPT, "private-tmpfs.sh": TMPFS_VALIDATOR,
+        "role-init-tmpfs.sh": TMPFS_FIXTURE,
+    }, parent_tree=tree)
     prepare_owned_test_inventory(record_test_tree_inventory(tree))
+    source_snapshot = source_metadata_snapshot([bootstrap_file, *scripts.values()])
     try:
         resource = _create_role_init_resource(
             container_name,
@@ -377,7 +394,7 @@ def role_init_database(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Rol
             "--tmpfs",
             "/var/lib/postgresql:rw,nosuid,nodev,size=256m",
             "--tmpfs",
-            "/run/secrets:rw,noexec,nosuid,nodev,uid=70,gid=70,mode=0700",
+            "/run/secrets:rw,noexec,nosuid,nodev,size=64k,mode=0700",
             "--publish",
             "127.0.0.1::5432",
             "--env",
@@ -391,8 +408,16 @@ def role_init_database(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Rol
             "--mount",
             f"type=bind,src={bootstrap_file},dst=/bootstrap/postgres-password,readonly",
             "--mount",
-            f"type=bind,src={script_copy},dst=/aegis-init/001-roles.sh,readonly",
+            f"type=bind,src={scripts['001-roles.sh']},dst=/aegis-init/001-roles.sh,readonly",
+            "--mount",
+            f"type=bind,src={scripts['private-tmpfs.sh']},dst=/aegis-init/private-tmpfs.sh,readonly",
+            "--mount",
+            f"type=bind,src={scripts['role-init-tmpfs.sh']},dst=/aegis-init/role-init-tmpfs.sh,readonly",
+            "--entrypoint", "bash",
             POSTGRES_IMAGE,
+            "-c", "set -Eeuo pipefail; " + PREPARE_ROLE_TMPFS
+            + 'exec /usr/local/bin/docker-entrypoint.sh "$@"',
+            "aegis-role-init-fixture", "postgres",
             ),
             recorded,
             (bootstrap_password,),
@@ -427,6 +452,7 @@ def role_init_database(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Rol
         yield database
     finally:
         _cleanup_role_init_resources(tuple(recorded), owner)
+        assert source_metadata_snapshot([bootstrap_file, *scripts.values()]) == source_snapshot
         assert _protected_volume_created_at() == protected_volume_created_at
 
 
@@ -470,6 +496,7 @@ def test_role_init_keeps_passwords_out_of_shell_and_psql_state() -> None:
         assert source.index(f"SET LOCAL {setting};") < first_server_read
 
 
+@pytest.mark.integration
 def test_role_init_removes_password_environment_before_starting_psql(
     tmp_path: Path,
 ) -> None:
@@ -492,14 +519,14 @@ exit 0
     )
     psql_probe.chmod(0o555)
     record_created_test_path(tree, psql_probe)
-    script_copy = copy_bind_inputs(
-        tmp_path, {"001-roles.sh": SCRIPT}, parent_tree=tree,
-    )["001-roles.sh"]
+    scripts = copy_bind_inputs(tmp_path, {
+        "001-roles.sh": SCRIPT, "private-tmpfs.sh": TMPFS_VALIDATOR,
+        "role-init-tmpfs.sh": TMPFS_FIXTURE,
+    }, parent_tree=tree)
     prepare_owned_test_inventory(record_test_tree_inventory(tree))
+    source_snapshot = source_metadata_snapshot([psql_probe, *scripts.values()])
 
-    result = _docker(
-        "run",
-        "--rm",
+    arguments = (
         "--network",
         "none",
         "--read-only",
@@ -508,15 +535,23 @@ exit 0
         "--cap-add",
         "CHOWN",
         "--cap-add",
+        "DAC_OVERRIDE",
+        "--cap-add",
         "FOWNER",
         "--cap-add",
         "SETGID",
         "--cap-add",
         "SETUID",
         "--tmpfs",
-        "/run/secrets:rw,nosuid,nodev,size=64k,mode=0700",
+        "/var/lib/postgresql:rw,nosuid,nodev,size=256m",
+        "--tmpfs",
+        "/run/secrets:rw,noexec,nosuid,nodev,size=64k,mode=0700",
         "--mount",
-        f"type=bind,src={script_copy},dst=/aegis-init/001-roles.sh,readonly",
+        f"type=bind,src={scripts['001-roles.sh']},dst=/aegis-init/001-roles.sh,readonly",
+        "--mount",
+        f"type=bind,src={scripts['private-tmpfs.sh']},dst=/aegis-init/private-tmpfs.sh,readonly",
+        "--mount",
+        f"type=bind,src={scripts['role-init-tmpfs.sh']},dst=/aegis-init/role-init-tmpfs.sh,readonly",
         "--mount",
         f"type=bind,src={psql_probe},dst=/test-bin/psql,readonly",
         "--env",
@@ -540,21 +575,34 @@ exit 0
         "--env",
         "PGSERVICEFILE=/run/secrets/environment-canary",
         "--entrypoint",
-        "sh",
+        "bash",
         POSTGRES_IMAGE,
         "-c",
-        "set -eu; "
+        "set -Eeuo pipefail; " + PREPARE_ROLE_TMPFS
+        + "exec gosu postgres sh -c 'set -eu; umask 077; "
         "for name in db_migrator_password db_web_password "
         "db_operations_password db_indexer_password db_media_password; do "
-        "printf 'role-secret\\n' > /run/secrets/$name; "
-        "chown 70:70 /run/secrets/$name; chmod 0400 /run/secrets/$name; done; "
-        "chown 70:70 /run/secrets; chmod 0700 /run/secrets; "
-        "exec gosu postgres /aegis-init/001-roles.sh",
-        timeout=30,
+        "printf \"role-secret\\n\" > /run/secrets/$name; "
+        "chmod 0400 /run/secrets/$name; done; "
+        "exec /aegis-init/001-roles.sh'",
     )
-
-    assert result.returncode == 0, result.stderr
-    assert "canary" not in result.stdout + result.stderr
+    token = secrets.token_hex(16)
+    owner = f"role-init-environment-{token}"
+    recorded: list[OwnedDirectResource] = []
+    try:
+        resource = _create_role_init_resource(
+            f"aegis-{owner}", owner, tmp_path / "environment.cid", arguments, recorded,
+            ("superuser-environment-canary", "libpq-environment-canary"),
+        )
+        waited = _docker("wait", resource.immutable_id, timeout=30)
+        _require_success(waited, "wait for role environment probe")
+        assert waited.stdout.strip() == "0"
+        result = _docker("logs", resource.immutable_id)
+        assert result.returncode == 0, result.stderr
+        assert "canary" not in result.stdout + result.stderr
+    finally:
+        _cleanup_role_init_resources(tuple(recorded), owner)
+        assert source_metadata_snapshot([psql_probe, *scripts.values()]) == source_snapshot
 
 
 @pytest.mark.integration
