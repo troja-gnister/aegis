@@ -19,6 +19,7 @@ import {
   directoryQueryOptions,
   entryQueryOptions,
   indexStatusQueryOptions,
+  requestRootScan,
 } from "./queries";
 import type {BrowseInput, DirectoryPage} from "./types";
 
@@ -340,6 +341,45 @@ describe("directoryQueryOptions", () => {
 
     expect(isSessionAccessOpen()).toBe(true);
     expect(isPrivateStateCurrent(capturePrivateState(), "replacement-namespace")).toBe(true);
+  });
+
+  it("does not let an obsolete rescan 401 purge a newer account", async () => {
+    const queryClient = new QueryClient({defaultOptions: {queries: {retry: false}}});
+    const replacementClient = new QueryClient({defaultOptions: {queries: {retry: false}}});
+    clients.add(queryClient);
+    clients.add(replacementClient);
+    await activateCacheNamespace(queryClient, NAMESPACE);
+    const requestIds: string[] = [];
+    const scan = vi.spyOn(fileApi, "requestScan").mockImplementation(async (_rootId, requestId) => {
+      requestIds.push(requestId);
+      await activateCacheNamespace(replacementClient, "replacement-namespace");
+      throw new ApiProblem({type: "authentication_required", title: "Authentication required", status: 401});
+    });
+
+    try {
+      await expect(requestRootScan(queryClient, NAMESPACE, ROOT_ID, "retained-request-id"))
+        .rejects.toMatchObject({status: 0});
+    } finally {
+      scan.mockRestore();
+    }
+    expect(requestIds).toEqual(["retained-request-id"]);
+    expect(isSessionAccessOpen()).toBe(true);
+    expect(isPrivateStateCurrent(capturePrivateState(), "replacement-namespace")).toBe(true);
+  });
+
+  it("refuses a rescan for a namespace that is not current before any request", async () => {
+    const queryClient = new QueryClient({defaultOptions: {queries: {retry: false}}});
+    clients.add(queryClient);
+    await activateCacheNamespace(queryClient, NAMESPACE);
+    const scan = vi.spyOn(fileApi, "requestScan");
+    scan.mockClear();
+    try {
+      await expect(requestRootScan(queryClient, "another-namespace", ROOT_ID, "retained-request-id"))
+        .rejects.toMatchObject({status: 0});
+      expect(scan).not.toHaveBeenCalled();
+    } finally {
+      scan.mockRestore();
+    }
   });
 
   it("rechecks initiating ownership before an obsolete 404 can clear renewed root state", async () => {

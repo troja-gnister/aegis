@@ -17,3 +17,16 @@ export function fixtureEntry(index: number): EntrySummary {
     version: String(index + 1),
   };
 }
+
+type TestProcess = {env: Record<string, string | undefined>};
+
+/** Switch the Node test runtime's local time zone; returns a function restoring the original. */
+export function setTestTimeZone(zone: string): () => void {
+  const testEnvironment = (globalThis as unknown as {process: TestProcess}).process.env;
+  const original = testEnvironment.TZ;
+  testEnvironment.TZ = zone;
+  return () => {
+    if (original === undefined) delete testEnvironment.TZ;
+    else testEnvironment.TZ = original;
+  };
+}

@@ -9,6 +9,8 @@ import {
   fetchIndexStatus,
   requestScan,
 } from "./api";
+import {emptyFilterDraft, filtersFromDraft} from "./filter-state";
+import {setTestTimeZone} from "./test-fixtures";
 import type {BrowseInput, DirectoryPage} from "./types";
 
 const ROOT_ID = "11111111-1111-4111-8111-111111111111";
@@ -104,6 +106,38 @@ describe("file API guards", () => {
     await expect(fetchDirectory(input, new AbortController().signal)).rejects.toMatchObject({
       status: 502,
     });
+  });
+
+  it("accepts every filter shape the filter panel can produce under the shared bounds", async () => {
+    const restoreTimeZone = setTestTimeZone("America/New_York");
+    const drafts = [
+      {...emptyFilterDraft(), kind: ["directory", "file", "symlink", "special"] as const},
+      {...emptyFilterDraft(), type: ["jpg", "__unknown__"], extraTypes: "unknown, " +
+        Array.from({length: 29}, (_, index) => `t${index}`).join(",")},
+      {...emptyFilterDraft(), availability: ["present", "missing", "inaccessible", "unsupported"] as const},
+      {...emptyFilterDraft(), prefix: "é".repeat(1024)},
+      {...emptyFilterDraft(), sizeMin: "0", sizeMax: "18446744073709551615"},
+      {...emptyFilterDraft(), sizeUnknown: true, modifiedUnknown: true},
+      {...emptyFilterDraft(), modifiedFrom: "2026-03-08", modifiedTo: "2026-11-01"},
+      {...emptyFilterDraft(), modifiedTo: "2261-12-31"},
+    ];
+    const sent: unknown[] = [];
+    server.use(http.get(`/api/v1/roots/${ROOT_ID}/entries`, ({request}) => {
+      sent.push(JSON.parse(new URL(request.url).searchParams.get("filters")!));
+      return HttpResponse.json(page());
+    }));
+    try {
+      for (const draft of drafts) {
+        const result = filtersFromDraft({...draft, kind: [...draft.kind], availability: [...draft.availability]});
+        if (!result.ok) throw new Error(JSON.stringify(result.errors));
+        await expect(fetchDirectory({...input, filters: result.filters}, new AbortController().signal))
+          .resolves.toEqual(page());
+      }
+    } finally {
+      restoreTimeZone();
+    }
+    expect(sent).toHaveLength(drafts.length);
+    expect(sent[1]).toMatchObject({type: expect.arrayContaining(["__unknown__", "unknown"])});
   });
 
   it("rejects oversized page arrays and success bodies before publication", async () => {

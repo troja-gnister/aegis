@@ -8,6 +8,10 @@ import type {
 } from "./types";
 
 let csrfToken: string | null = null;
+// Private-state teardown advances this generation. A token acquisition that
+// began under an older generation can finish only for its own initiator; it
+// never repopulates the store that the next account will read.
+let csrfGeneration = 0;
 
 function isBoundedString(value: unknown, maximum: number): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= maximum;
@@ -40,13 +44,34 @@ function validatedSession(value: unknown): SessionResponse {
 
 export function clearCsrfToken(): void {
   csrfToken = null;
+  csrfGeneration += 1;
 }
 
 async function refreshCsrfToken(): Promise<string> {
+  const generation = csrfGeneration;
   const response = await apiRequest<CsrfResponse>("/api/v1/auth/csrf");
   if (!isBoundedString(response.csrfToken, 256)) throw genericApiProblem(502);
-  csrfToken = response.csrfToken;
-  return csrfToken;
+  if (generation === csrfGeneration) csrfToken = response.csrfToken;
+  return response.csrfToken;
+}
+
+/**
+ * Return the shared CSRF token for a mutation owned by the caller's current
+ * session. `isCurrent` must capture the initiating namespace/authority before
+ * this call; a completion after logout or account replacement is rejected.
+ * `rejectedToken` replaces only a token the server has just refused.
+ */
+export async function obtainCsrfToken(
+  isCurrent: () => boolean,
+  rejectedToken?: string,
+): Promise<string> {
+  if (!isCurrent()) throw genericApiProblem();
+  const generation = csrfGeneration;
+  if (csrfToken !== null && csrfToken !== rejectedToken) return csrfToken;
+  if (csrfToken !== null && csrfToken === rejectedToken) csrfToken = null;
+  const token = await refreshCsrfToken();
+  if (generation !== csrfGeneration || !isCurrent()) throw genericApiProblem();
+  return token;
 }
 
 async function csrfMutation<T>(path: string, body?: unknown): Promise<T> {

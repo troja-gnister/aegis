@@ -11,8 +11,9 @@ import {
   purgePrivateBrowserState,
   type PrivateStateSnapshot,
 } from "../auth/cache";
+import {obtainCsrfToken} from "../auth/api";
 import {beginSignOut, completeSignOut, isSessionAccessOpen} from "../auth/session";
-import {fetchDirectory, fetchEntry, fetchIndexStatus} from "./api";
+import {fetchDirectory, fetchEntry, fetchIndexStatus, requestScan} from "./api";
 import {clearFileNavigationRoot} from "./navigation";
 import type {BrowseInput, DirectoryPage} from "./types";
 
@@ -139,4 +140,33 @@ export function indexStatusQueryOptions(namespace: string, rootId: string, rootE
     staleTime: 5000,
     retry: false,
   });
+}
+
+/**
+ * Request a coalesced root rescan under the initiating session. The caller
+ * supplies (and retains across network retries) one client request ID. CSRF
+ * state comes from the shared auth store; a single explicit CSRF rejection is
+ * retried with a replacement token and the same request ID. Obsolete
+ * completions have no side effects on a newer account.
+ */
+export async function requestRootScan(
+  queryClient: QueryClient,
+  namespace: string,
+  rootId: string,
+  requestId: string,
+): Promise<{scanId: string}> {
+  const signal = new AbortController().signal;
+  const authority = captureQueryAuthority(namespace, signal);
+  const isCurrent = () => isSessionAccessOpen() && isPrivateStateCurrent(authority, namespace);
+  try {
+    const token = await obtainCsrfToken(isCurrent);
+    try {
+      return await requestScan(rootId, requestId, token);
+    } catch (error) {
+      if (!(error instanceof ApiProblem) || error.type !== "csrf_failed" || !isCurrent()) throw error;
+      return await requestScan(rootId, requestId, await obtainCsrfToken(isCurrent, token));
+    }
+  } catch (error) {
+    return handleCatalogFailure(error, queryClient, namespace, authority, signal, rootId);
+  }
 }
