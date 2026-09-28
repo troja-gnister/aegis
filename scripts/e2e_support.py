@@ -21,6 +21,7 @@ from aegisctl.container_launch import controlled_container_argv
 from aegisctl.container_resources import (
     ProjectInventory,
     ProjectResource,
+    ProjectResourceError,
     ProjectResourceRule,
     admit_project_transition,
     capture_project_inventory,
@@ -253,7 +254,7 @@ def _resource_rules(operation: str, token: str) -> tuple[ProjectResourceRule, ..
     if operation != "up":
         raise ValueError("unknown E2E resource transition")
     services = ("postgres", "migrate", "web", "operations", "indexer", "media", "gateway")
-    networks = ("backend", "edge")
+    networks = ("backend", "edge", "tls-hop")
     volumes = (
         "indexer-coordination", "postgres-data", "staging", "derivatives",
         "model-cache", "quarantine", "frontier-outbox",
@@ -474,33 +475,124 @@ def controlled_compose(arguments: list[str]) -> int:
     return subprocess.run(command, cwd=REPOSITORY, env=environment, check=False).returncode
 
 
-if __name__ == "__main__":
-    action = sys.argv[1]
-    if action == "controlled-compose":
-        raise SystemExit(controlled_compose(sys.argv[2:]))
-    elif action == "check-compose":
-        check_compose(json.load(sys.stdin))
-    elif action == "sanitize-logs":
-        for _ in range(4000):
-            line = sys.stdin.readline(65_538)
-            if not line:
-                break
-            print(sanitize_line(line))
-    elif action == "resources-record":
-        resources_record(checked_directory(sys.argv[2]), sys.argv[3])
-    elif action in (
-        "prepare", "record-generated", "prepare-sources", "prepare-runtime",
-        "resources-check", "resources-cleanup", "cleanup",
-    ):
-        directory = checked_directory(sys.argv[2])
-        {
-            "prepare": prepare,
-            "record-generated": record_generated,
-            "prepare-sources": prepare_sources,
-            "prepare-runtime": prepare_runtime,
-            "resources-check": resources_check,
-            "resources-cleanup": resources_cleanup,
-            "cleanup": cleanup,
-        }[action](directory)
+DIRECTORY_ACTIONS = {
+    "prepare": prepare,
+    "record-generated": record_generated,
+    "prepare-sources": prepare_sources,
+    "prepare-runtime": prepare_runtime,
+    "resources-check": resources_check,
+    "resources-cleanup": resources_cleanup,
+    "cleanup": cleanup,
+}
+ACTIONS = (
+    "controlled-compose", "check-compose", "sanitize-logs", "resources-record",
+    *DIRECTORY_ACTIONS,
+)
+# The exact constant refusals raised by this harness and aegisctl.container_resources.
+# Any other message, even of these types, is never published.
+_PUBLIC_REFUSALS: dict[type[BaseException], frozenset[str]] = {
+    ValueError: frozenset((
+        "AEGIS_UID and AEGIS_GID must be decimal synthetic identities",
+        "E2E backend must have no internet egress",
+        "E2E backend requires an internal network",
+        "E2E ports must bind loopback",
+        "E2E runtime isolation is missing",
+        "E2E volumes must be disposable and project-scoped",
+        "every original mount must be read-only",
+        "invalid E2E temporary directory",
+        "runtime cannot mount the repository",
+        "synthetic E2E ancestor was replaced",
+        "synthetic E2E creation ledger is invalid",
+        "synthetic E2E creation parent was not recorded",
+        "synthetic E2E directory must be empty",
+        "synthetic E2E input is hardlinked",
+        "synthetic E2E input is missing",
+        "synthetic E2E input was replaced",
+        "synthetic E2E inventory cannot be read",
+        "synthetic E2E inventory changed or contains unknown inputs",
+        "synthetic E2E ledger path is invalid",
+        "synthetic E2E ownership inventory changed",
+        "synthetic E2E ownership mapping failed",
+        "synthetic E2E resource ledger is invalid",
+        "synthetic E2E root contains unknown inputs",
+        "synthetic E2E runtime preparation failed",
+        "synthetic E2E secret has unsafe mode",
+        "unexpected E2E project",
+        "unknown E2E resource transition",
+        "unknown E2E support action",
+        "web/migrator cannot mount originals",
+    )),
+    ProjectResourceError: frozenset((
+        "disposable project already has resources",
+        "exact project resource cleanup failed",
+        "exact project resource cleanup was incomplete",
+        "project cleanup resource kind is invalid",
+        "project network inspection failed",
+        "project resource fingerprint is invalid",
+        "project resource identity is invalid",
+        "project resource inspection failed",
+        "project resource inventory is ambiguous",
+        "project resource ownership changed",
+        "project resource query failed",
+        "project resource removal transition is invalid",
+        "project resource transition changed project",
+        "project resource transition is ambiguous",
+        "project resources changed or contain unknown resources",
+        "recorded project resource identity changed",
+        "recorded project resource was removed or replaced",
+        "required project resource was not removed",
+        "unexpected project resource transition",
+    )),
+}
+
+
+def _workflow_escape(value: str, *, property_value: bool = False) -> str:
+    escaped = value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    if property_value:
+        escaped = escaped.replace(":", "%3A").replace(",", "%2C")
+    return escaped
+
+
+def refusal_annotation(action: str, error: BaseException) -> str:
+    """One bounded GitHub error annotation: the action and a fixed refusal only."""
+    title = f"e2e-support {action if action in ACTIONS else 'unknown-action'}"
+    message = str(error)
+    detail = type(error).__name__
+    if message in _PUBLIC_REFUSALS.get(type(error), frozenset()):
+        detail = f"{detail}: {message}"
     else:
-        raise ValueError("unknown E2E support action")
+        detail = f"{detail} (details omitted)"
+    return (
+        f"::error title={_workflow_escape(title, property_value=True)}::"
+        f"{_workflow_escape(detail)}"
+    )
+
+
+def main(arguments: list[str]) -> int:
+    action = arguments[0] if arguments else ""
+    try:
+        if action == "controlled-compose":
+            return controlled_compose(arguments[1:])
+        if action == "check-compose":
+            check_compose(json.load(sys.stdin))
+        elif action == "sanitize-logs":
+            for _ in range(4000):
+                line = sys.stdin.readline(65_538)
+                if not line:
+                    break
+                print(sanitize_line(line))
+        elif action == "resources-record":
+            resources_record(checked_directory(arguments[1]), arguments[2])
+        elif action in DIRECTORY_ACTIONS:
+            DIRECTORY_ACTIONS[action](checked_directory(arguments[1]))
+        else:
+            raise ValueError("unknown E2E support action")
+    except Exception as error:
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            print(refusal_annotation(action, error), flush=True)
+        raise
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

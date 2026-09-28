@@ -121,7 +121,44 @@ jobs:
       - name: Render hermetic Compose and build digest-pinned runtime images
         run: uv run --locked python scripts/verify.py compose
       - name: Deployment and real database-role tests on disposable PostgreSQL 18
+        env:
+          PYTEST_ADDOPTS: --junitxml=${{ runner.temp }}/deployment-junit.xml -rfE
         run: uv run --locked python scripts/verify.py deployment
+      # Public, bounded failure summary: annotations are readable without signing in.
+      - name: Annotate failing deployment tests
+        if: failure()
+        env:
+          JUNIT_ANNOTATIONS: |
+            # Allowlist only: the test id and the exception type. No message text is published.
+            import re, sys
+            import xml.etree.ElementTree as ElementTree
+            KIND = re.compile(r"^[A-Za-z_][\w.]*(Error|Exception|Failed|Failure)\b", re.ASCII)
+            def escape(value, prop=False):
+                value = value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+                return value.replace(":", "%3A").replace(",", "%2C") if prop else value
+            def test_id(case):
+                raw = f"{case.get('classname', '')}::{case.get('name', '')}"
+                return re.sub(r"[^\w./:\[\]-]", "_", raw, flags=re.ASCII)[:200]
+            def kind(outcome):
+                match = KIND.match(outcome.get("message") or outcome.text or "")
+                return match.group(0)[:120] if match else outcome.tag
+            try:
+                root = ElementTree.parse(sys.argv[1]).getroot()
+            except (OSError, ElementTree.ParseError):
+                print("::error title=deployment-junit::No JUnit report; failure preceded pytest")
+                raise SystemExit(0)
+            lines = [
+                f"::error title={escape(test_id(case), True)}::{escape(kind(outcome))}"
+                for case in root.iter("testcase")
+                for outcome in (*case.findall("failure"), *case.findall("error"))
+            ]
+            if not lines:
+                lines = ["::error title=deployment-junit::No failing test case; failure was outside pytest"]
+            if len(lines) > 10:
+                omitted = len(lines) - 9
+                lines[9:] = [f"::error title=deployment-junit::{omitted} more failures omitted"]
+            print(*lines, sep="\n")
+        run: python3 -c "$JUNIT_ANNOTATIONS" "$RUNNER_TEMP/deployment-junit.xml"
       - name: Check whitespace and generated-output drift
         id: hygiene
         if: always()

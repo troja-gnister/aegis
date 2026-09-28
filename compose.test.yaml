@@ -45,6 +45,9 @@ networks:
   edge:
     labels:
       aegis.test.resource-token: "${AEGIS_TEST_RESOURCE_TOKEN:?AEGIS_TEST_RESOURCE_TOKEN is required}"
+  tls-hop:
+    labels:
+      aegis.test.resource-token: "${AEGIS_TEST_RESOURCE_TOKEN:?AEGIS_TEST_RESOURCE_TOKEN is required}"
 
 volumes:
   indexer-coordination:

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import os
 import py_compile
 import re
+import runpy
 import shlex
 import subprocess
 from pathlib import Path
 from typing import Any
+from xml.sax.saxutils import escape, quoteattr
 
 import pytest
 import yaml
@@ -195,3 +198,150 @@ def test_hygiene_gate_rejects_locks_migrations_ignored_outputs_and_whitespace(
         cwd=tmp_path, capture_output=True, text=True, timeout=10,
     )
     assert (result.returncode == 0) is (dirty_path is None), result.stderr
+
+
+def _deployment_annotation_steps(workflow: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    steps = workflow["jobs"]["deployment"]["steps"]
+    tests = next(i for i, step in enumerate(steps) if shlex.split(step.get("run", "")) == [
+        "uv", "run", "--locked", "python", "scripts/verify.py", "deployment",
+    ])
+    return steps[tests], steps[tests + 1]
+
+
+def _annotate(workflow: dict[str, Any], runner_temp: Path) -> list[str]:
+    _tests, annotate = _deployment_annotation_steps(workflow)
+    result = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", annotate["run"]],
+        env={"PATH": os.environ["PATH"], "RUNNER_TEMP": str(runner_temp),
+             "JUNIT_ANNOTATIONS": annotate["env"]["JUNIT_ANNOTATIONS"]},
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    return result.stdout.splitlines()
+
+
+def test_deployment_failures_publish_bounded_junit_annotations(
+    workflow: dict[str, Any],
+) -> None:
+    tests, annotate = _deployment_annotation_steps(workflow)
+    assert tests["env"] == {
+        "PYTEST_ADDOPTS": "--junitxml=${{ runner.temp }}/deployment-junit.xml -rfE",
+    }
+    assert annotate["if"] == "failure()"
+    assert "uses" not in annotate
+    assert shlex.split(annotate["run"]) == [
+        "python3", "-c", "$JUNIT_ANNOTATIONS", "$RUNNER_TEMP/deployment-junit.xml",
+    ]
+    assert set(annotate["env"]) == {"JUNIT_ANNOTATIONS"}
+    imports = re.findall(r"^(?:import|from) .*$", annotate["env"]["JUNIT_ANNOTATIONS"], re.M)
+    assert imports == ["import re, sys", "import xml.etree.ElementTree as ElementTree"]
+
+
+def _write_junit(runner_temp: Path, cases: list[str]) -> None:
+    (runner_temp / "deployment-junit.xml").write_text(
+        '<?xml version="1.0" encoding="utf-8"?><testsuites><testsuite name="pytest">'
+        + "".join(cases) + "</testsuite></testsuites>",
+        encoding="utf-8",
+    )
+
+
+def test_junit_annotations_publish_only_test_id_and_exception_type_capped(
+    workflow: dict[str, Any], tmp_path: Path,
+) -> None:
+    secret = "0123456789abcdef" * 4
+    cases = [
+        '<testcase classname="tests.deployment.test_a" name="test_escape[x,y:z \'q\']">'
+        '<failure message="AssertionError: 100% of /srv/aegis/roots/private-path&#10;'
+        f'second-line-sentinel">trace {secret}</failure>'
+        '<system-out>stdout-sentinel</system-out><system-err>stderr-sentinel</system-err>'
+        '</testcase>',
+        '<testcase classname="tests.deployment.test_b" name="test_env">'
+        f'<error message="failed on setup with &quot;RuntimeError: token {secret}&quot;"/>'
+        '</testcase>',
+        '<testcase classname="tests.deployment.test_c" name="test_passes"/>',
+        '<testcase classname="tests.deployment.test_d" name="test_body">'
+        f'<failure>aegisctl.container_resources.ProjectResourceError: {secret}</failure>'
+        '</testcase>',
+        *(
+            f'<testcase classname="tests.deployment.test_many" name="test_{index}">'
+            '<failure message="assert False"/></testcase>'
+            for index in range(9)
+        ),
+    ]
+    _write_junit(tmp_path, cases)
+    lines = _annotate(workflow, tmp_path)
+    assert lines == [
+        "::error title=tests.deployment.test_a%3A%3Atest_escape[x_y%3Az__q_]::AssertionError",
+        "::error title=tests.deployment.test_b%3A%3Atest_env::error",
+        "::error title=tests.deployment.test_d%3A%3Atest_body::"
+        "aegisctl.container_resources.ProjectResourceError",
+        *(f"::error title=tests.deployment.test_many%3A%3Atest_{index}::failure"
+          for index in range(6)),
+        "::error title=deployment-junit::3 more failures omitted",
+    ]
+    output = "\n".join(lines)
+    for leaked in ("sentinel", "private-path", secret, "test_passes", "100"):
+        assert leaked not in output
+
+    _write_junit(tmp_path, ['<testcase classname="a" name="b"/>'])
+    assert _annotate(workflow, tmp_path) == [
+        "::error title=deployment-junit::No failing test case; failure was outside pytest",
+    ]
+    (tmp_path / "deployment-junit.xml").unlink()
+    assert _annotate(workflow, tmp_path) == [
+        "::error title=deployment-junit::No JUnit report; failure preceded pytest",
+    ]
+
+
+HEX_SECRET = "60bf5362c6655b0bef7b" + "a1" * 22
+# Independent review leak cases: each message would have been published (in part)
+# by a denylist scrubber. Only the exception type may ever reach an annotation.
+REVIEW_LEAK_CASES = (
+    ("AssertionError: assert 'R8FLuKPRUbj8KIFCBw62Hw' == 'x'", ("R8FLuKPRUbj8KIFCBw62Hw",)),
+    ("AssertionError: password='hunter2'", ("hunter2",)),
+    ("AssertionError: password=Zq9xYt2k and Password=Wk3mNp8q", ("Zq9xYt2k", "Wk3mNp8q")),
+    ("RuntimeError: db_password: s3cr3tpass", ("s3cr3tpass",)),
+    ("RuntimeError: Authorization: Bearer abcDEFghiJKLmnoP", ("abcDEFghiJKLmnoP",)),
+    ("AssertionError: {'AEGIS_DB_PASSWORD': 'kRtUvWxYzAbCdEfG'}", ("kRtUvWxYzAbCdEfG",)),
+    ("AssertionError: assert 'qwertyuiopasdfghjklzxcvbnmQWERTYUIOP' == ''",
+     ("qwertyuiopasdfghjklzxcvbnmQWERTYUIOP", "qwertyuiop")),
+    ("AssertionError: " + "x" * 165 + " " + HEX_SECRET, (HEX_SECRET[:20], HEX_SECRET[:8])),
+    ("AssertionError: assert \"super-'$`; Yh7uKp0LmQ\" != ''", ("super-", "Yh7uKp0LmQ")),
+    ("RuntimeError: cannot read tmp/aegis-verify-abc/password", ("aegis-verify-abc", "tmp/")),
+    ("AssertionError: 100%0A::warning::injected", ("warning", "injected")),
+)
+
+
+@pytest.mark.parametrize(
+    ("message", "secrets"), REVIEW_LEAK_CASES,
+    ids=[f"leak{index}" for index in range(len(REVIEW_LEAK_CASES))],
+)
+def test_junit_annotations_never_publish_message_text(
+    workflow: dict[str, Any], tmp_path: Path, message: str, secrets: tuple[str, ...],
+) -> None:
+    kind = message.split(":", 1)[0]
+    _write_junit(tmp_path, [
+        '<testcase classname="tests.deployment.test_leak" name="test_case">'
+        f"<failure message={quoteattr(message)}>{escape(message)}</failure>"
+        f"<system-out>{escape(message)}</system-out></testcase>",
+        '<testcase classname="tests.deployment.test_leak" name="test_body">'
+        f"<error>{escape(message)}</error></testcase>",
+    ])
+    lines = _annotate(workflow, tmp_path)
+    output = "\n".join(lines)
+    for secret in secrets:
+        assert secret not in output, f"annotation leaked {secret!r}"
+    assert lines == [
+        f"::error title=tests.deployment.test_leak%3A%3Atest_case::{kind}",
+        f"::error title=tests.deployment.test_leak%3A%3Atest_body::{kind}",
+    ]
+
+
+def test_verification_runner_passes_pytest_addopts_to_the_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    helpers = runpy.run_path(str(WORKFLOW.parents[2] / "scripts/verify.py"))
+    monkeypatch.setenv("AEGIS_CONTAINER_ENGINE", "docker")
+    monkeypatch.setenv("PYTEST_ADDOPTS", "--junitxml=/tmp/report.xml -rfE")
+    assert helpers["test_environment"]()["PYTEST_ADDOPTS"] == "--junitxml=/tmp/report.xml -rfE"

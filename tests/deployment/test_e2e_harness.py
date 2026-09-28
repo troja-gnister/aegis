@@ -11,7 +11,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from aegisctl.container_resources import ProjectInventory, ProjectResource
+import yaml
+from aegisctl.container_resources import (
+    ProjectInventory,
+    ProjectResource,
+    ProjectResourceError,
+    admit_project_transition,
+)
 
 SUPPORT = runpy.run_path(str(Path(__file__).resolve().parents[2] / "scripts/e2e_support.py"))
 
@@ -415,3 +421,225 @@ def test_e2e_reads_host_credentials_before_subordinate_ownership_preparation() -
     for variable in ("E2E_ALICE_PASSWORD", "E2E_BOB_PASSWORD", "E2E_ADMIN_PASSWORD"):
         assert script.index(f"read -r {variable}") < preparation
     assert script.index("prepare-sources") < script.index("mounts preflight")
+
+
+class _ComposeLoader(yaml.SafeLoader):
+    """Resource-free Compose YAML reader: merge tags only change override semantics."""
+
+
+def _compose_tag(loader: yaml.SafeLoader, node: yaml.Node) -> Any:
+    if isinstance(node, yaml.MappingNode):
+        return loader.construct_mapping(node, deep=True)
+    if isinstance(node, yaml.SequenceNode):
+        return loader.construct_sequence(node, deep=True)
+    assert isinstance(node, yaml.ScalarNode)
+    return loader.construct_scalar(node)
+
+
+for _tag in ("!override", "!reset"):
+    _ComposeLoader.add_constructor(_tag, _compose_tag)
+
+E2E_COMPOSE_FILES = ("compose.yaml", "compose.test.yaml", "compose.podman.yaml")
+TOKEN_LABEL = "aegis.test.resource-token"
+TOKEN_EXPRESSION = "${AEGIS_TEST_RESOURCE_TOKEN:?AEGIS_TEST_RESOURCE_TOKEN is required}"
+
+
+def _compose_file(name: str) -> dict[str, Any]:
+    repository = Path(__file__).resolve().parents[2]
+    loaded = yaml.load((repository / name).read_text(encoding="utf-8"), _ComposeLoader)
+    assert isinstance(loaded, dict)
+    return loaded
+
+
+def _service_networks(service: dict[str, Any]) -> set[str]:
+    networks = service.get("networks")
+    if networks is None:
+        return set() if "network_mode" in service else {"default"}
+    return set(networks)
+
+
+def _service_named_volumes(service: dict[str, Any]) -> set[str]:
+    named = set()
+    for mount in service.get("volumes", []):
+        if isinstance(mount, str):
+            source, separator, _target = mount.partition(":")
+            if separator and not source.startswith(("/", ".", "~", "$")):
+                named.add(source)
+        elif mount.get("type") == "volume" and mount.get("source"):
+            named.add(mount["source"])
+    return named
+
+
+def _e2e_project_resources() -> tuple[set[str], set[str], set[str]]:
+    """Services, networks and volumes the canonical E2E file set can create.
+
+    Every enabled (profile-free) service's networks and named volumes, plus any
+    declared top-level resource that no service uses: rules are at-most-once
+    allowances, so admitting an unused declaration is safe whether or not the
+    Compose release prunes it. Resources used only by profile-gated services are
+    never created by the E2E ``up`` and must not be admitted.
+    """
+    files = [_compose_file(name) for name in E2E_COMPOSE_FILES]
+    canonical = files[0]["services"]
+    enabled = {name for name, service in canonical.items() if not service.get("profiles")}
+    used: dict[bool, dict[str, set[str]]] = {
+        state: {"networks": set(), "volumes": set()} for state in (True, False)
+    }
+    declared: dict[str, set[str]] = {"networks": set(), "volumes": set()}
+    for document in files:
+        for kind in declared:
+            declared[kind] |= set(document.get(kind) or {})
+        for name, service in (document.get("services") or {}).items():
+            assert name in canonical, "an E2E overlay introduced an unreviewed service"
+            state = name in enabled
+            if document is files[0] or "networks" in service:
+                used[state]["networks"] |= _service_networks(service)
+            used[state]["volumes"] |= _service_named_volumes(service)
+    expected = {
+        kind: (declared[kind] | used[True][kind]) - (used[False][kind] - used[True][kind])
+        for kind in declared
+    }
+    return enabled, expected["networks"], expected["volumes"]
+
+
+def _rule_names(rules: tuple[Any, ...], kind: str, label: str) -> list[str]:
+    return [
+        dict(rule.required_labels)[label] for rule in rules if rule.kind == kind
+    ]
+
+
+def test_e2e_up_admission_exactly_covers_rendered_project_resources() -> None:
+    services, networks, volumes = _e2e_project_resources()
+    assert "tls-hop" in networks  # gateway's private TLS hop (compose.yaml).
+    assert not {"caddy-data", "caddy-local-data"} & volumes  # TLS profiles only.
+    token = "aegis-phase1-e2e.abcdefgh"
+    rules = SUPPORT["_resource_rules"]("up", token)
+    assert sorted(_rule_names(rules, "container", "com.docker.compose.service")) == sorted(
+        services
+    )
+    assert sorted(_rule_names(rules, "network", "com.docker.compose.network")) == sorted(
+        networks
+    )
+    assert sorted(_rule_names(rules, "volume", "com.docker.compose.volume")) == sorted(volumes)
+    assert all((TOKEN_LABEL, token) in rule.required_labels for rule in rules)
+    assert {rule.kind for rule in rules} == {"container", "network", "volume"}
+
+    test_overlay = _compose_file("compose.test.yaml")
+    for kind, expected in (("services", services), ("networks", networks),
+                           ("volumes", volumes)):
+        labelled = {
+            name for name, entry in (test_overlay.get(kind) or {}).items()
+            if (entry or {}).get("labels", {}).get(TOKEN_LABEL) == TOKEN_EXPRESSION
+        }
+        assert labelled == expected, f"compose.test.yaml {kind} provenance labels drifted"
+
+    def labelled_resource(kind: str, name: str, key: str, extra: dict[str, str]) -> Any:
+        labels = {
+            "com.docker.compose.project": SUPPORT["PROJECT"], key: name, **extra,
+        }
+        section = {"container": "services", "network": "networks", "volume": "volumes"}[kind]
+        entry = (test_overlay.get(section) or {}).get(name) or {}
+        if entry.get("labels", {}).get(TOKEN_LABEL) == TOKEN_EXPRESSION:
+            labels[TOKEN_LABEL] = token  # Compose applies the overlay's provenance label.
+        identity = f"{kind}-{name}"
+        return ProjectResource(kind, identity, identity, json.dumps(
+            {"Id": identity, "Name": identity, "Labels": labels},
+            sort_keys=True, separators=(",", ":"),
+        ))
+
+    created = (
+        *(labelled_resource("container", name, "com.docker.compose.service",
+                            {"com.docker.compose.oneoff": "False"}) for name in services),
+        *(labelled_resource("network", name, "com.docker.compose.network", {})
+          for name in networks),
+        *(labelled_resource("volume", name, "com.docker.compose.volume", {})
+          for name in volumes),
+    )
+    empty = ProjectInventory(SUPPORT["PROJECT"], ())
+    observed = ProjectInventory(SUPPORT["PROJECT"], tuple(sorted(created)))
+    assert admit_project_transition(empty, observed, rules) == observed
+
+    # Admission stays exact: an unknown network with valid provenance is refused.
+    foreign = ProjectResource("network", "foreign", "foreign", json.dumps(
+        {"Id": "foreign", "Name": "foreign", "Labels": {
+            "com.docker.compose.project": SUPPORT["PROJECT"],
+            "com.docker.compose.network": "foreign", TOKEN_LABEL: token,
+        }}, sort_keys=True, separators=(",", ":"),
+    ))
+    with pytest.raises(ProjectResourceError, match="unexpected"):
+        admit_project_transition(
+            empty, ProjectInventory(SUPPORT["PROJECT"], (*observed.resources, foreign)), rules,
+        )
+
+
+def test_e2e_refusal_is_one_bounded_public_annotation_only_under_github_actions(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = private_e2e_directory()
+    try:
+        monkeypatch.setenv("AEGIS_CONTAINER_ENGINE", "docker")
+        SUPPORT["prepare"](path)
+        record_globals = SUPPORT["main"].__globals__
+
+        def refuse(project: str) -> ProjectInventory:
+            raise ProjectResourceError("unexpected project resource transition")
+
+        monkeypatch.setitem(record_globals, "capture_project_inventory", refuse)
+        monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+        with pytest.raises(ProjectResourceError):
+            SUPPORT["main"](["resources-record", str(path), "up"])
+        assert capsys.readouterr().out == ""
+
+        monkeypatch.setenv("GITHUB_ACTIONS", "true")
+        with pytest.raises(ProjectResourceError):
+            SUPPORT["main"](["resources-record", str(path), "up"])
+        assert capsys.readouterr().out.splitlines() == [
+            "::error title=e2e-support resources-record::"
+            "ProjectResourceError: unexpected project resource transition",
+        ]
+    finally:
+        SUPPORT["cleanup"](path)
+
+
+@pytest.mark.parametrize("error", (
+    ValueError("invalid literal /tmp/aegis-phase1-e2e.private-sentinel"),
+    ValueError("line one\nprivate-sentinel=%s"),
+    ValueError("x" * 201),
+    ValueError("tmp/aegis-phase1-e2e.private-sentinel"),
+    ValueError("private-sentinel"),
+    ProjectResourceError("private-sentinel project resource query failed"),
+    RuntimeError("unexpected project resource transition"),
+    KeyError("private-sentinel"),
+    OSError(2, "No such file", "/srv/aegis/roots/private-sentinel"),
+))
+def test_e2e_refusal_annotation_omits_unfixed_or_path_details(error: Exception) -> None:
+    annotation = SUPPORT["refusal_annotation"]("prepare", error)
+    assert annotation == (
+        f"::error title=e2e-support prepare::{type(error).__name__} (details omitted)"
+    )
+    assert "\n" not in annotation and "private-sentinel" not in annotation
+    unknown = SUPPORT["refusal_annotation"]("x,y:%\n", ValueError("unknown E2E support action"))
+    assert unknown == (
+        "::error title=e2e-support unknown-action::ValueError: unknown E2E support action"
+    )
+    assert SUPPORT["_workflow_escape"]("a%b\r\nc:d,e", property_value=True) == (
+        "a%25b%0D%0Ac%3Ad%2Ce"
+    )
+
+
+def test_e2e_public_refusals_are_exactly_the_constant_raised_messages() -> None:
+    import ast
+
+    repository = Path(__file__).resolve().parents[2]
+    raised: dict[str, set[str]] = {"ValueError": set(), "ProjectResourceError": set()}
+    for name in ("scripts/e2e_support.py", "backend/aegisctl/container_resources.py"):
+        for node in ast.walk(ast.parse((repository / name).read_text(encoding="utf-8"))):
+            if (
+                isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call)
+                and isinstance(node.exc.func, ast.Name) and node.exc.func.id in raised
+            ):
+                argument = node.exc.args[0]
+                assert isinstance(argument, ast.Constant) and isinstance(argument.value, str)
+                raised[node.exc.func.id].add(argument.value)
+    public = SUPPORT["_PUBLIC_REFUSALS"]
+    assert {kind.__name__: set(messages) for kind, messages in public.items()} == raised
