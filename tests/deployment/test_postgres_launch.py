@@ -744,6 +744,18 @@ def test_unencoded_bootstrap_program_is_refused_before_creation(
     assert engine.stage == 0 and engine.containers == {} and engine.volumes == {}
 
 
+def test_bootstrap_err_handler_never_returns() -> None:
+    # bash 5.2 prints "pop_var_context: head of shell_variables not a function
+    # context" when an ERR-trap handler function executes `return`; errexit
+    # already exits with the failing command's status, so the handler must not.
+    match = re.search(
+        r"^aegis_pg_bootstrap_error\(\) \{\n(.*?)^\}\n",
+        boundary.POSTGRES_BOOTSTRAP_DIAGNOSTIC, re.MULTILINE | re.DOTALL,
+    )
+    assert match is not None
+    assert re.search(r"\breturn\b", match.group(1)) is None
+
+
 @pytest.mark.parametrize("outcome", ["refusal", "unhandled"])
 def test_inspected_bootstrap_program_reaches_bash_unchanged(
     engine: PostgresEngine, tmp_path: Path, outcome: str,

@@ -417,10 +417,13 @@ def test_e2e_resource_record_refuses_unknown_addition_without_overwriting_ledger
 def test_e2e_reads_host_credentials_before_subordinate_ownership_preparation() -> None:
     script = (Path(__file__).resolve().parents[2] / "scripts/test-e2e.sh").read_text()
 
-    preparation = script.index("prepare-runtime")
+    # Locate the commands themselves, never the public phase-name allowlist.
+    preparation = script.index("e2e_support.py prepare-runtime ")
     for variable in ("E2E_ALICE_PASSWORD", "E2E_BOB_PASSWORD", "E2E_ADMIN_PASSWORD"):
         assert script.index(f"read -r {variable}") < preparation
-    assert script.index("prepare-sources") < script.index("mounts preflight")
+    assert script.index("e2e_support.py prepare-sources ") < script.index(
+        "aegisctl mounts preflight "
+    )
 
 
 class _ComposeLoader(yaml.SafeLoader):

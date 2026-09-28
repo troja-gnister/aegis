@@ -2,6 +2,23 @@
 set -euo pipefail
 export UV_LOCKED=1
 
+# Public CI failure locator: on failure, exactly one stdout line naming a constant
+# phase from this allowlist. Never commands, output, paths, environment or values.
+phase=config
+annotate_phase() {
+    local name=$1
+    case "$name" in
+        config|verify-diagnostics|prepare|resources-check|prepare-sources|build|\
+        mounts-preflight|mounts-render|record-generated|prepare-runtime|check-compose|\
+        up|resources-record|bootstrap-admin|seed|playwright|resources-cleanup|cleanup) ;;
+        *) name=unknown ;;
+    esac
+    if [[ "${GITHUB_ACTIONS-}" == true ]]; then
+        printf '::error title=e2e-phase::%s\n' "$name"
+    fi
+}
+trap 'early_status=$?; if (( early_status != 0 )); then annotate_phase "$phase"; fi' EXIT
+
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repository_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
 cd "$repository_dir"
@@ -71,8 +88,10 @@ fi
 
 # Uses the same locked browser package/config as acceptance. Its intentionally
 # failing subprocess must never disclose a synthetic credential in diagnostics.
+phase=verify-diagnostics
 node frontend/e2e/verify-diagnostics.mjs
 
+phase=prepare
 umask 077
 work_dir=$(mktemp -d /tmp/aegis-phase1-e2e.XXXXXXXX)
 work_dir=$(CDPATH= cd -- "$work_dir" && pwd -P)
@@ -113,7 +132,7 @@ controlled_compose() {
 started=0
 
 cleanup() {
-    local result=$? cleanup_result=0
+    local result=$? cleanup_result=0 failed_phase=$phase cleanup_phase=resources-cleanup
     trap - EXIT
     set +e
     if (( started )); then
@@ -124,9 +143,15 @@ cleanup() {
     fi
     uv run python scripts/e2e_support.py resources-cleanup "$work_dir" || cleanup_result=$?
     if (( cleanup_result == 0 )); then
+        cleanup_phase=cleanup
         uv run python scripts/e2e_support.py cleanup "$work_dir" || cleanup_result=$?
     fi
-    if (( result == 0 && cleanup_result != 0 )); then result=$cleanup_result; fi
+    if (( result != 0 )); then
+        annotate_phase "$failed_phase"
+    elif (( cleanup_result != 0 )); then
+        annotate_phase "$cleanup_phase"
+        result=$cleanup_result
+    fi
     exit "$result"
 }
 trap cleanup EXIT
@@ -134,43 +159,59 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 uv run python scripts/e2e_support.py prepare "$work_dir"
+phase=resources-check
 uv run python scripts/e2e_support.py resources-check "$work_dir"
+phase=prepare-sources
 uv run python scripts/e2e_support.py prepare-sources "$work_dir"
+phase=build
 "${compose_base[@]}" build
+phase=mounts-preflight
 uv run aegisctl mounts preflight --config "$work_dir/mounts.toml" --manifest "$work_dir/mounts.manifest.json"
+phase=mounts-render
 uv run aegisctl mounts render --config "$work_dir/mounts.toml" \
     --manifest "$work_dir/mounts.manifest.json" --output "$work_dir/compose.mounts.yaml" \
     --gateway-attestation "$work_dir/mounts.gateway.attestation"
 # Preserve host-readable values before the generated credential files are mapped
 # to subordinate container IDs. These shell variables are not exported to Compose.
+phase=record-generated
 IFS= read -r E2E_ALICE_PASSWORD < "$AEGIS_TEST_SECRET_DIR/e2e-alice-password"
 IFS= read -r E2E_BOB_PASSWORD < "$AEGIS_TEST_SECRET_DIR/e2e-bob-password"
 IFS= read -r E2E_ADMIN_PASSWORD < "$AEGIS_TEST_SECRET_DIR/e2e-admin-password"
 uv run python scripts/e2e_support.py record-generated "$work_dir"
+phase=prepare-runtime
 uv run python scripts/e2e_support.py prepare-runtime "$work_dir"
+phase=check-compose
 "${compose[@]}" config --format json | uv run python scripts/e2e_support.py check-compose
 
 started=1
+phase=up
 set +e
 controlled_compose up --build --wait --wait-timeout 180
 compose_status=$?
+phase=resources-record
 uv run python scripts/e2e_support.py resources-record "$work_dir" up
 record_status=$?
 set -e
 if (( record_status != 0 )); then exit "$record_status"; fi
+phase=up
 if (( compose_status != 0 )); then exit "$compose_status"; fi
+phase=resources-check
 uv run python scripts/e2e_support.py resources-check "$work_dir"
+phase=bootstrap-admin
 set +e
 controlled_compose run --rm --no-deps \
     --volume "$AEGIS_TEST_SECRET_DIR/e2e-admin-password:/run/secrets/bootstrap-password:ro" \
     web python manage.py bootstrap_admin --username phase1-admin \
     --email phase1-admin@e2e.invalid --password-file /run/secrets/bootstrap-password
 compose_status=$?
+phase=resources-record
 uv run python scripts/e2e_support.py resources-record "$work_dir" run-web
 record_status=$?
 set -e
 if (( record_status != 0 )); then exit "$record_status"; fi
+phase=bootstrap-admin
 if (( compose_status != 0 )); then exit "$compose_status"; fi
+phase=seed
 "${compose[@]}" exec -T web python manage.py seed_phase1_e2e
 "${compose[@]}" exec -T web python manage.py seed_phase1_e2e
 
@@ -178,4 +219,5 @@ if (( compose_status != 0 )); then exit "$compose_status"; fi
 # arguments, browser storage, traces, reports, or production configuration.
 export E2E_ALICE_PASSWORD E2E_BOB_PASSWORD E2E_ADMIN_PASSWORD
 export E2E_BASE_URL="$AEGIS_PUBLIC_URL"
+phase=playwright
 npm --prefix frontend run test:e2e

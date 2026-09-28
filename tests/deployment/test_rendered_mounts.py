@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import secrets
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -47,6 +48,7 @@ from tests.support.container_runtime import (
     run_deployment_process as run_container,
 )
 from tests.support.fake_container_engine import ProjectEngine, select_fake_engine
+from tests.support.observer_engine import ObserverEngine, assert_observer_engine_cleaned
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 CONTAINER_COMMAND = container_command()
@@ -214,8 +216,57 @@ def test_real_observer_rejects_physical_parent_child_bind_roots(tmp_path: Path) 
         for source, slot_id in ((parent, "parent"), (child, "alias"))
     )
     prepare_owned_test_inventory(record_test_tree_inventory(tree))
-    with pytest.raises(ConfigError, match="overlap"):
+    # The observer retains its diagnostics and chains the precise refusal as the cause.
+    with pytest.raises(
+        ConfigError, match=r"^container mount observation failed; diagnostics retained at /",
+    ) as caught:
         observe_mount_fingerprints(slots)
+    cause = caught.value.__cause__
+    assert isinstance(cause, ConfigError), "expected direct physical-overlap ConfigError cause"
+    assert str(cause) == "mount slot alias: physical source overlap", (
+        "expected direct physical-overlap ConfigError cause"
+    )
+
+
+@pytest.mark.parametrize("observed", ["overlap", "missing-alias", "distinct-device"])
+def test_physical_parent_child_observer_test_reads_the_direct_overlap_cause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, observed: str,
+) -> None:
+    # The real observer, driven by a fake engine that never delegates, reports
+    # the measured Docker form: both bind roots on one device, child below parent.
+    select_fake_engine("docker", tmp_path, monkeypatch, checked_mask_policy=True)
+    case = tmp_path / "case"
+    case.mkdir(mode=0o700)
+    records = "2 1 8:1 /runner/tree /srv/aegis/roots/parent ro,relatime - ext4 /dev/root rw\n"
+    if observed != "missing-alias":
+        device = "8:2" if observed == "distinct-device" else "8:1"
+        records += (f"3 1 {device} /runner/tree/private /srv/aegis/roots/alias "
+                    "ro,relatime - ext4 /dev/root rw\n")
+
+    def fixture_output(command: list[str], kwargs: dict[str, object]) -> None:
+        del command
+        output = kwargs["stdout"]
+        assert hasattr(output, "write") and hasattr(output, "flush")
+        output.write(records.encode("ascii"))
+        output.flush()
+
+    fake = ObserverEngine(case / "tree", output=fixture_output)
+    monkeypatch.setattr("aegisctl.mounts.subprocess.run", fake)
+    try:
+        if observed == "overlap":
+            test_real_observer_rejects_physical_parent_child_bind_roots(case)
+        elif observed == "missing-alias":
+            with pytest.raises(
+                AssertionError, match="expected direct physical-overlap ConfigError cause",
+            ):
+                test_real_observer_rejects_physical_parent_child_bind_roots(case)
+        else:
+            with pytest.raises(pytest.fail.Exception, match="DID NOT RAISE"):
+                test_real_observer_rejects_physical_parent_child_bind_roots(case)
+    finally:
+        if fake.diagnostics is not None and fake.diagnostics.is_dir():
+            shutil.rmtree(fake.diagnostics)
+    assert_observer_engine_cleaned(fake)
 
 
 def test_linux_preflight_rejects_real_bind_alias_ancestry(tmp_path: Path) -> None:

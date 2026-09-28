@@ -224,3 +224,73 @@ def test_e2e_forces_local_podman_for_compose_boundary(tmp_path: Path, stop_at: s
         assert launches[0].endswith("up --build --wait --wait-timeout 180")
         assert "-f " + str(REPOSITORY / "compose.podman.yaml") in launches[0]
         assert all(not ({"up", "run", "create"} & set(line.split())) for line in invocations)
+
+
+@pytest.mark.parametrize("fail_at,phase", [
+    ("", None),
+    ("<engine>", "config"),
+    ("verify-diagnostics", "verify-diagnostics"),
+    ("e2e_support.py prepare /", "prepare"),
+    ("resources-check", "resources-check"),
+    ("prepare-sources", "prepare-sources"),
+    ("compose.test.yaml build", "build"),
+    ("mounts preflight", "mounts-preflight"),
+    ("mounts render", "mounts-render"),
+    ("record-generated", "record-generated"),
+    ("prepare-runtime", "prepare-runtime"),
+    ("config --format json", "check-compose"),
+    ("up --build --wait", "up"),
+    ("resources-record", "resources-record"),
+    ("bootstrap_admin", "bootstrap-admin"),
+    ("seed_phase1_e2e", "seed"),
+    ("run test:e2e", "playwright"),
+    ("resources-cleanup", "resources-cleanup"),
+    ("e2e_support.py cleanup", "cleanup"),
+])
+@pytest.mark.parametrize("actions", [True, False])
+def test_e2e_failure_prints_one_constant_public_phase_annotation(
+    tmp_path: Path, fail_at: str, phase: str | None, actions: bool,
+) -> None:
+    # Every executable is a non-delegating double; FAKE_FAIL fails the first matching call.
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    work_dir = tmp_path / "fake-e2e-work"
+    fail = 'case "$*" in *"$FAKE_FAIL"*) [ -n "$FAKE_FAIL" ] && exit 77;; esac\n'
+    for name, source in {
+        "mktemp": '#!/bin/sh\nmkdir -m 700 "$FAKE_E2E_WORK"\nprintf "%s\\n" "$FAKE_E2E_WORK"\n',
+        "node": "#!/bin/sh\n" + fail + "printf '24\\n'\n",
+        "docker": "#!/bin/sh\n" + fail + "exit 0\n",
+        "npm": "#!/bin/sh\n" + fail + "exit 0\n",
+        "uv": (
+            "#!/bin/sh\n" + fail +
+            "case \"$*\" in\n"
+            "  *'e2e_support.py prepare '*)\n"
+            "    for work do :; done; mkdir -p \"$work/secrets\"\n"
+            "    for name in e2e-alice-password e2e-bob-password e2e-admin-password; do "
+            "printf 'synthetic\\n' > \"$work/secrets/$name\"; done;;\n"
+            "esac\nexit 0\n"
+        ),
+    }.items():
+        executable = binary / name
+        executable.write_text(source, encoding="ascii")
+        executable.chmod(0o700)
+    environment = os.environ | {
+        "PATH": str(binary) + os.pathsep + os.environ["PATH"],
+        "FAKE_E2E_WORK": str(work_dir),
+        "FAKE_FAIL": "" if fail_at == "<engine>" else fail_at,
+        "AEGIS_CONTAINER_ENGINE": "invalid" if fail_at == "<engine>" else "docker",
+    }
+    environment.pop("GITHUB_ACTIONS", None)
+    if actions:
+        environment["GITHUB_ACTIONS"] = "true"
+    result = subprocess.run(
+        ["bash", str(REPOSITORY / "scripts/test-e2e.sh")], env=environment,
+        capture_output=True, text=True, timeout=30,
+    )
+    expected_status = 0 if phase is None else 64 if phase == "config" else 77
+    assert result.returncode == expected_status
+    annotations = [line for line in result.stdout.splitlines() if line.startswith("::")]
+    expected = [f"::error title=e2e-phase::{phase}"] if actions and phase else []
+    assert annotations == expected
+    assert "::" not in result.stderr
+    assert str(work_dir) not in result.stdout and "synthetic" not in result.stdout

@@ -64,6 +64,9 @@ POSTGRES_BASE_IMAGE = (
 PROJECT_INVENTORIES: dict[str, ProjectInventory] = {}
 # Installed only in the test's overridden bootstrap entrypoint, after sourcing
 # the unchanged helper. It never surrounds staging or the normal entrypoint.
+# The ERR handler only reports; errexit then exits with the failing command's
+# own status. It must not `return`: bash 5.2 prints "pop_var_context: head of
+# shell_variables not a function context" for a return from an ERR-trap handler.
 POSTGRES_BOOTSTRAP_DIAGNOSTIC = r"""
 aegis_pg_refuse() {
     local frame target_id=unavailable
@@ -87,7 +90,6 @@ aegis_pg_refuse() {
 aegis_pg_bootstrap_error() {
     local status=$1
     printf 'bootstrap-error line=%.10s status=%.3s\n' "$2" "$status" >&2
-    return "$status"
 }
 trap 'aegis_pg_bootstrap_error "$?" "$LINENO"' ERR
 """
