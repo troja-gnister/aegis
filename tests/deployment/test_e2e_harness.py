@@ -63,6 +63,29 @@ def test_generated_secrets_are_private_unique_and_cleanup_preserves_unknown_file
     SUPPORT["cleanup"](path)
 
 
+def test_prepared_roots_are_gateway_readable_regardless_of_process_umask(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AEGIS_CONTAINER_ENGINE", "docker")
+    previous_umask = os.umask(0o077)
+    try:
+        path = private_e2e_directory()
+        try:
+            SUPPORT["prepare"](path)
+            for name in SUPPORT["ROOT_NAMES"]:
+                assert (path / "roots" / name).stat().st_mode & 0o777 == 0o755
+            # Unaffected: parent directories and secrets keep their restrictive modes.
+            assert path.stat().st_mode & 0o777 == 0o700
+            assert (path / "roots").stat().st_mode & 0o777 == 0o700
+            assert (path / "secrets").stat().st_mode & 0o777 == 0o700
+            for secret in (path / "secrets").iterdir():
+                assert secret.stat().st_mode & 0o777 == 0o600
+        finally:
+            SUPPORT["cleanup"](path)
+    finally:
+        os.umask(previous_umask)
+
+
 @pytest.mark.parametrize("directory", ("/", "/tmp", "/Users", "/srv/aegis"))
 def test_cleanup_refuses_broad_or_unowned_directory_targets(directory: str) -> None:
     with pytest.raises((ValueError, OSError)):

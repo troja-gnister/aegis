@@ -201,6 +201,14 @@ def prepare(path: Path) -> None:
         for name in ROOT_NAMES:
             source = root_dir / name
             source.mkdir(mode=0o755)
+            # mkdir's mode is masked by the process umask (test-e2e.sh sets 077),
+            # but the gateway (uid 101, cap_drop: ALL) must be able to read and
+            # traverse these synthetic originals, so fix the mode explicitly.
+            fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fchmod(fd, 0o755)
+            finally:
+                os.close(fd)
             _record(ledger, path, source)
             lines.extend([
                 "", "[[slots]]", f'slot_id = "e2e-{name}"',
