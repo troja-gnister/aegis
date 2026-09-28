@@ -1,6 +1,6 @@
 # Linux/Podman prerequisite checkpoint
 
-Observed September 22–24, 2026, beginning from repository checkpoint `ab57e3037b9daed79aeb691eb486a4d2397ae4aa`, whose last accepted application change is `a82db75d9949170e1d22acfed0f08050f067edf2`. Reviewed engine/verification tooling is committed at `163c02563d95de8e4e3930ae68377e946feef3b8`; guarded duplicate-mask compatibility and focused mount regressions are committed at `71da40ed34bbe05990093afbf12925df40462ccf`. PostgreSQL/Caddy tmpfs adaptations and complete application gates remain open. This report records scoped successes and failed application-gate evidence, not full Podman acceptance. Phase 2A.1 remains **18 tasks: 12 complete, 6 remaining**; Task 13 has not started.
+Observed September 22–24, 2026, beginning from repository checkpoint `ab57e3037b9daed79aeb691eb486a4d2397ae4aa`, whose last accepted application change is `a82db75d9949170e1d22acfed0f08050f067edf2`. Reviewed engine/verification tooling is committed at `163c02563d95de8e4e3930ae68377e946feef3b8`; guarded duplicate-mask compatibility and focused mount regressions are committed at `71da40ed34bbe05990093afbf12925df40462ccf`. PostgreSQL, Caddy, and indexer tmpfs adaptations are corrected; the rootless client-source-address gap (O11) and complete application gates remain open. Docker Engine with Compose v2 is the supported, primary runtime; Podman is a secondary, optional runtime, and this report's remaining items are deferred, optional follow-ups, not blockers. This report records scoped successes and failed application-gate evidence, not full Podman acceptance. Phase 2A.1 remains **18 tasks: 12 complete, 6 remaining**; Task 13 has not started.
 
 ## Actual environment
 
@@ -198,7 +198,30 @@ Base for the Caddy slice: pushed HEAD `2d0ede2959e6393acc4bf42c1524e4b9a179b608`
 
 **Open gap (O11, measured).** Rootless Podman's published ports (netavark bridge plus rootlessport) do not preserve the host client's source address. Caddy sees its own tls-hop address as the client (`remote_ip` equals Caddy's own peer address), so the gateway's anti-spoofing check — which compares the forwarded address against the connection's real remote address — intermittently rejects readiness, in about 1 in 3 fresh stacks; the same loss of the real client address means per-client rate limiting cannot rely on it either. This reproduces identically in passing and failing runs; only the timing of the race differs. This is a networking/trust-model design question, escalated to and decided by the user: commit the Caddy fixes above and record the source-address gap as an open prerequisite. Full Podman compatibility is not established or claimed.
 
-The Caddy slice is committed as `240963a` (`fix: run Caddy private tmpfs and TLS stack on rootless Podman`; 6 files); `240963a` and the following documentation commit are pushed to `origin/main`, on top of `2d0ede2`. Docker CI for this push has not yet been inspected. Also open, beyond the source-address gap: the Docker CI failure pattern for `2d0ede2` above; the still-unimplemented indexer test-fixture compatibility; the stale core-services NNP assertion and the `test_rendered_mounts.py` refusals (separate from this slice); and full gates (`make verify`, `make verify-compose`, `make test-e2e`). Task counts stay 12 accepted, 6 remaining; Task 13 has not started.
+The Caddy slice is committed as `240963a` (`fix: run Caddy private tmpfs and TLS stack on rootless Podman`; 6 files); `240963a` and the following documentation commit `81255a5` are pushed to `origin/main`, on top of `2d0ede2`. Docker CI for `81255a5` ([run 36358232480](https://github.com/troja-gnister/aegis/actions/runs/36358232480)) failed overall: backend/frontend passed, deployment/E2E failed; logs remain unavailable without authentication. Also open, beyond the source-address gap: the indexer test-fixture slice below; the stale core-services NNP assertion and the `test_rendered_mounts.py` refusals (separate from this slice); and full gates (`make verify`, `make verify-compose`, `make test-e2e`). Task counts stay 12 accepted, 6 remaining; Task 13 has not started.
+
+## Indexer diagnosis and correction, September 27
+
+Base for this slice: pushed `origin/main` head `81255a5`.
+
+**Tmpfs fixtures.** The four indexer coordination tmpfs fixtures keep their Docker strings. On Podman, the positive fixtures use `U,notmpcopyup`. The misowned fixture omits `U` and measures exact `0:0` before the expected `CoordinationError`.
+
+**Cleanup safety correction.** This closes the previously diagnosed hazard where cleanup could delete a same-name/same-label replacement instead of the original. The fixtures now record image IIDs and workload CIDs at creation, validate the whole owned scope before deleting, delete only those recorded IDs, and prove the deleted IDs are absent.
+
+**Measured network cause (O12/O13).** Rootless `--network host` rbinds the host `/sys`, which duplicates `/sys/fs/cgroup` and `/sys/fs/selinux` (63 lines versus the default 51), and the unchanged strict mountinfo parser refuses that ambiguity. The database-backed cases therefore use `--network pasta:-T,<db port>` on Podman: this forwards only the database's loopback port to the container's `127.0.0.1`, while other host loopback ports are refused. Docker keeps host networking unchanged.
+
+**Evidence.** On rootless Podman 5.8.7 with SELinux enforcing, the full indexer module and harness passed **220 tests, 0 skipped, in 428 seconds**. Cleanup was exact: no containers remained, 18 volumes and 24 networks (the same retained baseline) were unchanged. Individually, metadata-only cases passed 4/4, source-bearing (transport plus parent-death) cases passed 3/3, and database-backed cases passed 8/8 after the `pasta` fix.
+
+The indexer slice is committed as `9507de3` (`test: make indexer runtime fixtures exact-identity and Podman-safe`; 2 test files); `9507de3` and the following documentation commit are pushed to `origin/main`, on top of `81255a5`. Docker CI for this push has not yet been inspected.
+
+Still open, as deferred, optional Podman follow-ups (none block Docker-based development or Task 13):
+
+- The rootless client-source-IP gap (O11, from the Caddy slice above).
+- The stale core-services NNP assertion in `test_compose.py`.
+- The `test_rendered_mounts.py` Podman refusals.
+- `tests/deployment/test_database_roles.py:414` uses the same `--network host` pattern; it is likely affected by the same mountinfo issue if it parses mountinfo, but this has not been measured. This is a follow-up, not part of this slice.
+
+Separately, the Docker CI deployment/E2E failures (observed on `81255a5`; `9507de3` is pushed but its run has not yet been inspected) are bisected to commit `163c025`: CI passed at `6bb7e36`, and the first failing push was `db6e107`, a docs-only commit on top of `163c025`. Every later push, `81255a5` included, has failed deployment and E2E while backend and frontend passed; the logs need an authenticated GitHub session. Fixing that failure, then running the full Docker gates (`make verify`, `make verify-compose`, `make test-e2e`), are the next required steps before Task 13. Task counts stay 12 accepted, 6 remaining; Task 13 has not started.
 
 ## Cleanup disposition
 
