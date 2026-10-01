@@ -38,7 +38,7 @@
 
 ## Status and task ledger
 
-Planning baseline: `842ba2a` on `main`, with unchanged application code from the verified Phase 1 foundation; execution begins from the committed plan at `6169402`. This plan defines **18 tasks: 12 complete, 6 remaining**. Tasks 1–12 passed verification and independent review, including lifecycle, input-bound, authentication-precedence, availability, browser-state ownership and navigation/focus corrections. Permission-bound indexed queries, bounded details, private HTTP endpoints, the browser data layer and virtualized mobile file navigation are accepted. Docker CI is now green on pushed `e085030` ([run 36462687576](https://github.com/troja-gnister/aegis/actions/runs/36462687576), all four jobs passing), resolving the deployment/E2E regression bisected to `163c025`; the full Docker gates are satisfied by that run, and Task 13 is next. The Linux/Podman prerequisite is a secondary, optional runtime with deferred follow-ups (see below). The [portable handoff](../../development-handoff.md) records the next integration boundaries. Task 6 retains the September 15 approved commit-fence boundary below. Task 4's local full-deployment limitation remains documented below, not a green gate. The ledger is authoritative; checkboxes below record the execution recipe and subsequent evidence, not a second task count.
+Planning baseline: `842ba2a` on `main`, with unchanged application code from the verified Phase 1 foundation; execution begins from the committed plan at `6169402`. This plan defines **18 tasks: 13 complete, 5 remaining**. Tasks 1–13 passed verification and independent review, including lifecycle, input-bound, authentication-precedence, availability, browser-state ownership and navigation/focus corrections. Permission-bound indexed queries, bounded details, private HTTP endpoints, the browser data layer, virtualized mobile file navigation, and filter/details/scan-state interactions are accepted. Docker CI is now green on pushed `e085030` ([run 36462687576](https://github.com/troja-gnister/aegis/actions/runs/36462687576), all four jobs passing), resolving the deployment/E2E regression bisected to `163c025`; the full Docker gates are satisfied by that run, Task 13 is accepted (`bbac055`; CI [run 36936455170](https://github.com/troja-gnister/aegis/actions/runs/36936455170) passed all four jobs), and Task 14 (real-stack mobile journeys) is next and in progress. The Linux/Podman prerequisite is a secondary, optional runtime with deferred follow-ups (see below). The [portable handoff](../../development-handoff.md) records the next integration boundaries. Task 6 retains the September 15 approved commit-fence boundary below. Task 4's local full-deployment limitation remains documented below, not a green gate. The ledger is authoritative; checkboxes below record the execution recipe and subsequent evidence, not a second task count.
 
 | Task | Independently testable deliverable | Depends on | Status |
 | --- | --- | --- | --- |
@@ -54,8 +54,8 @@ Planning baseline: `842ba2a` on `main`, with unchanged application code from the
 | 10 | List/details/status/rescan HTTP endpoints | 4, 9 | Complete (`c364394`) |
 | 11 | Validated browser API and bounded private query window | 10 | Complete (`d58fcb8`) |
 | 12 | Virtualized mobile file navigation | 11 | Complete (`a82db75`) |
-| 13 | Filter panel, details, and scan-state interactions | 12 | Planned |
-| 14 | Real-stack browser and original-preservation regressions | 7, 13 | Planned |
+| 13 | Filter panel, details, and scan-state interactions | 12 | Complete (`bbac055`) |
+| 14 | Real-stack browser and original-preservation regressions | 7, 13 | In progress |
 | 15 | Deterministic catalog fixture and authenticated query benchmark | 10 | Planned |
 | 16 | Owned filesystem fixture, scan/recovery, and resource benchmark | 7, 15 | Planned |
 | 17 | 50K-folder mobile journey and package workload evidence | 14–16 | Planned |
@@ -88,6 +88,8 @@ Combined checkpoint `07704cf5206fecb98451d7ee7a7b8117a2df9ce2` passed overall CI
 Task 11 completion checkpoint `dbfed7fcb20574e98add943d820dc822ccc64ad3` passed overall CI and all four backend, frontend, deployment and browser-journey jobs in [run 35666075296](https://github.com/troja-gnister/aegis/actions/runs/35666075296). This includes the accepted browser data layer and both correction rounds, but predates Task 12's rendered file browser. Subsequent real-stack indexed-file and physical-scale gates remain open.
 
 Task 12 code checkpoint `a82db75d9949170e1d22acfed0f08050f067edf2` passed overall CI and all four backend, frontend, deployment and browser-journey jobs in [run 35737649769](https://github.com/troja-gnister/aegis/actions/runs/35737649769). Its frontend job passed all 131 tests across 12 files, including both correction rounds. This is a green code checkpoint, not acceptance of the later real-stack indexed-file or physical-scale gates.
+
+Task 13 checkpoint `bbac055b014e4b0c303ce3ccefac47949e0440e9` (`feat: add mobile file filters details and scan progress`) passed overall CI and all four jobs in [run 36936455170](https://github.com/troja-gnister/aegis/actions/runs/36936455170). Frontend gates passed 219/219 tests (single worker), lint, types and build; independent review plus one fix round (a closed detail no longer returns on Back/Forward) closed all findings. CI [run 36936455170](https://github.com/troja-gnister/aegis/actions/runs/36936455170) for `bbac055` passed all four jobs. Real-browser dialog focus and timezone certification belongs to Task 14, which is now in progress. This is a green code checkpoint, not acceptance of the real-stack indexed-file or physical-scale gates.
 
 ### Completed-task evidence
 
@@ -1270,6 +1272,10 @@ Rescan uses a newly generated UUID as `X-Request-ID`, retains it across a networ
 - [ ] **Step 4: Verify green.** Run the new interaction tests and complete frontend lint/types/tests/build. Validate real dialog focus and date/timezone behavior in mobile Chromium and WebKit during Task 14; jsdom alone does not certify those interactions.
 
 - [ ] **Step 5: Review and commit.** Record filter/reset/unknown-state/progress evidence; commit `feat: add mobile file filters details and scan progress`; push `origin main`.
+
+### Task 13 acceptance evidence
+
+**Task 13 is complete: 13 tasks complete, 5 remaining** (commit `bbac055b014e4b0c303ce3ccefac47949e0440e9`, `feat: add mobile file filters details and scan progress`). Delivered: draft/apply/cancel metadata filters (grouped choices, decimal size bounds, local-timezone date bounds, explicit unknown values, removable accessible chips), an entry-details panel with exact BigInt sizes that cancels on close, navigation or session change, an index-status panel (3s active / 30s idle polling, backoff to 60s on failure, paused while hidden or offline), a refresh indication instead of refetching every retained page, `root_admin`-only rescan with a request ID that stays the same across retries, and a CSRF store that ignores token acquisition completing after logout or an account change. Frontend gates passed 219/219 tests (single worker), lint, types and build; independent review plus one fix round (a closed detail no longer returns on Back/Forward) closed all findings. CI [run 36936455170](https://github.com/troja-gnister/aegis/actions/runs/36936455170) for `bbac055` passed all four jobs. Real-browser dialog focus and timezone certification belongs to Task 14, which is now in progress. This acceptance is jsdom/unit-level plus CI; it does not certify real-browser dialog focus or timezone behavior, and no physical-scale gate is claimed.
 
 ## Task 14: Real-stack browser and source-preservation regressions
 
