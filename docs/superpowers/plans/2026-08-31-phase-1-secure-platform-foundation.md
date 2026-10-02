@@ -938,6 +938,8 @@ add_header Referrer-Policy "no-referrer" always;
 add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
 ```
 
+> **Update 2026-10-01:** the snippet above shows the original `no-referrer` policy and is kept as history. Commit `0682fba` changed the gateway to a single `Referrer-Policy: same-origin` (Django's duplicate header is hidden). `no-referrer` made browsers send `Origin: null` on same-origin form POSTs, which failed Django's CSRF check on admin login.
+
 Add the `/health/` proxy and immutable SPA asset/fallback locations alongside this fragment. Because the protected location is `internal`, a direct request is 404 and only a future Django `X-Accel-Redirect` can reach it.
 
 - [ ] **Step 5: Create safe development secrets**
