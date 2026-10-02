@@ -312,9 +312,9 @@
 
 .filter-chip__label {
   min-inline-size: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  /* A nowrap label's min-content (long offset-qualified dates) widened phone layouts. */
+  overflow-wrap: anywhere;
+  text-align: start;
 }
 
 .filter-chip--clear {

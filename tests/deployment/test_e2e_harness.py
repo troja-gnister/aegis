@@ -192,9 +192,17 @@ def test_podman_preparation_targets_only_inventoried_synthetic_inputs(
             str(path / "mounts.manifest.json"),
             str(path / "mounts.gateway.attestation"),
         ]
+        # Every recorded entry of the two mounted source roots; never the unmounted sibling.
+        mounted = sorted(
+            name for name in SUPPORT["_load_ledger"](path)["entries"]
+            if name.startswith(("roots/alice/", "roots/bob/")) or name in (
+                "roots/alice", "roots/bob",
+            )
+        )
+        assert len(mounted) > 600 and "roots/alice/link-outside" in mounted
         assert commands == [
             ["chcon", "--no-dereference", "--type", "container_file_t", "--",
-             str(path / "roots/alice"), str(path / "roots/bob")],
+             *(str(path / name) for name in mounted)],
             ["chcon", "--no-dereference", "--type", "container_file_t", "--", *label_targets],
             ["podman", "--remote=false", "unshare", "chown", "--no-dereference", "1000:1000", "--",
              *secrets, str(path / "mounts.manifest.json")],

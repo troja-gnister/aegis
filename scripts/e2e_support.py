@@ -1,12 +1,18 @@
 """Private generated inputs and bounded diagnostics for disposable browser tests."""
 from __future__ import annotations
 
+import contextlib
+import hashlib
+import http.cookiejar
 import json
 import os
 import secrets
 import stat
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +50,18 @@ GENERATED_NAMES = (
 PROJECT = "aegis-phase1-e2e"
 ROOT_NAMES = ("alice", "bob")
 LEDGER_NAME = ".aegis-e2e-ledger.json"
+SOURCE_MANIFEST = "sources.manifest.json"
+# Owned synthetic sources: the two mounted roots plus one never-mounted sibling
+# that only a symbolic link names. Nothing outside the private work directory.
+SOURCE_DIRECTORIES = ("roots/alice", "roots/bob", "roots/alice-sibling")
+SEALED_DIRECTORIES = ("roots/bob/locked",)
+TIED_MTIME_NS = 1_577_836_800_000_000_000  # 2020-01-01T00:00:00Z
+DIRECTORY_MTIME_NS = 1_600_000_000_000_000_000
+BULK_FILES = 590
+LARGE_FILE_BYTES = 1_500_000
+INDEX_WAIT_SECONDS = 240
+_monotonic = time.monotonic
+_sleep = time.sleep
 
 
 def checked_directory(value: str) -> Path:
@@ -138,6 +156,10 @@ def _current_entries(path: Path) -> dict[str, list[int]]:
         current[_relative(path, target)] = _identity(target)
         if stat.S_IFMT(target.lstat().st_mode) != stat.S_IFDIR:
             continue
+        if _relative(path, target) in SEALED_DIRECTORIES:
+            # Created empty and then made unreadable; the source snapshot proves
+            # its mode and timestamp, and cleanup's rmdir refuses any content.
+            continue
         try:
             children = list(os.scandir(target))
         except OSError as exc:
@@ -164,6 +186,249 @@ def _validate_ledger(
     )
     if (exact and current != expected) or changed:
         raise ValueError("synthetic E2E inventory changed or contains unknown inputs")
+
+
+def _utc_ns(*fields: int) -> int:
+    from datetime import UTC, datetime
+
+    return int(datetime(*fields, tzinfo=UTC).timestamp()) * 1_000_000_000
+
+
+def _fixture_directory(ledger: dict[str, Any], path: Path, target: Path) -> None:
+    target.mkdir(mode=0o755)
+    # mkdir's mode is masked by the process umask (test-e2e.sh sets 077),
+    # but the gateway (uid 101, cap_drop: ALL) must be able to read and
+    # traverse these synthetic originals, so fix the mode explicitly.
+    descriptor = os.open(target, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fchmod(descriptor, 0o755)
+    finally:
+        os.close(descriptor)
+    _record(ledger, path, target)
+
+
+def _fixture_file(
+    ledger: dict[str, Any], path: Path, target: Path, content: bytes,
+    mtime_ns: int = TIED_MTIME_NS,
+) -> None:
+    descriptor = os.open(
+        target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644,
+    )
+    try:
+        os.fchmod(descriptor, 0o644)
+        view = memoryview(content)
+        while view:
+            view = view[os.write(descriptor, view):]
+        os.utime(descriptor, ns=(mtime_ns, mtime_ns))
+    finally:
+        os.close(descriptor)
+    _record(ledger, path, target)
+
+
+def _create_sources(ledger: dict[str, Any], path: Path) -> None:
+    """Deterministic owned originals: >600 entries, nesting, ties, links and type hints."""
+    alice, bob = path / "roots/alice", path / "roots/bob"
+    sibling = path / "roots/alice-sibling"
+    _fixture_directory(ledger, path, sibling)
+    _fixture_file(ledger, path, sibling / "sibling-secret.txt", b"Never followed\n")
+    for owner, root in (("alice", alice), ("bob", bob)):
+        _fixture_file(
+            ledger, path, root / f"{owner}-only.txt",
+            f"Synthetic {owner} fixture\n".encode("ascii"),
+        )
+    for number in range(BULK_FILES):
+        _fixture_file(
+            ledger, path, alice / f"bulk-{number:04}.txt",
+            f"bulk {number}\n".encode("ascii") * (1 + number % 7),
+        )
+    for name, content in (
+        ("100%_done.txt", b"Literal percent prefix\n"),
+        ("1000-other.txt", b"Wildcard decoy\n"),
+        ("Tie.txt", b"Upper-case tie\n"),
+        ("tie.txt", b"Lower-case tie\n"),
+        ("README", b"No extension\n"),
+        ("data.unknown", b"Literal unknown extension\n"),
+        ("photo.JPG", b"Synthetic image bytes\n"),
+        ("clip.mp4", b"Synthetic video bytes\n"),
+        ("notes.md", b"# Synthetic notes\n"),
+        ("résumé.pdf", b"Synthetic document bytes\n"),
+    ):
+        _fixture_file(ledger, path, alice / name, content)
+    pattern = bytes(range(256))
+    _fixture_file(
+        ledger, path, alice / "large.bin",
+        (pattern * (LARGE_FILE_BYTES // len(pattern) + 1))[:LARGE_FILE_BYTES],
+    )
+    _fixture_file(ledger, path, alice / "old-report.txt", b"Old report\n",
+                  _utc_ns(2001, 2, 3, 12, 0))
+    # New York local 2026-03-07 23:30 EST and 2026-03-08 23:30 EDT.
+    _fixture_file(ledger, path, alice / "dst-edge.txt", b"Before local day\n",
+                  _utc_ns(2026, 3, 8, 4, 30))
+    _fixture_file(ledger, path, alice / "dst-day.txt", b"Inside local day\n",
+                  _utc_ns(2026, 3, 9, 3, 30))
+    for directory in ("albums", "albums/2024", "albums/2024/summer", "empty-folder"):
+        _fixture_directory(ledger, path, alice / directory)
+    _fixture_file(ledger, path, alice / "albums/cover.png", b"Synthetic cover\n")
+    _fixture_file(ledger, path, alice / "albums/2024/summer/beach.jpg", b"Synthetic beach\n")
+    _fixture_file(ledger, path, alice / "albums/2024/summer/deep.txt", b"Nested fixture\n")
+    link = alice / "link-outside"
+    link.symlink_to("../alice-sibling/sibling-secret.txt")
+    _record(ledger, path, link)
+    locked = bob / "locked"
+    _fixture_directory(ledger, path, locked)
+    directories = sorted(
+        (name for name, identity in ledger["entries"].items()
+         if name.startswith(SOURCE_DIRECTORIES) and identity[2] == stat.S_IFDIR),
+        key=lambda name: name.count("/"), reverse=True,
+    )
+    for name in directories:
+        os.utime(path / name, ns=(DIRECTORY_MTIME_NS, DIRECTORY_MTIME_NS),
+                 follow_symlinks=False)
+    # Owner-unreadable, so the indexer records a real permission failure.
+    descriptor = os.open(locked, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fchmod(descriptor, 0)
+    finally:
+        os.close(descriptor)
+
+
+def _snapshot_directory(descriptor: int, prefix: str, entries: dict[str, Any]) -> None:
+    for name in sorted(os.listdir(descriptor)):
+        key = f"{prefix}/{name}"
+        info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+        mode = stat.S_IMODE(info.st_mode)
+        if stat.S_ISLNK(info.st_mode):
+            entries[key] = {"kind": "symlink", "target": os.readlink(name, dir_fd=descriptor)}
+        elif stat.S_ISREG(info.st_mode):
+            handle = os.open(
+                name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                dir_fd=descriptor,
+            )
+            try:
+                opened = os.fstat(handle)
+                if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                    raise ValueError("synthetic E2E source fixture changed")
+                digest = hashlib.sha256()
+                while chunk := os.read(handle, 1 << 16):
+                    digest.update(chunk)
+            finally:
+                os.close(handle)
+            entries[key] = {
+                "kind": "file", "mode": mode, "size": info.st_size,
+                "mtime_ns": info.st_mtime_ns, "sha256": digest.hexdigest(),
+            }
+        elif stat.S_ISDIR(info.st_mode):
+            listed = key not in SEALED_DIRECTORIES
+            entries[key] = {
+                "kind": "directory", "mode": mode, "mtime_ns": info.st_mtime_ns,
+                "listed": listed,
+            }
+            if listed:
+                child = os.open(
+                    name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=descriptor,
+                )
+                try:
+                    opened = os.fstat(child)
+                    if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                        raise ValueError("synthetic E2E source fixture changed")
+                    _snapshot_directory(child, key, entries)
+                finally:
+                    os.close(child)
+        else:
+            entries[key] = {"kind": "special", "mode": mode}
+
+
+def source_snapshot(path: Path) -> dict[str, Any]:
+    """Descriptor-relative, no-follow snapshot of every owned source entry."""
+    entries: dict[str, Any] = {}
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        base = os.open(path, flags)
+        try:
+            roots = os.open("roots", flags, dir_fd=base)
+        finally:
+            os.close(base)
+        try:
+            for directory in SOURCE_DIRECTORIES:
+                name = directory.removeprefix("roots/")
+                info = os.stat(name, dir_fd=roots, follow_symlinks=False)
+                if not stat.S_ISDIR(info.st_mode):
+                    raise ValueError("synthetic E2E source fixture changed")
+                entries[directory] = {
+                    "kind": "directory", "mode": stat.S_IMODE(info.st_mode),
+                    "mtime_ns": info.st_mtime_ns, "listed": True,
+                }
+                source = os.open(name, flags, dir_fd=roots)
+                try:
+                    opened = os.fstat(source)
+                    if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                        raise ValueError("synthetic E2E source fixture changed")
+                    _snapshot_directory(source, directory, entries)
+                finally:
+                    os.close(source)
+        finally:
+            os.close(roots)
+    except OSError as exc:
+        raise ValueError("synthetic E2E source fixture changed") from exc
+    return entries
+
+
+def _write_source_manifest(ledger: dict[str, Any], path: Path) -> None:
+    target = path / SOURCE_MANIFEST
+    raw = json.dumps(
+        {"version": 1, "entries": source_snapshot(path)},
+        sort_keys=True, separators=(",", ":"),
+    ).encode("ascii") + b"\n"
+    descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        view = memoryview(raw)
+        while view:
+            view = view[os.write(descriptor, view):]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    _record(ledger, path, target)
+
+
+def _load_source_manifest(path: Path, ledger: dict[str, Any]) -> tuple[dict[str, Any], bytes]:
+    target = path / SOURCE_MANIFEST
+    try:
+        if ledger["entries"].get(SOURCE_MANIFEST) != _identity(target):
+            raise ValueError("synthetic E2E source manifest is invalid")
+        descriptor = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            raw = os.read(descriptor, 1 << 22)
+        finally:
+            os.close(descriptor)
+        manifest = json.loads(raw)
+    except (OSError, ValueError, TypeError) as exc:
+        raise ValueError("synthetic E2E source manifest is invalid") from exc
+    if (
+        not isinstance(manifest, dict) or manifest.get("version") != 1
+        or not isinstance(manifest.get("entries"), dict) or len(raw) >= 1 << 22
+    ):
+        raise ValueError("synthetic E2E source manifest is invalid")
+    return manifest["entries"], raw
+
+
+def verify_sources(path: Path) -> dict[str, Any]:
+    """Compare the pre-mount manifest with a fresh snapshot; never repairs or deletes."""
+    ledger = _load_ledger(path)
+    recorded, raw = _load_source_manifest(path, ledger)
+    if source_snapshot(path) != recorded:
+        raise ValueError("synthetic E2E source fixture changed")
+    _validate_ledger(path, ledger)
+    kinds = [value.get("kind") for value in recorded.values()]
+    return {
+        "entries": len(recorded),
+        "files": kinds.count("file"),
+        "directories": kinds.count("directory"),
+        "symlinks": kinds.count("symlink"),
+        "sealed": sum(1 for value in recorded.values() if value.get("listed") is False),
+        "manifest_sha256": hashlib.sha256(raw).hexdigest(),
+    }
 
 
 def prepare(path: Path) -> None:
@@ -200,16 +465,7 @@ def prepare(path: Path) -> None:
         lines = ["version = 1"]
         for name in ROOT_NAMES:
             source = root_dir / name
-            source.mkdir(mode=0o755)
-            # mkdir's mode is masked by the process umask (test-e2e.sh sets 077),
-            # but the gateway (uid 101, cap_drop: ALL) must be able to read and
-            # traverse these synthetic originals, so fix the mode explicitly.
-            fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-            try:
-                os.fchmod(fd, 0o755)
-            finally:
-                os.close(fd)
-            _record(ledger, path, source)
+            _fixture_directory(ledger, path, source)
             lines.extend([
                 "", "[[slots]]", f'slot_id = "e2e-{name}"',
                 f"source = {json.dumps(str(source))}",
@@ -217,6 +473,9 @@ def prepare(path: Path) -> None:
                 'mode = "read_only"',
                 f"expected_identity = {json.dumps(local_identity(source))}",
             ])
+        _create_sources(ledger, path)
+        # Recorded before any mount preflight, render or container start.
+        _write_source_manifest(ledger, path)
         config = path / "mounts.toml"
         with config.open("x", encoding="ascii") as handle:
             os.fchmod(handle.fileno(), 0o600)
@@ -337,12 +596,15 @@ def prepare_sources(path: Path) -> None:
         return
     ledger = _load_ledger(path)
     _validate_ledger(path, ledger)
-    roots = _targets(path, ledger, [f"roots/{name}" for name in ROOT_NAMES])
-    if any(any(root.iterdir()) for root in roots):
-        raise ValueError("synthetic E2E root contains unknown inputs")
+    verify_sources(path)
+    mounted = tuple(f"roots/{name}" for name in ROOT_NAMES)
+    names = sorted(
+        name for name in ledger["entries"]
+        if name in mounted or name.startswith(tuple(f"{root}/" for root in mounted))
+    )
     _run_preparation(path, ledger, [
         "chcon", "--no-dereference", "--type", "container_file_t", "--",
-        *(str(root) for root in roots),
+        *(str(target) for target in _targets(path, ledger, names)),
     ])
 
 
@@ -461,9 +723,25 @@ def sanitize_line(line: str) -> str:
 
 
 def cleanup(path: Path) -> None:
+    # Sources must be provably unchanged before any recorded entry is removed;
+    # a mismatch or unknown entry retains the complete fixture for diagnosis.
+    verify_sources(path)
     ledger = _load_ledger(path)
     _validate_ledger(path, ledger)
-    entries = [path / name for name in ledger["entries"] if name not in (".", LEDGER_NAME)]
+    # Sealed directories cannot be listed, so remove them first: unknown content
+    # makes rmdir refuse before any other recorded entry has been deleted.
+    sealed = [name for name in SEALED_DIRECTORIES if name in ledger["entries"]]
+    for name in sealed:
+        try:
+            (path / name).rmdir()
+        except OSError as exc:
+            raise ValueError(
+                "synthetic E2E inventory changed or contains unknown inputs",
+            ) from exc
+    entries = [
+        path / name for name in ledger["entries"]
+        if name not in (".", LEDGER_NAME, *sealed)
+    ]
     entries.sort(key=lambda target: len(target.parts), reverse=True)
     for target in entries:
         if stat.S_IFMT(target.lstat().st_mode) == stat.S_IFDIR:
@@ -472,6 +750,143 @@ def cleanup(path: Path) -> None:
             target.unlink()
     (path / LEDGER_NAME).unlink()
     path.rmdir()
+
+
+_INDEX_SESSIONS: dict[str, urllib.request.OpenerDirector] = {}
+
+
+def _api(
+    opener: urllib.request.OpenerDirector, base: str, method: str, route: str,
+    body: object = None, token: str | None = None,
+) -> tuple[int, Any]:
+    headers = {"Accept": "application/json"}
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    if token is not None:
+        headers["X-CSRFToken"] = token
+    request = urllib.request.Request(base + route, data=data, headers=headers, method=method)
+    try:
+        with opener.open(request, timeout=10) as response:
+            status, raw = response.status, response.read(1 << 20)
+    except urllib.error.HTTPError as error:
+        status, raw = error.code, error.read(1 << 16)
+    except (OSError, ValueError):
+        raise ValueError("synthetic E2E index status request failed") from None
+    try:
+        return status, json.loads(raw) if raw else None
+    except ValueError:
+        return status, None
+
+
+def _csrf(opener: urllib.request.OpenerDirector, base: str) -> str:
+    status, payload = _api(opener, base, "GET", "/api/v1/auth/csrf")
+    token = payload.get("csrfToken") if isinstance(payload, dict) else None
+    if status != 200 or not isinstance(token, str):
+        raise ValueError("synthetic E2E index status request failed")
+    return token
+
+
+def _index_states(base: str, username: str, password: str) -> list[dict[str, Any]]:
+    """Every authorized root's real status; one reused session per synthetic user."""
+    opener = _INDEX_SESSIONS.get(username)
+    if opener is None:
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}),
+            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()),
+        )
+        status, _ = _api(opener, base, "POST", "/api/v1/auth/login",
+                         {"username": username, "password": password}, _csrf(opener, base))
+        if status != 200:
+            raise ValueError("synthetic E2E index status request failed")
+        _INDEX_SESSIONS[username] = opener
+    status, payload = _api(opener, base, "GET", "/api/v1/roots")
+    roots = payload.get("roots") if isinstance(payload, dict) else None
+    if status != 200 or not isinstance(roots, list):
+        raise ValueError("synthetic E2E index status request failed")
+    statuses = []
+    for root in roots:
+        identifier = root.get("id") if isinstance(root, dict) else None
+        if not isinstance(identifier, str) or len(identifier) != 36 or not all(
+            character in "0123456789abcdef-" for character in identifier
+        ):
+            raise ValueError("synthetic E2E index status request failed")
+        status, value = _api(opener, base, "GET", f"/api/v1/roots/{identifier}/index-status")
+        if status != 200 or not isinstance(value, dict):
+            raise ValueError("synthetic E2E index status request failed")
+        statuses.append(value)
+    return statuses
+
+
+def _settled(status: dict[str, Any], directories: int) -> bool:
+    """Every owned directory reached a terminal state: complete, or a real permission failure."""
+    try:
+        completed = int(status.get("completedDirectories", ""))
+        degraded = int(status.get("degradedDirectories", ""))
+    except ValueError:
+        return False
+    if status.get("state") == "ready":
+        return status.get("lastCompletedAt") is not None and (completed, degraded) == (
+            directories, 0,
+        )
+    return status.get("state") == "degraded" and degraded > 0 and (
+        completed + degraded == directories
+    )
+
+
+def _state_summary(statuses: list[dict[str, Any]]) -> str:
+    known = ("not_indexed", "queued", "scanning", "ready", "degraded", "unavailable")
+    return ",".join(
+        f"{state if state in known else 'unknown'}:{completed}/{degraded}"
+        for state, completed, degraded in (
+            (status.get("state"), status.get("completedDirectories"),
+             status.get("degradedDirectories")) for status in statuses
+        )
+        if str(completed).isdecimal() and str(degraded).isdecimal()
+    )[:200]
+
+
+def _close_index_sessions(base: str) -> None:
+    while _INDEX_SESSIONS:
+        _, opener = _INDEX_SESSIONS.popitem()
+        with contextlib.suppress(ValueError):
+            _api(opener, base, "POST", "/api/v1/auth/logout", token=_csrf(opener, base))
+
+
+def index_wait(path: Path) -> None:
+    """Bounded wait for the real indexer, observed only through the status API."""
+    path = checked_directory(str(path))
+    recorded, _ = _load_source_manifest(path, _load_ledger(path))
+    base = os.environ.get("AEGIS_PUBLIC_URL", "")
+    if not base.startswith("http://127.0.0.1:") or not base.removeprefix(
+        "http://127.0.0.1:",
+    ).isdecimal():
+        raise ValueError("synthetic E2E index status request failed")
+    deadline = _monotonic() + INDEX_WAIT_SECONDS
+    try:
+        for username, variable in (("alice", "E2E_ALICE_PASSWORD"), ("bob", "E2E_BOB_PASSWORD")):
+            password = os.environ.get(variable, "")
+            if not password:
+                raise ValueError("synthetic E2E index status request failed")
+            source = f"roots/{username}"
+            directories = sum(
+                1 for name, value in recorded.items()
+                if value.get("kind") == "directory"
+                and (name == source or name.startswith(f"{source}/"))
+            )
+            while True:
+                statuses = _index_states(base, username, password)
+                if len(statuses) == 1 and _settled(statuses[0], directories):
+                    break
+                if _monotonic() >= deadline:
+                    # Fixed state vocabulary and counters only, never names or values.
+                    print(f"AEGIS_E2E index-wait user={username} "
+                          f"states={_state_summary(statuses)}", file=sys.stderr, flush=True)
+                    raise ValueError("synthetic E2E index did not settle")
+                _sleep(2)
+    finally:
+        _close_index_sessions(base)
 
 
 def controlled_compose(arguments: list[str]) -> int:
@@ -490,11 +905,12 @@ DIRECTORY_ACTIONS = {
     "prepare-runtime": prepare_runtime,
     "resources-check": resources_check,
     "resources-cleanup": resources_cleanup,
+    "index-wait": index_wait,
     "cleanup": cleanup,
 }
 ACTIONS = (
     "controlled-compose", "check-compose", "sanitize-logs", "resources-record",
-    *DIRECTORY_ACTIONS,
+    "sources-verify", *DIRECTORY_ACTIONS,
 )
 # The exact constant refusals raised by this harness and aegisctl.container_resources.
 # Any other message, even of these types, is never published.
@@ -522,9 +938,12 @@ _PUBLIC_REFUSALS: dict[type[BaseException], frozenset[str]] = {
         "synthetic E2E ownership inventory changed",
         "synthetic E2E ownership mapping failed",
         "synthetic E2E resource ledger is invalid",
-        "synthetic E2E root contains unknown inputs",
+        "synthetic E2E index did not settle",
+        "synthetic E2E index status request failed",
         "synthetic E2E runtime preparation failed",
         "synthetic E2E secret has unsafe mode",
+        "synthetic E2E source fixture changed",
+        "synthetic E2E source manifest is invalid",
         "unexpected E2E project",
         "unknown E2E resource transition",
         "unknown E2E support action",
@@ -591,6 +1010,14 @@ def main(arguments: list[str]) -> int:
                 print(sanitize_line(line))
         elif action == "resources-record":
             resources_record(checked_directory(arguments[1]), arguments[2])
+        elif action == "sources-verify":
+            summary = verify_sources(checked_directory(arguments[1]))
+            # A bounded report on stdout, outside the fixture that cleanup removes.
+            print("AEGIS_E2E sources verified " + " ".join(
+                f"{key}={summary[key]}" for key in (
+                    "entries", "files", "directories", "symlinks", "sealed", "manifest_sha256",
+                )
+            ), flush=True)
         elif action in DIRECTORY_ACTIONS:
             DIRECTORY_ACTIONS[action](checked_directory(arguments[1]))
         else:

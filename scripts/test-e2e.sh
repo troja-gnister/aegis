@@ -10,7 +10,8 @@ annotate_phase() {
     case "$name" in
         config|verify-diagnostics|prepare|resources-check|prepare-sources|build|\
         mounts-preflight|mounts-render|record-generated|prepare-runtime|check-compose|\
-        up|resources-record|bootstrap-admin|seed|playwright|resources-cleanup|cleanup) ;;
+        up|resources-record|bootstrap-admin|seed|index-wait|playwright|resources-cleanup|\
+        sources-verify|cleanup) ;;
         *) name=unknown ;;
     esac
     if [[ "${GITHUB_ACTIONS-}" == true ]]; then
@@ -141,7 +142,14 @@ cleanup() {
                 uv run python scripts/e2e_support.py sanitize-logs >&2
         fi
     fi
+    # Removing the exact recorded containers stops every worker; only then are the
+    # owned sources compared with their pre-mount manifest, and only verified,
+    # recorded fixture entries are deleted. Any refusal retains the fixture.
     uv run python scripts/e2e_support.py resources-cleanup "$work_dir" || cleanup_result=$?
+    if (( cleanup_result == 0 )); then
+        cleanup_phase=sources-verify
+        uv run python scripts/e2e_support.py sources-verify "$work_dir" || cleanup_result=$?
+    fi
     if (( cleanup_result == 0 )); then
         cleanup_phase=cleanup
         uv run python scripts/e2e_support.py cleanup "$work_dir" || cleanup_result=$?
@@ -214,6 +222,12 @@ if (( compose_status != 0 )); then exit "$compose_status"; fi
 phase=seed
 "${compose[@]}" exec -T web python manage.py seed_phase1_e2e
 "${compose[@]}" exec -T web python manage.py seed_phase1_e2e
+
+# Browser assertions start only after the real indexer has settled every root,
+# observed through the authenticated status API with a bounded deadline.
+phase=index-wait
+E2E_ALICE_PASSWORD="$E2E_ALICE_PASSWORD" E2E_BOB_PASSWORD="$E2E_BOB_PASSWORD" \
+    uv run python scripts/e2e_support.py index-wait "$work_dir"
 
 # Credentials exist only in the browser runner process, never in command
 # arguments, browser storage, traces, reports, or production configuration.

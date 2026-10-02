@@ -1,24 +1,9 @@
-import {expect, type Page} from "@playwright/test";
+import {expect} from "@playwright/test";
+import {requiredSecret, signIn, submitLogin} from "./auth";
 import {test} from "./safe-test";
 
-function requiredSecret(name: string): string {
-  const value = process.env[name];
-  if (!value) throw new Error(`${name} is required`);
-  return value;
-}
-
-async function signIn(page: Page, username: string, password: string) {
-  await page.goto("/login");
-  await page.getByLabel("Username").fill(username);
-  await page.getByLabel("Password").fill(password);
-  const login = page.waitForResponse((response) =>
-    new URL(response.url()).pathname === "/api/v1/auth/login"
-    && response.request().method() === "POST",
-  );
-  await page.getByRole("button", {name: "Sign in"}).click();
-  expect((await login).status(), "Credential endpoint status").toBe(200);
-  await expect(page).toHaveURL(/\/roots$/);
-}
+// Sign-in may wait for the gateway's real login rate limit shared by both suites.
+test.describe.configure({timeout: 120_000});
 
 test("Alice isolation, refresh, phone accessibility, and revoked restoration", async ({page}) => {
   await signIn(page, "alice", requiredSecret("E2E_ALICE_PASSWORD"));
@@ -121,9 +106,7 @@ test("anonymous boundaries and bad credentials disclose no private metadata", as
   const body = await response.text();
   expect(body).not.toMatch(/Alice files|e2e-alice|\/srv\/aegis/);
   await page.goto("/login");
-  await page.getByLabel("Username").fill("alice");
-  await page.getByLabel("Password").fill("definitely-not-the-password");
-  await page.getByRole("button", {name: "Sign in"}).click();
+  expect(await submitLogin(page, "alice", "definitely-not-the-password")).toBe(401);
   await expect(page.getByRole("alert")).toHaveText(
     "The username or password was not accepted.",
   );
