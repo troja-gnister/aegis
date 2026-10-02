@@ -1,0 +1,1687 @@
+{
+  "bottleneck": {
+    "inferences": [
+      "inferred: concurrent list p50 is 4.38x the sequential service time, so most loaded latency is waiting for a shared resource rather than per-query work",
+      "inferred: web averaged 163.9% of one core, above one core, so request work is not purely serialized by one Python GIL (C extensions release it); the single-process hypothesis is only partly supported",
+      "inferred: PostgreSQL used at least as much CPU as web (187.6% vs 163.9% of one core). With no persistent connections, every request opens a new database connection (backend start and SCRAM login) plus a locking transaction; that is a plausible major cost, not profiled here"
+    ],
+    "measured": {
+      "concurrentP50Ms": {
+        "details": 263.887,
+        "list": 229.357,
+        "status": 457.048
+      },
+      "concurrentToSequentialListP50": 4.38,
+      "postgresCpuMeanPercentOfOneCore": 187.6,
+      "postgresCpuMsPerRequest": 46.46,
+      "postgresCpuQuotaCores": 4,
+      "sequentialP50Ms": {
+        "details": 50.594,
+        "list": 52.419,
+        "status": 53.163
+      },
+      "warmThroughputRequestsPerSecond": 40.38,
+      "webCpuMeanPercentOfOneCore": 163.9,
+      "webCpuMsPerRequest": 40.59,
+      "webCpuQuotaCores": 4
+    }
+  },
+  "clientModel": "closed loop, ten concurrent users (one Python thread and cookie jar each), zero think time; the load generator shares the host, and client-side GIL waits are included in measured latency",
+  "coldRestart": [
+    "postgres",
+    "web"
+  ],
+  "cpuPlacement": {
+    "applied": {
+      "mode": "cpus",
+      "value": 4.0
+    },
+    "note": "engine has no cpuset controller: each core service capped at 4 CPUs; the shared four-CPU set is NOT enforced",
+    "requested": "shared four-CPU set (reference profile)"
+  },
+  "datasetCounts": {
+    "entries": 1000000,
+    "kinds": {
+      "directory": 1957,
+      "file": 997012,
+      "special": 32,
+      "symlink": 999
+    },
+    "roots": {
+      "main": 715022,
+      "second": 189985,
+      "third": 94993
+    },
+    "states": {
+      "inaccessible": 4980,
+      "missing": 9985,
+      "present": 985035
+    }
+  },
+  "durations": {
+    "coldOperationsPerUser": 30,
+    "measurementSeconds": 900,
+    "warmupSeconds": 300
+  },
+  "environment": {
+    "containers": {
+      "gateway": {
+        "cpusetCpus": "",
+        "image": "sha256:cd9b2e2bdf27dcc8800165d91da12eda96ece2cde3e6edaa208273d17e70ffcf",
+        "imageReference": "aegis-gateway",
+        "memoryLimitBytes": 268435456,
+        "memorySwapBytes": 268435456,
+        "nanoCpus": 4000000000
+      },
+      "indexer": {
+        "cpusetCpus": "",
+        "image": "sha256:5bca1506fa8d575984c32e37b341b4a196f62c82a64ee8305ac53bc3f7ff308c",
+        "imageReference": "aegis-backend",
+        "memoryLimitBytes": 1073741824,
+        "memorySwapBytes": 1073741824,
+        "nanoCpus": 4000000000
+      },
+      "media": {
+        "cpusetCpus": "",
+        "image": "sha256:5bca1506fa8d575984c32e37b341b4a196f62c82a64ee8305ac53bc3f7ff308c",
+        "imageReference": "aegis-backend",
+        "memoryLimitBytes": 2147483648,
+        "memorySwapBytes": 2147483648,
+        "nanoCpus": 4000000000
+      },
+      "migrate": {
+        "cpusetCpus": "",
+        "image": "sha256:5bca1506fa8d575984c32e37b341b4a196f62c82a64ee8305ac53bc3f7ff308c",
+        "imageReference": "aegis-backend",
+        "memoryLimitBytes": 0,
+        "memorySwapBytes": 0,
+        "nanoCpus": 0
+      },
+      "operations": {
+        "cpusetCpus": "",
+        "image": "sha256:5bca1506fa8d575984c32e37b341b4a196f62c82a64ee8305ac53bc3f7ff308c",
+        "imageReference": "aegis-backend",
+        "memoryLimitBytes": 1073741824,
+        "memorySwapBytes": 1073741824,
+        "nanoCpus": 4000000000
+      },
+      "postgres": {
+        "cpusetCpus": "",
+        "image": "sha256:24c1ea14ade6f6086ba5411baa8aa64d36b888c94911ec730a5f9bf577860237",
+        "imageReference": "aegis-postgres",
+        "memoryLimitBytes": 3221225472,
+        "memorySwapBytes": 3221225472,
+        "nanoCpus": 4000000000
+      },
+      "web": {
+        "cpusetCpus": "",
+        "image": "sha256:5bca1506fa8d575984c32e37b341b4a196f62c82a64ee8305ac53bc3f7ff308c",
+        "imageReference": "aegis-backend",
+        "memoryLimitBytes": 1073741824,
+        "memorySwapBytes": 1073741824,
+        "nanoCpus": 4000000000
+      }
+    },
+    "engine": {
+      "apiVersion": "1.51",
+      "cgroupVersion": "2",
+      "engine": "docker",
+      "kernel": "7.2.7-200.fc44.x86_64",
+      "memTotal": 33285591040,
+      "ncpu": 12,
+      "os": "Alpine Linux v3.22 (containerized)",
+      "serverVersion": "28.5.2",
+      "storage": "engine-managed named volume on the host SSD (not tmpfs)",
+      "storageCalibration": "not measured: uncalibrated development host",
+      "storageDriver": "overlay2"
+    },
+    "host": {
+      "cpuModel": "13th Gen Intel(R) Core(TM) i7-1355U",
+      "governor": "powersave",
+      "kernel": "7.2.7-200.fc44.x86_64",
+      "logicalCpus": 12,
+      "machine": "x86_64",
+      "memoryBytes": 33285591040,
+      "python": "3.13.15"
+    },
+    "source": {
+      "gitRevision": "0744cab861d76813e9e8d9d4c08270d2e1ef9b92",
+      "imagesLockSha256": "036c856617e0c43b25b1b88e5d6feb7daba0a4b60df1fae7e095f75cf52d92f9",
+      "npmLockSha256": "d5a8ccfb02a522f17028eba67b93a624b95a6a7a9943ec4b1fd5c3b329b1e1a8",
+      "profileSha256": "5b4256154b633f1b28d20509831fb931b43fbf62b899c568fdeb8f2e0fa15c38",
+      "uvLockSha256": "708ed167bcceae6b4c08c2efe6ef822dbf6d55643e787e0624fcf06a311218b7",
+      "workingTreeChanges": 8
+    }
+  },
+  "evidenceLabel": "provisional: full profile workload on an uncalibrated development host",
+  "fixtureControl": "root_index_state_due_beyond_measurement_window",
+  "gates": {
+    "cold": {
+      "allRoutesP95Ms": 247.997,
+      "failures": 0,
+      "label": "cold",
+      "listP95Ms": 229.554,
+      "passed": true,
+      "routesOverThreshold": [
+        "status"
+      ],
+      "thresholdP95Ms": 300.0
+    },
+    "matrix": {
+      "allRoutesP95Ms": 125.466,
+      "failures": 0,
+      "label": "matrix",
+      "listP95Ms": 125.466,
+      "passed": true,
+      "routesOverThreshold": [],
+      "thresholdP95Ms": 300.0
+    },
+    "sequential": {
+      "allRoutesP95Ms": 63.248,
+      "failures": 0,
+      "label": "sequential",
+      "listP95Ms": 64.272,
+      "passed": true,
+      "routesOverThreshold": [],
+      "thresholdP95Ms": 300.0
+    },
+    "warm": {
+      "allRoutesP95Ms": 384.781,
+      "failures": 0,
+      "label": "unloaded",
+      "listP95Ms": 291.173,
+      "passed": true,
+      "routesOverThreshold": [
+        "details",
+        "status"
+      ],
+      "thresholdP95Ms": 300.0,
+      "wideFolderListShare": 0.3973,
+      "wideFolderListShareMinimum": 0.25
+    },
+    "warmup": {
+      "allRoutesP95Ms": 372.932,
+      "failures": 0,
+      "label": "warmup",
+      "listP95Ms": 290.591,
+      "passed": true,
+      "routesOverThreshold": [
+        "details",
+        "status"
+      ],
+      "thresholdP95Ms": 300.0
+    }
+  },
+  "matrixZeroHitConsistent": true,
+  "mode": "catalog",
+  "optimisticFixtureSteps": "post-seed VACUUM (ANALYZE) and an OS page cache that survives the cold restart both favor this run; Task 16's worker-load run is the counterweight",
+  "package": "2A.1",
+  "postSeedMaintenance": "VACUUM (ANALYZE) public.catalog_catalogentry",
+  "postgresSettings": {
+    "checkpoint_timeout": "300s",
+    "default_statistics_target": "100",
+    "effective_cache_size": "5242888kB",
+    "effective_io_concurrency": "16",
+    "huge_pages": "try",
+    "jit": "on",
+    "maintenance_work_mem": "65536kB",
+    "max_connections": "100",
+    "max_parallel_workers_per_gather": "2",
+    "max_wal_size": "1024MB",
+    "random_page_cost": "4",
+    "seq_page_cost": "1",
+    "server_version": "18.6",
+    "shared_buffers": "163848kB",
+    "synchronous_commit": "on",
+    "work_mem": "4096kB"
+  },
+  "queryEvidence": [
+    {
+      "catalogQueries": [
+        {
+          "executionMs": 0.383,
+          "indexes": [
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 1.322
+        },
+        {
+          "executionMs": 1.938,
+          "indexes": [
+            "catalog_browse_name_asc",
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 0.588
+        }
+      ],
+      "label": "wide-name-asc-first",
+      "payloadBytes": 25216,
+      "rows": 100,
+      "sqlCount": 13,
+      "status": 200
+    },
+    {
+      "catalogQueries": [
+        {
+          "executionMs": 0.678,
+          "indexes": [
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 2.114
+        },
+        {
+          "executionMs": 2.111,
+          "indexes": [
+            "catalog_browse_name_asc",
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 1.479
+        }
+      ],
+      "label": "wide-name-asc-next",
+      "payloadBytes": 25556,
+      "rows": 100,
+      "sqlCount": 13,
+      "status": 200
+    },
+    {
+      "catalogQueries": [
+        {
+          "executionMs": 0.66,
+          "indexes": [
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 2.106
+        },
+        {
+          "executionMs": 1.939,
+          "indexes": [
+            "catalog_browse_name_desc",
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 0.568
+        }
+      ],
+      "label": "wide-name-desc-first",
+      "payloadBytes": 25216,
+      "rows": 100,
+      "sqlCount": 13,
+      "status": 200
+    },
+    {
+      "catalogQueries": [
+        {
+          "executionMs": 0.555,
+          "indexes": [
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 2.126
+        },
+        {
+          "executionMs": 3.728,
+          "indexes": [
+            "catalog_browse_name_desc",
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 1.383
+        }
+      ],
+      "label": "wide-name-desc-next",
+      "payloadBytes": 25556,
+      "rows": 100,
+      "sqlCount": 13,
+      "status": 200
+    },
+    {
+      "catalogQueries": [
+        {
+          "executionMs": 0.677,
+          "indexes": [
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 2.106
+        },
+        {
+          "executionMs": 3.549,
+          "indexes": [
+            "catalog_browse_modified_asc",
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 0.984
+        }
+      ],
+      "label": "wide-modified-asc-first",
+      "payloadBytes": 25217,
+      "rows": 100,
+      "sqlCount": 13,
+      "status": 200
+    },
+    {
+      "catalogQueries": [
+        {
+          "executionMs": 0.696,
+          "indexes": [
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 2.139
+        },
+        {
+          "executionMs": 3.865,
+          "indexes": [
+            "catalog_browse_modified_asc",
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 1.729
+        }
+      ],
+      "label": "wide-modified-asc-next",
+      "payloadBytes": 25558,
+      "rows": 100,
+      "sqlCount": 13,
+      "status": 200
+    },
+    {
+      "catalogQueries": [
+        {
+          "executionMs": 0.679,
+          "indexes": [
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 2.107
+        },
+        {
+          "executionMs": 3.545,
+          "indexes": [
+            "catalog_browse_modified_desc",
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 0.977
+        }
+      ],
+      "label": "wide-modified-desc-first",
+      "payloadBytes": 25217,
+      "rows": 100,
+      "sqlCount": 13,
+      "status": 200
+    },
+    {
+      "catalogQueries": [
+        {
+          "executionMs": 0.694,
+          "indexes": [
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 2.127
+        },
+        {
+          "executionMs": 3.864,
+          "indexes": [
+            "catalog_browse_modified_desc",
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 1.719
+        }
+      ],
+      "label": "wide-modified-desc-next",
+      "payloadBytes": 25558,
+      "rows": 100,
+      "sqlCount": 13,
+      "status": 200
+    },
+    {
+      "catalogQueries": [
+        {
+          "executionMs": 0.648,
+          "indexes": [
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 2.006
+        },
+        {
+          "executionMs": 3.368,
+          "indexes": [
+            "catalog_browse_size_asc",
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 0.932
+        }
+      ],
+      "label": "wide-size-asc-first",
+      "payloadBytes": 25193,
+      "rows": 100,
+      "sqlCount": 13,
+      "status": 200
+    },
+    {
+      "catalogQueries": [
+        {
+          "executionMs": 0.686,
+          "indexes": [
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 2.124
+        },
+        {
+          "executionMs": 3.717,
+          "indexes": [
+            "catalog_browse_size_asc",
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 1.715
+        }
+      ],
+      "label": "wide-size-asc-next",
+      "payloadBytes": 25510,
+      "rows": 100,
+      "sqlCount": 13,
+      "status": 200
+    },
+    {
+      "catalogQueries": [
+        {
+          "executionMs": 0.701,
+          "indexes": [
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 2.153
+        },
+        {
+          "executionMs": 3.468,
+          "indexes": [
+            "catalog_browse_size_desc",
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 0.956
+        }
+      ],
+      "label": "wide-size-desc-first",
+      "payloadBytes": 25193,
+      "rows": 100,
+      "sqlCount": 13,
+      "status": 200
+    },
+    {
+      "catalogQueries": [
+        {
+          "executionMs": 0.73,
+          "indexes": [
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 2.037
+        },
+        {
+          "executionMs": 3.76,
+          "indexes": [
+            "catalog_browse_size_desc",
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 1.616
+        }
+      ],
+      "label": "wide-size-desc-next",
+      "payloadBytes": 25510,
+      "rows": 100,
+      "sqlCount": 13,
+      "status": 200
+    },
+    {
+      "catalogQueries": [
+        {
+          "executionMs": 0.394,
+          "indexes": [
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 1.953
+        },
+        {
+          "executionMs": 8.86,
+          "indexes": [
+            "catalog_browse_name_asc",
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 0.926
+        }
+      ],
+      "label": "wide-filter-type-common",
+      "payloadBytes": 25147,
+      "rows": 100,
+      "sqlCount": 13,
+      "status": 200
+    },
+    {
+      "catalogQueries": [
+        {
+          "executionMs": 0.668,
+          "indexes": [
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 2.135
+        },
+        {
+          "executionMs": 12.647,
+          "indexes": [
+            "catalog_catalogentry_logical_parent_id_9f89881d",
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 0.976
+        }
+      ],
+      "label": "wide-filter-type-rare",
+      "payloadBytes": 12643,
+      "rows": 50,
+      "sqlCount": 13,
+      "status": 200
+    },
+    {
+      "catalogQueries": [
+        {
+          "executionMs": 0.661,
+          "indexes": [
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 2.028
+        },
+        {
+          "executionMs": 12.271,
+          "indexes": [
+            "catalog_catalogentry_logical_parent_id_9f89881d",
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 0.919
+        }
+      ],
+      "label": "wide-filter-type-zero",
+      "payloadBytes": 382,
+      "rows": 0,
+      "sqlCount": 13,
+      "status": 200
+    },
+    {
+      "catalogQueries": [
+        {
+          "executionMs": 0.663,
+          "indexes": [
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 2.09
+        },
+        {
+          "executionMs": 3.422,
+          "indexes": [
+            "catalog_browse_name_asc",
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 1.105
+        }
+      ],
+      "label": "wide-filter-prefix-common",
+      "payloadBytes": 25163,
+      "rows": 100,
+      "sqlCount": 13,
+      "status": 200
+    },
+    {
+      "catalogQueries": [
+        {
+          "executionMs": 0.688,
+          "indexes": [
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 2.155
+        },
+        {
+          "executionMs": 0.269,
+          "indexes": [
+            "catalog_browse_name_asc",
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 1.091
+        }
+      ],
+      "label": "wide-filter-prefix-zero",
+      "payloadBytes": 382,
+      "rows": 0,
+      "sqlCount": 13,
+      "status": 200
+    },
+    {
+      "catalogQueries": [
+        {
+          "executionMs": 0.378,
+          "indexes": [
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 1.205
+        },
+        {
+          "executionMs": 11.647,
+          "indexes": [
+            "catalog_catalogentry_logical_parent_id_9f89881d",
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 0.596
+        }
+      ],
+      "label": "wide-filter-size-rare",
+      "payloadBytes": 12859,
+      "rows": 49,
+      "sqlCount": 13,
+      "status": 200
+    },
+    {
+      "catalogQueries": [
+        {
+          "executionMs": 0.375,
+          "indexes": [
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 1.228
+        },
+        {
+          "executionMs": 1.819,
+          "indexes": [
+            "catalog_browse_name_asc",
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 0.571
+        }
+      ],
+      "label": "wide-filter-modified-common",
+      "payloadBytes": 25216,
+      "rows": 100,
+      "sqlCount": 13,
+      "status": 200
+    },
+    {
+      "catalogQueries": [
+        {
+          "executionMs": 0.493,
+          "indexes": [
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 1.619
+        },
+        {
+          "executionMs": 3.907,
+          "indexes": [
+            "catalog_browse_size_desc",
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 0.793
+        }
+      ],
+      "label": "wide-filter-availability-missing",
+      "payloadBytes": 25748,
+      "rows": 100,
+      "sqlCount": 13,
+      "status": 200
+    },
+    {
+      "catalogQueries": [
+        {
+          "executionMs": 0.492,
+          "indexes": [
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 1.449
+        },
+        {
+          "executionMs": 2.365,
+          "indexes": [
+            "catalog_browse_name_asc",
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 0.981
+        }
+      ],
+      "label": "wide-filter-all-common",
+      "payloadBytes": 25197,
+      "rows": 100,
+      "sqlCount": 13,
+      "status": 200
+    },
+    {
+      "catalogQueries": [
+        {
+          "executionMs": 0.467,
+          "indexes": [
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 1.579
+        },
+        {
+          "executionMs": 0.176,
+          "indexes": [
+            "catalog_browse_name_asc",
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 0.775
+        }
+      ],
+      "label": "wide-filter-all-zero",
+      "payloadBytes": 382,
+      "rows": 0,
+      "sqlCount": 13,
+      "status": 200
+    },
+    {
+      "catalogQueries": [
+        {
+          "executionMs": 0.518,
+          "indexes": [
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 1.775
+        },
+        {
+          "executionMs": 2.265,
+          "indexes": [
+            "catalog_browse_name_asc",
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 0.73
+        }
+      ],
+      "label": "tree-name-asc-first",
+      "payloadBytes": 25597,
+      "rows": 100,
+      "sqlCount": 13,
+      "status": 200
+    },
+    {
+      "catalogQueries": [
+        {
+          "executionMs": 0.311,
+          "indexes": [
+            "catalog_catalogentry_pkey"
+          ],
+          "planningMs": 0.654
+        },
+        {
+          "executionMs": 0.497,
+          "indexes": [
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 1.619
+        }
+      ],
+      "label": "details",
+      "payloadBytes": 472,
+      "sqlCount": 17,
+      "status": 200
+    },
+    {
+      "catalogQueries": [],
+      "label": "index-status",
+      "payloadBytes": 217,
+      "sqlCount": 15,
+      "status": 200
+    }
+  ],
+  "realizedMix": {
+    "cold": {
+      "alternateSorts:first": {
+        "planned": 7,
+        "realized": 15
+      },
+      "alternateSorts:next": {
+        "planned": 25,
+        "realized": 18
+      },
+      "alternateSorts:previous": {
+        "planned": 2,
+        "realized": 1
+      },
+      "basicFilters:first": {
+        "planned": 23,
+        "realized": 30
+      },
+      "basicFilters:next": {
+        "planned": 10,
+        "realized": 3
+      },
+      "details:-": {
+        "planned": 29,
+        "realized": 29
+      },
+      "directoryPages:first": {
+        "planned": 61,
+        "realized": 69
+      },
+      "directoryPages:next": {
+        "planned": 112,
+        "realized": 107
+      },
+      "directoryPages:previous": {
+        "planned": 18,
+        "realized": 15
+      },
+      "indexStatus:-": {
+        "planned": 13,
+        "realized": 13
+      }
+    },
+    "warm": {
+      "alternateSorts:first": {
+        "planned": 1939,
+        "realized": 1941
+      },
+      "alternateSorts:next": {
+        "planned": 3024,
+        "realized": 3024
+      },
+      "alternateSorts:previous": {
+        "planned": 539,
+        "realized": 537
+      },
+      "basicFilters:first": {
+        "planned": 2114,
+        "realized": 2123
+      },
+      "basicFilters:next": {
+        "planned": 1417,
+        "realized": 1408
+      },
+      "details:-": {
+        "planned": 3614,
+        "realized": 3614
+      },
+      "directoryPages:first": {
+        "planned": 7749,
+        "realized": 7754
+      },
+      "directoryPages:next": {
+        "planned": 11912,
+        "realized": 11912
+      },
+      "directoryPages:previous": {
+        "planned": 2139,
+        "realized": 2134
+      },
+      "indexStatus:-": {
+        "planned": 1891,
+        "realized": 1891
+      }
+    }
+  },
+  "referenceCertification": "open: requires the calibrated N100 reference host",
+  "routes": {
+    "cold": {
+      "details": {
+        "errorRate": 0.0,
+        "failures": 0,
+        "meanPayloadBytes": 514.7,
+        "meanRows": null,
+        "p50Ms": 207.206,
+        "p95Ms": 264.067,
+        "p99Ms": 267.668,
+        "requests": 29
+      },
+      "list": {
+        "errorRate": 0.0,
+        "failures": 0,
+        "meanPayloadBytes": 23967.2,
+        "meanRows": 93.09,
+        "p50Ms": 185.752,
+        "p95Ms": 229.554,
+        "p99Ms": 237.538,
+        "requests": 258
+      },
+      "status": {
+        "errorRate": 0.0,
+        "failures": 0,
+        "meanPayloadBytes": 217.0,
+        "meanRows": null,
+        "p50Ms": 401.3,
+        "p95Ms": 614.38,
+        "p99Ms": 614.38,
+        "requests": 13
+      }
+    },
+    "matrix": {
+      "list": {
+        "errorRate": 0.0,
+        "failures": 0,
+        "meanPayloadBytes": 20973.7,
+        "meanRows": 82.0,
+        "p50Ms": 61.579,
+        "p95Ms": 125.466,
+        "p99Ms": 154.287,
+        "requests": 702
+      }
+    },
+    "sequential": {
+      "details": {
+        "errorRate": 0.0,
+        "failures": 0,
+        "meanPayloadBytes": 477.0,
+        "meanRows": null,
+        "p50Ms": 50.594,
+        "p95Ms": 62.693,
+        "p99Ms": 65.511,
+        "requests": 100
+      },
+      "list": {
+        "errorRate": 0.0,
+        "failures": 0,
+        "meanPayloadBytes": 25406.5,
+        "meanRows": 100.0,
+        "p50Ms": 52.419,
+        "p95Ms": 64.272,
+        "p99Ms": 67.848,
+        "requests": 200
+      },
+      "status": {
+        "errorRate": 0.0,
+        "failures": 0,
+        "meanPayloadBytes": 217.0,
+        "meanRows": null,
+        "p50Ms": 53.163,
+        "p95Ms": 62.836,
+        "p99Ms": 64.647,
+        "requests": 100
+      }
+    },
+    "warm": {
+      "details": {
+        "errorRate": 0.0,
+        "failures": 0,
+        "meanPayloadBytes": 511.8,
+        "meanRows": null,
+        "p50Ms": 263.887,
+        "p95Ms": 328.768,
+        "p99Ms": 359.51,
+        "requests": 3614
+      },
+      "list": {
+        "errorRate": 0.0,
+        "failures": 0,
+        "meanPayloadBytes": 24792.3,
+        "meanRows": 96.23,
+        "p50Ms": 229.357,
+        "p95Ms": 291.173,
+        "p99Ms": 335.636,
+        "requests": 30833
+      },
+      "status": {
+        "errorRate": 0.0,
+        "failures": 0,
+        "meanPayloadBytes": 216.7,
+        "meanRows": null,
+        "p50Ms": 457.048,
+        "p95Ms": 554.027,
+        "p99Ms": 589.908,
+        "requests": 1891
+      }
+    },
+    "warmup": {
+      "details": {
+        "errorRate": 0.0,
+        "failures": 0,
+        "meanPayloadBytes": 510.2,
+        "meanRows": null,
+        "p50Ms": 260.539,
+        "p95Ms": 328.341,
+        "p99Ms": 362.16,
+        "requests": 1198
+      },
+      "list": {
+        "errorRate": 0.0,
+        "failures": 0,
+        "meanPayloadBytes": 24814.5,
+        "meanRows": 96.31,
+        "p50Ms": 226.97,
+        "p95Ms": 290.591,
+        "p99Ms": 336.327,
+        "requests": 10445
+      },
+      "status": {
+        "errorRate": 0.0,
+        "failures": 0,
+        "meanPayloadBytes": 216.7,
+        "meanRows": null,
+        "p50Ms": 451.258,
+        "p95Ms": 556.464,
+        "p99Ms": 602.883,
+        "requests": 613
+      }
+    }
+  },
+  "schemaIdentity": "sha256:3a4898d4324c731c43fff0415980d2db5a397a420db950a3babab9643a74d2aa",
+  "seedSeconds": 98.5,
+  "shape": {
+    "entries": 1000000,
+    "seed": 20260914,
+    "wideFolder": 50000
+  },
+  "signingKeySource": null,
+  "sizes": {
+    "averageRowBytesSampled": 275.41184505805444,
+    "budgetBytes": 8589934592,
+    "catalogAndIndexingTablesTotalBytes": 1516314624,
+    "catalogEntryEstimatedRows": 1000011,
+    "catalogEntryHeapBytes": 287178752,
+    "catalogEntryIndexBytes": 1228791808,
+    "catalogEntryTotalBytes": 1516085248,
+    "indexes": [
+      {
+        "bytes": 168820736,
+        "index": "catalog_browse_modified_asc",
+        "scans": 2558
+      },
+      {
+        "bytes": 183328768,
+        "index": "catalog_browse_modified_desc",
+        "scans": 10412
+      },
+      {
+        "bytes": 160456704,
+        "index": "catalog_browse_name_asc",
+        "scans": 26929
+      },
+      {
+        "bytes": 158572544,
+        "index": "catalog_browse_name_desc",
+        "scans": 13417
+      },
+      {
+        "bytes": 162619392,
+        "index": "catalog_browse_size_asc",
+        "scans": 1911
+      },
+      {
+        "bytes": 156622848,
+        "index": "catalog_browse_size_desc",
+        "scans": 10124
+      },
+      {
+        "bytes": 8167424,
+        "index": "catalog_catalogentry_logical_parent_id_9f89881d",
+        "scans": 622
+      },
+      {
+        "bytes": 39411712,
+        "index": "catalog_catalogentry_pkey",
+        "scans": 2006505
+      },
+      {
+        "bytes": 6512640,
+        "index": "catalog_catalogentry_root_id_d4dfa9d5",
+        "scans": 0
+      },
+      {
+        "bytes": 8167424,
+        "index": "catalog_catalogentry_source_parent_id_31d09889",
+        "scans": 0
+      },
+      {
+        "bytes": 16384,
+        "index": "catalog_one_anchor_per_root",
+        "scans": 0
+      },
+      {
+        "bytes": 62922752,
+        "index": "catalog_root_id_uniq",
+        "scans": 27371351
+      },
+      {
+        "bytes": 113172480,
+        "index": "catalog_source_location_uniq",
+        "scans": 0
+      }
+    ],
+    "sampledRows": 20498,
+    "withinBudget": true
+  },
+  "startedAt": "2026-10-02T02:37:22.518260+00:00",
+  "storage": {
+    "catalogBudgetBytes": 8589934592,
+    "filesystem": "btrfs",
+    "freeBytes": 27292774400,
+    "marginBytes": 4294967296,
+    "requiredFreeBytes": 12884901888,
+    "rotational": "no (SSD/NVMe)",
+    "sufficient": true,
+    "totalBytes": 509315383296
+  },
+  "utilization": {
+    "cold": {
+      "gateway": {
+        "cpuMaxPercentOfOneCore": 1.7,
+        "cpuMeanPercentOfOneCore": 1.7,
+        "cpuP95PercentOfOneCore": 1.7,
+        "memoryMaxBytes": 14302576,
+        "memoryMeanBytes": 14302576,
+        "samples": 1
+      },
+      "indexer": {
+        "cpuMaxPercentOfOneCore": 100.0,
+        "cpuMeanPercentOfOneCore": 100.0,
+        "cpuP95PercentOfOneCore": 100.0,
+        "memoryMaxBytes": 106430464,
+        "memoryMeanBytes": 106430464,
+        "samples": 1
+      },
+      "postgres": {
+        "cpuMaxPercentOfOneCore": 173.2,
+        "cpuMeanPercentOfOneCore": 173.2,
+        "cpuP95PercentOfOneCore": 173.2,
+        "memoryMaxBytes": 160012697,
+        "memoryMeanBytes": 160012697,
+        "samples": 1
+      },
+      "web": {
+        "cpuMaxPercentOfOneCore": 193.6,
+        "cpuMeanPercentOfOneCore": 193.6,
+        "cpuP95PercentOfOneCore": 193.6,
+        "memoryMaxBytes": 73620520,
+        "memoryMeanBytes": 73620520,
+        "samples": 1
+      }
+    },
+    "sequential": {
+      "gateway": {
+        "cpuMaxPercentOfOneCore": 0.8,
+        "cpuMeanPercentOfOneCore": 0.7,
+        "cpuP95PercentOfOneCore": 0.8,
+        "memoryMaxBytes": 15403581,
+        "memoryMeanBytes": 15123087,
+        "samples": 4
+      },
+      "indexer": {
+        "cpuMaxPercentOfOneCore": 60.8,
+        "cpuMeanPercentOfOneCore": 24.9,
+        "cpuP95PercentOfOneCore": 60.8,
+        "memoryMaxBytes": 76210503,
+        "memoryMeanBytes": 60395355,
+        "samples": 4
+      },
+      "postgres": {
+        "cpuMaxPercentOfOneCore": 57.6,
+        "cpuMeanPercentOfOneCore": 56.1,
+        "cpuP95PercentOfOneCore": 57.6,
+        "memoryMaxBytes": 177314201,
+        "memoryMeanBytes": 175479193,
+        "samples": 4
+      },
+      "web": {
+        "cpuMaxPercentOfOneCore": 44.5,
+        "cpuMeanPercentOfOneCore": 43.1,
+        "cpuP95PercentOfOneCore": 44.5,
+        "memoryMaxBytes": 89055559,
+        "memoryMeanBytes": 88916622,
+        "samples": 4
+      }
+    },
+    "warm": {
+      "gateway": {
+        "cpuMaxPercentOfOneCore": 6.4,
+        "cpuMeanPercentOfOneCore": 2.5,
+        "cpuP95PercentOfOneCore": 5.7,
+        "memoryMaxBytes": 15728640,
+        "memoryMeanBytes": 15134562,
+        "samples": 180
+      },
+      "indexer": {
+        "cpuMaxPercentOfOneCore": 102.0,
+        "cpuMeanPercentOfOneCore": 27.3,
+        "cpuP95PercentOfOneCore": 100.1,
+        "memoryMaxBytes": 109681049,
+        "memoryMeanBytes": 63539860,
+        "samples": 180
+      },
+      "postgres": {
+        "cpuMaxPercentOfOneCore": 223.4,
+        "cpuMeanPercentOfOneCore": 187.6,
+        "cpuP95PercentOfOneCore": 208.5,
+        "memoryMaxBytes": 207827763,
+        "memoryMeanBytes": 194358804,
+        "samples": 180
+      },
+      "web": {
+        "cpuMaxPercentOfOneCore": 238.0,
+        "cpuMeanPercentOfOneCore": 163.9,
+        "cpuP95PercentOfOneCore": 233.6,
+        "memoryMaxBytes": 143130624,
+        "memoryMeanBytes": 97790721,
+        "samples": 180
+      }
+    },
+    "warmup": {
+      "gateway": {
+        "cpuMaxPercentOfOneCore": 6.4,
+        "cpuMeanPercentOfOneCore": 2.7,
+        "cpuP95PercentOfOneCore": 5.9,
+        "memoryMaxBytes": 17165189,
+        "memoryMeanBytes": 15084464,
+        "samples": 60
+      },
+      "indexer": {
+        "cpuMaxPercentOfOneCore": 101.6,
+        "cpuMeanPercentOfOneCore": 24.5,
+        "cpuP95PercentOfOneCore": 99.9,
+        "memoryMaxBytes": 107583897,
+        "memoryMeanBytes": 61030443,
+        "samples": 60
+      },
+      "postgres": {
+        "cpuMaxPercentOfOneCore": 234.2,
+        "cpuMeanPercentOfOneCore": 188.3,
+        "cpuP95PercentOfOneCore": 207.1,
+        "memoryMaxBytes": 213175500,
+        "memoryMeanBytes": 193803058,
+        "samples": 60
+      },
+      "web": {
+        "cpuMaxPercentOfOneCore": 235.3,
+        "cpuMeanPercentOfOneCore": 165.1,
+        "cpuP95PercentOfOneCore": 233.9,
+        "memoryMaxBytes": 138516889,
+        "memoryMeanBytes": 94153386,
+        "samples": 60
+      }
+    }
+  },
+  "verification": {
+    "indexStatusReady": true,
+    "rootGrantsMatch": true,
+    "staleFixturesUnavailable": [
+      [
+        "inaccessible"
+      ],
+      [
+        "inaccessible"
+      ],
+      [
+        "inaccessible"
+      ]
+    ],
+    "ungrantedAccessDenied": {
+      "adminBrowse": 404,
+      "adminRootCount": 0,
+      "crossRoot": 404
+    },
+    "wideFolder": {
+      "effectivePresent": 49286,
+      "orderVerifiedEntries": 500,
+      "walkedEntries": 49515
+    }
+  },
+  "version": 2,
+  "warmClasses": {
+    "details": {
+      "p50Ms": 263.887,
+      "p95Ms": 328.768,
+      "p99Ms": 359.51,
+      "requests": 3614
+    },
+    "list:alternateSorts:tree:modified-asc:first": {
+      "p50Ms": 227.422,
+      "p95Ms": 289.41,
+      "p99Ms": 306.994,
+      "requests": 256
+    },
+    "list:alternateSorts:tree:modified-asc:next": {
+      "p50Ms": 237.022,
+      "p95Ms": 291.132,
+      "p99Ms": 315.698,
+      "requests": 355
+    },
+    "list:alternateSorts:tree:modified-asc:previous": {
+      "p50Ms": 227.257,
+      "p95Ms": 287.0,
+      "p99Ms": 314.885,
+      "requests": 61
+    },
+    "list:alternateSorts:tree:modified-desc:first": {
+      "p50Ms": 228.783,
+      "p95Ms": 291.866,
+      "p99Ms": 307.174,
+      "requests": 234
+    },
+    "list:alternateSorts:tree:modified-desc:next": {
+      "p50Ms": 233.385,
+      "p95Ms": 284.231,
+      "p99Ms": 324.19,
+      "requests": 383
+    },
+    "list:alternateSorts:tree:modified-desc:previous": {
+      "p50Ms": 241.477,
+      "p95Ms": 290.033,
+      "p99Ms": 292.393,
+      "requests": 64
+    },
+    "list:alternateSorts:tree:name-desc:first": {
+      "p50Ms": 228.102,
+      "p95Ms": 282.744,
+      "p99Ms": 298.146,
+      "requests": 254
+    },
+    "list:alternateSorts:tree:name-desc:next": {
+      "p50Ms": 230.753,
+      "p95Ms": 283.748,
+      "p99Ms": 311.72,
+      "requests": 393
+    },
+    "list:alternateSorts:tree:name-desc:previous": {
+      "p50Ms": 234.084,
+      "p95Ms": 286.593,
+      "p99Ms": 330.365,
+      "requests": 83
+    },
+    "list:alternateSorts:tree:size-asc:first": {
+      "p50Ms": 233.584,
+      "p95Ms": 293.553,
+      "p99Ms": 326.201,
+      "requests": 212
+    },
+    "list:alternateSorts:tree:size-asc:next": {
+      "p50Ms": 234.923,
+      "p95Ms": 292.974,
+      "p99Ms": 309.452,
+      "requests": 364
+    },
+    "list:alternateSorts:tree:size-asc:previous": {
+      "p50Ms": 236.619,
+      "p95Ms": 314.876,
+      "p99Ms": 330.231,
+      "requests": 54
+    },
+    "list:alternateSorts:tree:size-desc:first": {
+      "p50Ms": 229.123,
+      "p95Ms": 289.334,
+      "p99Ms": 308.283,
+      "requests": 225
+    },
+    "list:alternateSorts:tree:size-desc:next": {
+      "p50Ms": 237.194,
+      "p95Ms": 294.545,
+      "p99Ms": 315.19,
+      "requests": 346
+    },
+    "list:alternateSorts:tree:size-desc:previous": {
+      "p50Ms": 240.607,
+      "p95Ms": 300.486,
+      "p99Ms": 325.406,
+      "requests": 58
+    },
+    "list:alternateSorts:wide:modified-asc:first": {
+      "p50Ms": 227.493,
+      "p95Ms": 285.19,
+      "p99Ms": 304.566,
+      "requests": 136
+    },
+    "list:alternateSorts:wide:modified-asc:next": {
+      "p50Ms": 231.626,
+      "p95Ms": 297.43,
+      "p99Ms": 325.339,
+      "requests": 226
+    },
+    "list:alternateSorts:wide:modified-asc:previous": {
+      "p50Ms": 226.716,
+      "p95Ms": 301.527,
+      "p99Ms": 333.507,
+      "requests": 34
+    },
+    "list:alternateSorts:wide:modified-desc:first": {
+      "p50Ms": 227.864,
+      "p95Ms": 295.786,
+      "p99Ms": 306.093,
+      "requests": 135
+    },
+    "list:alternateSorts:wide:modified-desc:next": {
+      "p50Ms": 237.789,
+      "p95Ms": 293.628,
+      "p99Ms": 309.837,
+      "requests": 203
+    },
+    "list:alternateSorts:wide:modified-desc:previous": {
+      "p50Ms": 231.716,
+      "p95Ms": 289.621,
+      "p99Ms": 327.883,
+      "requests": 35
+    },
+    "list:alternateSorts:wide:name-desc:first": {
+      "p50Ms": 225.43,
+      "p95Ms": 273.945,
+      "p99Ms": 317.816,
+      "requests": 161
+    },
+    "list:alternateSorts:wide:name-desc:next": {
+      "p50Ms": 228.226,
+      "p95Ms": 293.556,
+      "p99Ms": 321.008,
+      "requests": 244
+    },
+    "list:alternateSorts:wide:name-desc:previous": {
+      "p50Ms": 228.905,
+      "p95Ms": 287.859,
+      "p99Ms": 293.429,
+      "requests": 41
+    },
+    "list:alternateSorts:wide:size-asc:first": {
+      "p50Ms": 226.636,
+      "p95Ms": 290.607,
+      "p99Ms": 326.821,
+      "requests": 145
+    },
+    "list:alternateSorts:wide:size-asc:next": {
+      "p50Ms": 232.567,
+      "p95Ms": 286.487,
+      "p99Ms": 342.055,
+      "requests": 225
+    },
+    "list:alternateSorts:wide:size-asc:previous": {
+      "p50Ms": 243.126,
+      "p95Ms": 296.592,
+      "p99Ms": 327.104,
+      "requests": 52
+    },
+    "list:alternateSorts:wide:size-desc:first": {
+      "p50Ms": 229.151,
+      "p95Ms": 287.916,
+      "p99Ms": 318.815,
+      "requests": 183
+    },
+    "list:alternateSorts:wide:size-desc:next": {
+      "p50Ms": 235.366,
+      "p95Ms": 288.972,
+      "p99Ms": 300.97,
+      "requests": 285
+    },
+    "list:alternateSorts:wide:size-desc:previous": {
+      "p50Ms": 239.093,
+      "p95Ms": 296.722,
+      "p99Ms": 306.209,
+      "requests": 55
+    },
+    "list:basicFilters:tree:modified-asc:first:filter": {
+      "p50Ms": 222.878,
+      "p95Ms": 271.655,
+      "p99Ms": 315.855,
+      "requests": 213
+    },
+    "list:basicFilters:tree:modified-asc:next:filter": {
+      "p50Ms": 235.495,
+      "p95Ms": 302.265,
+      "p99Ms": 342.285,
+      "requests": 128
+    },
+    "list:basicFilters:tree:modified-desc:first:filter": {
+      "p50Ms": 226.148,
+      "p95Ms": 290.135,
+      "p99Ms": 311.137,
+      "requests": 190
+    },
+    "list:basicFilters:tree:modified-desc:next:filter": {
+      "p50Ms": 234.745,
+      "p95Ms": 296.789,
+      "p99Ms": 326.804,
+      "requests": 143
+    },
+    "list:basicFilters:tree:name-asc:first:filter": {
+      "p50Ms": 224.419,
+      "p95Ms": 279.346,
+      "p99Ms": 291.873,
+      "requests": 219
+    },
+    "list:basicFilters:tree:name-asc:next:filter": {
+      "p50Ms": 230.577,
+      "p95Ms": 284.859,
+      "p99Ms": 316.926,
+      "requests": 143
+    },
+    "list:basicFilters:tree:name-desc:first:filter": {
+      "p50Ms": 219.373,
+      "p95Ms": 272.092,
+      "p99Ms": 289.996,
+      "requests": 212
+    },
+    "list:basicFilters:tree:name-desc:next:filter": {
+      "p50Ms": 231.747,
+      "p95Ms": 276.982,
+      "p99Ms": 324.436,
+      "requests": 94
+    },
+    "list:basicFilters:tree:size-asc:first:filter": {
+      "p50Ms": 225.585,
+      "p95Ms": 285.27,
+      "p99Ms": 315.806,
+      "requests": 246
+    },
+    "list:basicFilters:tree:size-asc:next:filter": {
+      "p50Ms": 231.349,
+      "p95Ms": 281.796,
+      "p99Ms": 331.561,
+      "requests": 136
+    },
+    "list:basicFilters:tree:size-desc:first:filter": {
+      "p50Ms": 224.029,
+      "p95Ms": 275.384,
+      "p99Ms": 296.347,
+      "requests": 213
+    },
+    "list:basicFilters:tree:size-desc:next:filter": {
+      "p50Ms": 235.981,
+      "p95Ms": 312.329,
+      "p99Ms": 350.307,
+      "requests": 95
+    },
+    "list:basicFilters:wide:modified-asc:first:filter": {
+      "p50Ms": 249.152,
+      "p95Ms": 386.037,
+      "p99Ms": 413.25,
+      "requests": 136
+    },
+    "list:basicFilters:wide:modified-asc:next:filter": {
+      "p50Ms": 251.139,
+      "p95Ms": 401.773,
+      "p99Ms": 449.105,
+      "requests": 110
+    },
+    "list:basicFilters:wide:modified-desc:first:filter": {
+      "p50Ms": 241.706,
+      "p95Ms": 368.733,
+      "p99Ms": 401.966,
+      "requests": 133
+    },
+    "list:basicFilters:wide:modified-desc:next:filter": {
+      "p50Ms": 261.383,
+      "p95Ms": 403.449,
+      "p99Ms": 434.557,
+      "requests": 108
+    },
+    "list:basicFilters:wide:name-asc:first:filter": {
+      "p50Ms": 244.503,
+      "p95Ms": 368.015,
+      "p99Ms": 395.049,
+      "requests": 134
+    },
+    "list:basicFilters:wide:name-asc:next:filter": {
+      "p50Ms": 259.507,
+      "p95Ms": 380.745,
+      "p99Ms": 431.02,
+      "requests": 108
+    },
+    "list:basicFilters:wide:name-desc:first:filter": {
+      "p50Ms": 234.93,
+      "p95Ms": 359.053,
+      "p99Ms": 385.483,
+      "requests": 146
+    },
+    "list:basicFilters:wide:name-desc:next:filter": {
+      "p50Ms": 252.546,
+      "p95Ms": 377.653,
+      "p99Ms": 399.085,
+      "requests": 115
+    },
+    "list:basicFilters:wide:size-asc:first:filter": {
+      "p50Ms": 237.527,
+      "p95Ms": 351.124,
+      "p99Ms": 378.193,
+      "requests": 142
+    },
+    "list:basicFilters:wide:size-asc:next:filter": {
+      "p50Ms": 275.414,
+      "p95Ms": 419.261,
+      "p99Ms": 470.879,
+      "requests": 115
+    },
+    "list:basicFilters:wide:size-desc:first:filter": {
+      "p50Ms": 241.184,
+      "p95Ms": 384.416,
+      "p99Ms": 446.049,
+      "requests": 139
+    },
+    "list:basicFilters:wide:size-desc:next:filter": {
+      "p50Ms": 257.64,
+      "p95Ms": 435.072,
+      "p99Ms": 454.876,
+      "requests": 113
+    },
+    "list:directoryPages:tree:name-asc:first": {
+      "p50Ms": 226.617,
+      "p95Ms": 283.157,
+      "p99Ms": 308.351,
+      "requests": 4704
+    },
+    "list:directoryPages:tree:name-asc:next": {
+      "p50Ms": 229.393,
+      "p95Ms": 287.499,
+      "p99Ms": 313.715,
+      "requests": 7172
+    },
+    "list:directoryPages:tree:name-asc:previous": {
+      "p50Ms": 230.817,
+      "p95Ms": 291.553,
+      "p99Ms": 325.039,
+      "requests": 1333
+    },
+    "list:directoryPages:wide:name-asc:first": {
+      "p50Ms": 224.906,
+      "p95Ms": 279.439,
+      "p99Ms": 307.357,
+      "requests": 3050
+    },
+    "list:directoryPages:wide:name-asc:next": {
+      "p50Ms": 228.385,
+      "p95Ms": 288.047,
+      "p99Ms": 316.555,
+      "requests": 4740
+    },
+    "list:directoryPages:wide:name-asc:previous": {
+      "p50Ms": 232.004,
+      "p95Ms": 288.016,
+      "p99Ms": 329.517,
+      "requests": 801
+    },
+    "status": {
+      "p50Ms": 457.048,
+      "p95Ms": 554.027,
+      "p99Ms": 589.908,
+      "requests": 1891
+    }
+  },
+  "wideFolderListShare": 0.3973,
+  "workerLoad": "none (catalog seed mode; no scan or preview jobs ran)"
+}
