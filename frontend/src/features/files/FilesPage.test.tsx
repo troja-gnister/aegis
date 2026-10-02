@@ -580,6 +580,150 @@ describe("FilesPage", () => {
     expect(filteredViewport).toHaveAttribute("data-first-visible-id", fixtureEntry(0).id);
   });
 
+  it("replaces a dead retry after a stale next-page cursor with a restart at page one", async () => {
+    const requests: URL[] = [];
+    let staleCursors = false;
+    server.use(
+      http.get("/api/v1/roots", () => HttpResponse.json(rootResponse())),
+      http.get(`/api/v1/roots/${FIXTURE_ROOT_ID}/entries`, ({request}) => {
+        const url = new URL(request.url);
+        requests.push(url);
+        const cursor = url.searchParams.get("cursor");
+        if (cursor !== null && staleCursors) {
+          return HttpResponse.json(
+            {type: "cursor_restart_required", title: "Catalog view changed"}, {status: 409},
+          );
+        }
+        const pageNumber = cursor === null ? 0 : Number(cursor.split(":").at(-1));
+        return HttpResponse.json({
+          ...pageResponse(null, Array.from({length: 100}, (_, index) => fixtureEntry(pageNumber * 100 + index))),
+          nextCursor: `cursor:${pageNumber + 1}`,
+          previousCursor: pageNumber > 0 ? `cursor:${pageNumber - 1}` : null,
+        });
+      }),
+    );
+    await renderFiles();
+    await screen.findByTestId("file-list-viewport");
+    fireEvent.click(screen.getByRole("button", {name: "Filters"}));
+    fireEvent.change(screen.getByLabelText("Filename starts with"), {target: {value: "IMG_"}});
+    fireEvent.click(screen.getByRole("button", {name: "Apply filters"}));
+    await waitFor(() => expect(requests).toHaveLength(2));
+    // Page past the five-page window so the retained window itself starts at a cursor.
+    for (let pageNumber = 1; pageNumber <= 5; pageNumber += 1) {
+      await waitFor(() => expect(screen.getByRole("button", {name: "Load more files"})).toBeEnabled());
+      fireEvent.click(screen.getByRole("button", {name: "Load more files"}));
+      await waitFor(() => expect(requests.at(-1)!.searchParams.get("cursor")).toBe(`cursor:${pageNumber}`));
+    }
+    await waitFor(() => expect(screen.getByRole("button", {name: "Load more files"})).toBeEnabled());
+    expect(screen.getByRole("button", {name: "Load previous files"})).toBeEnabled();
+    expect(requests).toHaveLength(7);
+
+    staleCursors = true;
+    fireEvent.click(screen.getByRole("button", {name: "Load more files"}));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("This file list changed. Start from the beginning to keep browsing.");
+    expect(alert).not.toHaveTextContent(/try again/i);
+    expect(requests).toHaveLength(8);
+    expect(requests[7]!.searchParams.get("cursor")).toBe("cursor:6");
+    // The stale cursor is never resent: paging is closed until the restart.
+    expect(screen.getByRole("button", {name: "Load more files"})).toBeDisabled();
+    expect(screen.getByRole("button", {name: "Load previous files"})).toBeDisabled();
+    fireEvent.scroll(screen.getByTestId("file-list-viewport"), {target: {scrollTop: 1_000_000}});
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(requests).toHaveLength(8);
+
+    staleCursors = false;
+    fireEvent.click(screen.getByRole("button", {name: "Start from the beginning"}));
+    // Exactly one page-one request: no retained cursor page is refetched.
+    await waitFor(() => expect(requests).toHaveLength(9));
+    expect(requests[8]!.searchParams.has("cursor")).toBe(false);
+    expect(JSON.parse(requests[8]!.searchParams.get("filters")!)).toEqual({v: 1, prefix: "IMG_"});
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+    expect(screen.getByRole("button", {name: "Filters"})).toHaveFocus();
+    expect(screen.getByRole("button", {name: 'Remove filter Filename starts with "IMG_"'})).toBeVisible();
+    const viewport = await screen.findByTestId("file-list-viewport");
+    expect(viewport).toHaveAttribute("data-first-visible-id", fixtureEntry(0).id);
+    await waitFor(() => expect(screen.getByTestId("files-announcement"))
+      .toHaveTextContent("Showing files from the beginning."));
+    fireEvent.click(screen.getByRole("button", {name: "Inspect navigation record"}));
+    expect(JSON.parse(screen.getByRole("button", {name: "Inspect navigation record"}).dataset.record!))
+      .toEqual({filters: {v: 1, prefix: "IMG_"}, cursor: null, anchor: null});
+
+    // Paging works again from the fresh first page.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(requests).toHaveLength(9);
+    await waitFor(() => expect(screen.getByRole("button", {name: "Load more files"})).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", {name: "Load more files"}));
+    await waitFor(() => expect(requests).toHaveLength(10));
+    expect(requests[9]!.searchParams.get("cursor")).toBe("cursor:1");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("restarts from page one when a restored route cursor has gone stale", async () => {
+    const directory = {...fixtureEntry(120), id: PARENT_ID, displayName: "Deep folder", kind: "directory" as const, typeHint: null};
+    const cursors: Array<string | null> = [];
+    let staleCursors = false;
+    server.use(
+      http.get("/api/v1/roots", () => HttpResponse.json(rootResponse())),
+      http.get(`/api/v1/roots/${FIXTURE_ROOT_ID}/entries`, ({request}) => {
+        const url = new URL(request.url);
+        const parent = url.searchParams.get("parent");
+        if (parent) return HttpResponse.json(pageResponse(parent, []));
+        const cursor = url.searchParams.get("cursor");
+        cursors.push(cursor);
+        if (cursor !== null && staleCursors) {
+          return HttpResponse.json(
+            {type: "cursor_restart_required", title: "Catalog view changed"}, {status: 409},
+          );
+        }
+        const pageNumber = cursor === null ? 0 : Number(cursor.split(":").at(-1));
+        return HttpResponse.json({
+          ...pageResponse(null, Array.from({length: 100}, (_, index) =>
+            pageNumber === 1 && index === 20 ? directory : fixtureEntry(pageNumber * 100 + index))),
+          nextCursor: `cursor:${pageNumber + 1}`,
+          previousCursor: pageNumber > 0 ? `cursor:${pageNumber - 1}` : null,
+        });
+      }),
+    );
+    await renderFiles();
+    const viewport = await screen.findByTestId("file-list-viewport");
+    Object.defineProperty(viewport, "clientHeight", {configurable: true, value: 480});
+    fireEvent.click(screen.getByRole("button", {name: "Load more files"}));
+    await waitFor(() => expect(cursors.at(-1)).toBe("cursor:1"));
+    fireEvent.scroll(viewport, {target: {scrollTop: 120 * 80}});
+    await waitFor(() => expect(viewport).toHaveAttribute("data-first-visible-id", PARENT_ID));
+    fireEvent.click(screen.getByRole("button", {name: "Open directory Deep folder"}));
+    expect(await screen.findByText("No files in this location.")).toBeVisible();
+
+    staleCursors = true;
+    fireEvent.click(screen.getByRole("button", {name: "Back in history"}));
+    await waitFor(() => expect(cursors.at(-1)).toBe("cursor:1"));
+    expect(await screen.findByRole("alert"))
+      .toHaveTextContent("This file list changed. Start from the beginning to keep browsing.");
+    expect(screen.queryByText("Deep folder")).not.toBeInTheDocument();
+    const requestsBeforeRestart = cursors.length;
+
+    fireEvent.click(screen.getByRole("button", {name: "Start from the beginning"}));
+    await waitFor(() => expect(cursors).toHaveLength(requestsBeforeRestart + 1));
+    expect(cursors.at(-1)).toBeNull();
+    expect(await screen.findByRole("button", {name: `Select file ${fixtureEntry(0).displayName}`})).toBeVisible();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(cursors).toHaveLength(requestsBeforeRestart + 1);
+  });
+
+  it("keeps the generic retry message for failures other than a stale cursor", async () => {
+    server.use(
+      http.get("/api/v1/roots", () => HttpResponse.json(rootResponse())),
+      http.get(`/api/v1/roots/${FIXTURE_ROOT_ID}/entries`, () => HttpResponse.json(
+        {type: "catalog_unavailable", title: "Catalog unavailable"}, {status: 503},
+      )),
+    );
+    await renderFiles();
+    expect(await screen.findByRole("alert")).toHaveTextContent("Files could not be loaded. Please try again.");
+    expect(screen.queryByRole("button", {name: "Start from the beginning"})).not.toBeInTheDocument();
+  });
+
   it("distinguishes a zero-match filter result from an unindexed directory", async () => {
     let state = "ready";
     server.use(

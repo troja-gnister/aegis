@@ -99,6 +99,11 @@ function progressKey(status: IndexStatus): string {
 
 type Selection = {namespace: string; routeKey: string; id: string};
 
+/** The server refused a cursor from an older catalog view; only a page-one restart can continue. */
+function isCursorRestart(error: unknown): boolean {
+  return error instanceof ApiProblem && error.status === 409 && error.type === "cursor_restart_required";
+}
+
 export function FilesPage() {
   const {rootId = "", parentId} = useParams();
   const {session} = useAuthSession();
@@ -117,7 +122,8 @@ export function FilesPage() {
   const filtersButtonRef = useRef<HTMLButtonElement>(null);
   const filtersWereOpenRef = useRef(false);
   const detailsReturnRef = useRef<HTMLElement | null>(null);
-  const announceResultRef = useRef(false);
+  const announceResultRef = useRef<"filters" | "restart" | null>(null);
+  const discardedWindowRef = useRef<unknown>(undefined);
   const lastProgressRef = useRef<string | null>(null);
   const lastProgressRetryRef = useRef(0);
   const routeKey = location.key;
@@ -160,6 +166,7 @@ export function FilesPage() {
   const selectedFileId = selection?.namespace === session.cacheNamespace && selection.routeKey === routeKey
     ? selection.id
     : null;
+  const restartRequired = directoryQuery.isError && isCursorRestart(directoryQuery.error);
   const directoryKeyRef = useRef(directoryQueryOptions(input).queryKey);
   const refetchDirectory = directoryQuery.refetch;
 
@@ -172,6 +179,10 @@ export function FilesPage() {
         stored.sort !== sort || stored.order !== order)
     ) {
       // A newer applied query identity owns this route; an obsolete closure must not revert it.
+      return;
+    }
+    if (directoryQuery.data !== undefined && directoryQuery.data === discardedWindowRef.current) {
+      // A page-one restart discarded this window; its cursors must not be written back.
       return;
     }
     const pages = directoryQuery.data?.pages ?? [];
@@ -208,19 +219,24 @@ export function FilesPage() {
   }, [filtersOpen]);
 
   useEffect(() => {
-    // Re-applying identical filters still restarts at page one.
+    // Re-applying identical filters (or a stale-cursor restart) still restarts at page one.
     if (resetRequest === 0) return;
     void queryClient.resetQueries({queryKey: directoryKeyRef.current, exact: true});
   }, [queryClient, resetRequest]);
 
   useEffect(() => {
-    if (!announceResultRef.current || directoryQuery.isPending) return;
-    announceResultRef.current = false;
+    const reason = announceResultRef.current;
+    if (!reason || directoryQuery.isPending) return;
+    announceResultRef.current = null;
     if (directoryQuery.isError) {
-      setAnnouncement("Files could not be loaded for these filters.");
+      setAnnouncement(reason === "restart" ? "Files could not be loaded." : "Files could not be loaded for these filters.");
       return;
     }
     const empty = windowEmpty ? emptyMessage(status?.state, filtersActive) : null;
+    if (reason === "restart") {
+      setAnnouncement(empty ?? "Showing files from the beginning.");
+      return;
+    }
     setAnnouncement(empty ?? (filtersActive ? "Filters applied. Results updated." : "Filters cleared. Results updated."));
   }, [directoryQuery.isError, directoryQuery.isPending, filtersActive, status?.state, windowEmpty]);
 
@@ -249,14 +265,9 @@ export function FilesPage() {
     setLiveStatus({rootId, status: value});
   }, [rootId]);
 
-  const applyFilters = (next: FileFilters) => {
-    setFiltersOpen(false);
-    setSelection(null);
-    if (!navigation) return;
-    const unchanged = JSON.stringify(next) === JSON.stringify(filters);
+  /** Records page one for this route under `next` filters; the caller resets the query when its key is unchanged. */
+  const rememberPageOne = (next: FileFilters) => {
     anchorRef.current = {id: null, offset: 0};
-    announceResultRef.current = true;
-    setAnnouncement(activeFilterFields(next).length > 0 ? "Applying filters…" : "Clearing filters…");
     navigationRoute.rememberRoute(routeKey, {
       rootId,
       parentId: parentId ?? null,
@@ -267,7 +278,34 @@ export function FilesPage() {
       visibleAnchorId: null,
       visibleAnchorOffset: 0,
     });
-    if (unchanged) setResetRequest((count) => count + 1);
+  };
+
+  /** Resets the unchanged query key to page one and retires the window it replaces. */
+  const restartWindow = () => {
+    discardedWindowRef.current = directoryQuery.data;
+    setResetRequest((count) => count + 1);
+  };
+
+  const applyFilters = (next: FileFilters) => {
+    setFiltersOpen(false);
+    setSelection(null);
+    if (!navigation) return;
+    const unchanged = JSON.stringify(next) === JSON.stringify(filters);
+    announceResultRef.current = "filters";
+    setAnnouncement(activeFilterFields(next).length > 0 ? "Applying filters…" : "Clearing filters…");
+    rememberPageOne(next);
+    if (unchanged) restartWindow();
+  };
+
+  /** A stale cursor cannot be retried; drop every retained cursor and reload page one of the same query. */
+  const restartFromBeginning = () => {
+    setSelection(null);
+    if (!navigation) return;
+    announceResultRef.current = "restart";
+    setAnnouncement("Starting from the beginning…");
+    rememberPageOne(filters);
+    restartWindow();
+    filtersButtonRef.current?.focus({preventScroll: true});
   };
 
   useEffect(() => {
@@ -348,7 +386,16 @@ export function FilesPage() {
         {announcement}
       </p>
       {directoryQuery.isPending ? <p role="status">Loading files…</p> : null}
-      {directoryQuery.isError ? (
+      {restartRequired ? (
+        <div className="files-page__restart">
+          <p className="notice notice--error" role="alert">
+            This file list changed. Start from the beginning to keep browsing.
+          </p>
+          <button className="file-page-control interactive" type="button" onClick={restartFromBeginning}>
+            Start from the beginning
+          </button>
+        </div>
+      ) : directoryQuery.isError ? (
         <p className="notice notice--error" role="alert">Files could not be loaded. Please try again.</p>
       ) : null}
       {statusMessage(status?.state ?? "") ? (
@@ -372,6 +419,8 @@ export function FilesPage() {
       ) : null}
       {entries.length > 0 ? (
         <VirtualFileList
+          // A page-one restart starts a fresh window; it never carries the old scroll position over.
+          key={resetRequest}
           entries={entries}
           onOpen={(entry) => {
             if (entry.kind === "directory") {
@@ -387,8 +436,8 @@ export function FilesPage() {
           }}
           onLoadNext={() => directoryQuery.fetchNextPage()}
           onLoadPrevious={() => directoryQuery.fetchPreviousPage()}
-          hasNext={Boolean(directoryQuery.hasNextPage)}
-          hasPrevious={Boolean(directoryQuery.hasPreviousPage)}
+          hasNext={Boolean(directoryQuery.hasNextPage) && !restartRequired}
+          hasPrevious={Boolean(directoryQuery.hasPreviousPage) && !restartRequired}
           initialAnchor={restored ? {
             id: restored.visibleAnchorId,
             offset: restored.visibleAnchorOffset,

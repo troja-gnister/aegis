@@ -1,5 +1,5 @@
-import {expect, request as playwrightRequest, type Locator, type Page} from "@playwright/test";
-import {requiredSecret, signIn} from "./auth";
+import {expect, type Locator, type Page} from "@playwright/test";
+import {requiredSecret, signIn, submitAdminLogin} from "./auth";
 import {test} from "./safe-test";
 
 // Real-stack journeys over the harness-owned synthetic source fixture. Every
@@ -99,49 +99,34 @@ async function scrollFiles(page: Page, position: "top" | "middle" | "bottom") {
   }, position);
 }
 
-function formToken(html: string): string {
-  const match = /name="csrfmiddlewaretoken" value="([A-Za-z0-9]+)"/.exec(html);
-  if (!match) throw new Error("Admin form token is missing");
-  return match[1]!;
-}
-
 /**
- * Changes Bob's group grant through the real Django admin endpoints as the
- * synthetic superuser, from a separate cookie jar. A browser form post is not
- * used: behind the gateway's no-referrer policy a navigation POST carries
- * `Origin: null`, which Django's CSRF origin check refuses.
+ * Changes Bob's group grant through the real Django admin form as the
+ * synthetic superuser, in a separate browser context (its own cookie jar).
  */
-async function setBobGrant(rootId: string, permissions: "0" | "1") {
-  const admin = await playwrightRequest.newContext({
-    baseURL: process.env.E2E_BASE_URL ?? "http://127.0.0.1:18080",
-    maxRedirects: 0,
-  });
+async function setBobGrant(page: Page, rootId: string, permissions: "0" | "1") {
+  const browser = page.context().browser();
+  if (!browser) throw new Error("Browser is unavailable");
+  const context = await browser.newContext({baseURL: process.env.E2E_BASE_URL ?? "http://127.0.0.1:18080"});
   try {
-    const login = await admin.get("/admin/login/?next=/admin/roots/rootgrant/");
-    expect(login.status()).toBe(200);
-    const signedIn = await admin.post("/admin/login/?next=/admin/roots/rootgrant/", {form: {
-      csrfmiddlewaretoken: formToken(await login.text()),
-      username: "phase1-admin",
-      password: requiredSecret("E2E_ADMIN_PASSWORD"),
-      next: "/admin/roots/rootgrant/",
-    }});
+    const admin = await context.newPage();
+    const signedIn = await submitAdminLogin(
+      admin, "phase1-admin", requiredSecret("E2E_ADMIN_PASSWORD"), "/admin/roots/rootgrant/",
+    );
     expect(signedIn.status()).toBe(302);
-    const list = await admin.get("/admin/roots/rootgrant/");
-    expect(list.status()).toBe(200);
+    await expect(admin).toHaveURL(/\/admin\/roots\/rootgrant\/$/);
     // Grants list their root by opaque ID; the group grant is the only one on Bob's root.
-    const rows = (await list.text()).split("<tr").filter((row) => row.includes(rootId));
-    expect(rows).toHaveLength(1);
-    const change = /href="(\/admin\/roots\/rootgrant\/[0-9a-f-]{36}\/change\/)"/.exec(rows[0]!);
-    expect(change).not.toBeNull();
-    const form = await admin.get(change![1]!);
-    expect(form.status()).toBe(200);
-    const saved = await admin.post(change![1]!, {form: {
-      csrfmiddlewaretoken: formToken(await form.text()), permissions, _save: "Save",
-    }});
-    expect(saved.status()).toBe(302);
-    expect(new URL(saved.headers()["location"] ?? "", "http://x").pathname).toBe("/admin/roots/rootgrant/");
+    const rows = admin.locator("#result_list tbody tr").filter({hasText: rootId});
+    await expect(rows).toHaveCount(1);
+    await rows.locator('a[href$="/change/"]').first().click();
+    await expect(admin).toHaveURL(/\/admin\/roots\/rootgrant\/[0-9a-f-]{36}\/change\/$/);
+    await admin.locator("#id_permissions").fill(permissions);
+    const saved = admin.waitForResponse((response) => response.request().method() === "POST"
+      && /^\/admin\/roots\/rootgrant\/[0-9a-f-]{36}\/change\/$/.test(new URL(response.url()).pathname));
+    await admin.getByRole("button", {name: "Save", exact: true}).click();
+    expect((await saved).status()).toBe(302);
+    await expect(admin).toHaveURL(/\/admin\/roots\/rootgrant\/$/);
   } finally {
-    await admin.dispose();
+    await context.close();
   }
 }
 
@@ -351,7 +336,7 @@ test("details, inert links and keyboard dialog focus at phone widths", async ({p
   await expectPhoneLayout(page);
 });
 
-test("stale cursor is refused by the server and re-applying filters restarts at page one", async ({page}) => {
+test("stale cursor is refused by the server and Start from the beginning restarts at page one", async ({page}) => {
   await signIn(page, "alice", requiredSecret("E2E_ALICE_PASSWORD"));
   await openRoot(page, "Alice files");
   const next = entriesResponse(page, (url) => url.searchParams.has("cursor"));
@@ -376,16 +361,31 @@ test("stale cursor is refused by the server and re-applying filters restarts at 
     stale.searchParams.set("cursor", `${stale.searchParams.get("cursor")}A`);
     await route.continue({url: stale.toString()});
   });
+  const more = page.getByRole("button", {name: "Load more files"});
   const failed = entriesResponse(page, (url) => url.searchParams.has("cursor"));
-  await page.getByRole("button", {name: "Load more files"}).click();
+  await more.click();
   expect((await failed).status()).toBe(409);
-  await expect(page.getByRole("alert")).toHaveText("Files could not be loaded. Please try again.");
+  await expect(page.getByRole("alert")).toHaveText(
+    "This file list changed. Start from the beginning to keep browsing.",
+  );
+  // The dead retry is gone: the stale cursor cannot be resent.
+  await expect(more).toBeDisabled();
   await page.unrouteAll({behavior: "wait"});
 
-  const dialog = await openFilters(page);
-  await applyFilters(page, dialog);
+  // The real recovery path: one uncursored page-one request, then paging resumes.
+  const restarted = entriesResponse(page);
+  await page.getByRole("button", {name: "Start from the beginning"}).click();
+  const firstPage = await restarted;
+  expect(firstPage.status()).toBe(200);
+  expect(new URL(firstPage.url()).searchParams.has("cursor")).toBe(false);
   await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(page.getByRole("button", {name: "Filters", exact: true})).toBeFocused();
+  await scrollFiles(page, "top");
   await expect(files(page).getByText("alice-only.txt", {exact: true})).toBeVisible();
+  const resumed = entriesResponse(page, (url) => url.searchParams.has("cursor"));
+  await more.click();
+  expect((await resumed).status()).toBe(200);
+  await expect(page.getByRole("alert")).toHaveCount(0);
 });
 
 test("late responses after logout, account switch and grant revocation stay private", async ({page}) => {
@@ -441,7 +441,7 @@ test("late responses after logout, account switch and grant revocation stay priv
 
   // Revoking Bob's grant closes the open private view on its next request.
   try {
-    await setBobGrant(bobRoot, "0");
+    await setBobGrant(page, bobRoot, "0");
     await fileRow(page, "bob-only.txt").click();
     await expect(page.getByRole("heading", {name: "Sign in"})).toBeVisible();
     await expect(page.getByText(/bob-only\.txt|Bob files/)).toHaveCount(0);
@@ -449,6 +449,6 @@ test("late responses after logout, account switch and grant revocation stay priv
     await expect(page.getByRole("heading", {name: "No roots assigned"})).toBeVisible();
     await expect(page.getByText("Bob files")).toHaveCount(0);
   } finally {
-    await setBobGrant(bobRoot, "1");
+    await setBobGrant(page, bobRoot, "1");
   }
 });

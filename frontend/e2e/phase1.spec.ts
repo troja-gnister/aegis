@@ -1,5 +1,5 @@
 import {expect} from "@playwright/test";
-import {requiredSecret, signIn, submitLogin} from "./auth";
+import {requiredSecret, signIn, submitAdminLogin, submitLogin} from "./auth";
 import {test} from "./safe-test";
 
 // Sign-in may wait for the gateway's real login rate limit shared by both suites.
@@ -92,6 +92,23 @@ test("a platform superuser has operational access but no implicit product grants
   const status = await page.request.get("/api/v1/admin/operations/status");
   expect(status.status()).toBe(200);
   expect(await status.text()).not.toContain("/srv/aegis");
+});
+
+test("an operator signs in through the real Django admin form behind the gateway", async ({page}) => {
+  // A browser form POST must carry a real Origin (not "null") to pass Django's CSRF origin check.
+  const signedIn = await submitAdminLogin(page, "phase1-admin", requiredSecret("E2E_ADMIN_PASSWORD"));
+  expect(signedIn.status(), "Admin login form status").toBe(302);
+  expect(await signedIn.request().headerValue("origin")).toBe(new URL(signedIn.url()).origin);
+  // The gateway alone sets the policy; Django's own header is hidden upstream.
+  expect((await signedIn.allHeaders())["referrer-policy"]).toBe("same-origin");
+  await expect(page).toHaveURL(/\/admin\/$/);
+  await expect(page.getByRole("heading", {name: "Site administration"})).toBeVisible();
+  const loggedOut = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === "/admin/logout/" && response.request().method() === "POST");
+  await page.getByRole("button", {name: "Log out"}).click();
+  expect((await loggedOut).status()).toBe(200);
+  await page.goto("/admin/");
+  await expect(page).toHaveURL(/\/admin\/login\/\?next=(%2F|\/)admin(%2F|\/)$/);
 });
 
 test("anonymous boundaries and bad credentials disclose no private metadata", async ({page, request}) => {

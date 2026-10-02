@@ -237,7 +237,8 @@
 
 .entry-details__error,
 .index-status__actions,
-.files-page__refresh {
+.files-page__refresh,
+.files-page__restart {
   display: grid;
   justify-items: start;
   gap: 0.5rem;

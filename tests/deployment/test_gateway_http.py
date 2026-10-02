@@ -54,7 +54,7 @@ SECURITY_HEADERS = {
     ),
     "X-Frame-Options": "DENY",
     "X-Content-Type-Options": "nosniff",
-    "Referrer-Policy": "no-referrer",
+    "Referrer-Policy": "same-origin",
     "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
 }
 
@@ -539,11 +539,14 @@ def test_gateway_preserves_nonstandard_origin_port_for_csrf(
     response = gateway.request(path, headers={"Host": "localhost:18080"})
     assert response.status == 200
     assert response.json()["host"] == "localhost:18080"
+    # Same-origin form posts keep a real Origin/Referer for Django's CSRF checks.
+    assert_security_headers(response)
 
 
 def assert_security_headers(response: HttpResponse) -> None:
     for name, expected in SECURITY_HEADERS.items():
-        assert response.headers[name] == expected
+        # Exactly one value: a location-level duplicate must never stack on the server header.
+        assert response.headers.get_all(name) == [expected]
 
 
 def cache_control_directives(response: HttpResponse) -> set[str]:
@@ -705,7 +708,7 @@ def test_only_collected_admin_static_subtree_is_public(gateway: GatewayHarness) 
     assert_security_headers(outside)
 
 
-@pytest.mark.parametrize("path", ["/api/headers", "/health/live"])
+@pytest.mark.parametrize("path", ["/api/headers", "/health/live", "/admin/roots/rootgrant/"])
 def test_proxied_responses_have_security_and_private_cache_headers(
     gateway: GatewayHarness, path: str
 ) -> None:

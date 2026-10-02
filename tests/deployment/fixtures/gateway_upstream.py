@@ -17,6 +17,8 @@ class EchoHandler(BaseHTTPRequestHandler):
         ).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
+        # Django's SecurityMiddleware also emits a referrer policy; the gateway must own it.
+        self.send_header("Referrer-Policy", "unsafe-url")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
