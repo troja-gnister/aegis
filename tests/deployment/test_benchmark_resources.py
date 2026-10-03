@@ -569,6 +569,41 @@ def test_bottleneck_evidence_labels_measurement_and_inference() -> None:
     assert any("new database connection" in text for text in idle_inferences)
 
 
+def test_bottleneck_evidence_accounts_for_multiple_pooled_web_processes() -> None:
+    samples = [report.Sample("warm", "list", "list:x", 200, 90.0, 10)] * 50
+    samples += [report.Sample("sequential", "list", "sequential:list:wide", 200, 32.0, 10)] * 5
+    phases = report.summarize(samples)
+    busy = {"phases": {"warm": {"web": {"cpuMeanPercentOfOneCore": 361.0},
+                                "postgres": {"cpuMeanPercentOfOneCore": 400.0}}}}
+    inferences = run.bottleneck_evidence(phases, busy, 10, web_workers=4)["inferences"]
+    assert any("across 4 uvicorn processes" in text and "4-core" in text
+               for text in inferences)
+    assert not any("single-process" in text or "GIL" in text for text in inferences)
+    assert not any("new database connection" in text for text in inferences)
+    idle = {"phases": {"warm": {"web": {"cpuMeanPercentOfOneCore": 120.0}}}}
+    assert any("below its" in text for text in run.bottleneck_evidence(
+        phases, idle, 10, web_workers=4)["inferences"])
+
+
+def test_regeneration_recomputes_inferences_from_the_reports_measurements() -> None:
+    directory, output = private_directory(), private_directory()
+    try:
+        summary = _with_routes(full_summary(), 150.0, 4)
+        summary["durations"] = {"measurementSeconds": 10}
+        summary["utilization"]["phases"]["warm"]["web"]["cpuMeanPercentOfOneCore"] = 361.0
+        summary["bottleneck"]["inferences"] = ["inferred: stale single-process text"]
+        report.write_report(directory, "summary.json", summary, secrets=())
+        json_path, _markdown = report.regenerate_verification(directory, output)
+        inferences = json.loads(json_path.read_text())["bottleneck"]["inferences"]
+    finally:
+        for folder in (directory, output):
+            for child in folder.iterdir():
+                child.unlink()
+            folder.rmdir()
+    assert "inferred: stale single-process text" not in inferences
+    assert any("across 4 uvicorn processes" in text for text in inferences)
+
+
 def test_runtime_services_cannot_bind_repository_subdirectories() -> None:
     config = compose_config()
     config["services"]["web"]["volumes"] = [{"type": "bind",
@@ -665,7 +700,8 @@ def full_summary() -> dict[str, Any]:
         "environment": {
             "host": {"cpuModel": "Test CPU", "hostname": "private-host"},
             "containers": {"web": {"containerId": "c" * 64, "ips": ["172.18.0.5"],
-                                   "image": "sha256:" + "a" * 64, "memoryLimitBytes": 1}},
+                                   "image": "sha256:" + "a" * 64, "memoryLimitBytes": 1,
+                                   "webWorkers": 4}},
             "source": {"gitRevision": "0" * 40, "workingTreeChanges": 8,
                        "remoteUrl": "https://user:token@example.invalid/repo"},
         },
@@ -740,3 +776,66 @@ def test_signing_key_source_survives_report_redaction_and_regeneration() -> None
         for child in directory.iterdir():
             child.unlink()
         directory.rmdir()
+
+
+def test_web_worker_count_is_read_only_from_the_web_container_setting() -> None:
+    def info(*variables: str) -> dict[str, Any]:
+        return {"Config": {"Env": ["PATH=/usr/bin", *variables]}}
+
+    assert run.web_workers(info("AEGIS_WEB_WORKERS=4")) == 4
+    assert run.web_workers(info()) is None
+    for hostile in ("AEGIS_WEB_WORKERS=4; rm", "AEGIS_WEB_WORKERS=", "AEGIS_WEB_WORKERS=999"):
+        assert run.web_workers(info(hostile)) is None
+    assert run.web_workers({}) is None
+    tracked = report.verification_summary(full_summary())
+    assert tracked["webWorkers"] == 4
+    hostile_summary = full_summary()
+    hostile_summary["environment"]["containers"]["web"]["webWorkers"] = "/srv/aegis"
+    assert report.verification_summary(hostile_summary)["webWorkers"] is None
+
+
+def _with_routes(summary: dict[str, Any], p95: float, workers: int | None) -> dict[str, Any]:
+    stats = {"requests": 1000, "failures": 0, "errorRate": 0.0, "p50Ms": p95 - 50,
+             "p95Ms": p95, "p99Ms": p95 + 40, "meanPayloadBytes": 1.0, "meanRows": 96.0}
+    summary["phases"]["warm"]["routes"] = {"list": stats, "details": stats, "status": stats}
+    summary["phases"]["warm"]["gate"]["listP95Ms"] = p95
+    summary["phases"]["sequential"] = {"routes": {"list": stats}}
+    summary["startedAt"] = "2026-10-01T03:33:57+00:00"
+    summary["utilization"] = {"phases": {"warm": {"web": {
+        "samples": 180, "cpuMeanPercentOfOneCore": 160.0, "memoryMaxBytes": 140 * 1024**2}}}}
+    if workers is None:
+        del summary["environment"]["containers"]["web"]["webWorkers"]
+    return summary
+
+
+def test_regenerated_summary_keeps_a_clearly_labeled_prior_run() -> None:
+    directory, prior, output = private_directory(), private_directory(), private_directory()
+    try:
+        report.write_report(directory, "summary.json",
+                            _with_routes(full_summary(), 150.0, 4), secrets=())
+        report.write_report(prior, "summary.json",
+                            _with_routes(full_summary(), 291.2, None), secrets=())
+        json_path, markdown_path = report.regenerate_verification(directory, output, prior)
+        tracked = json.loads(json_path.read_text())
+        markdown = markdown_path.read_text()
+    finally:
+        for folder in (directory, prior, output):
+            for child in folder.iterdir():
+                child.unlink()
+            folder.rmdir()
+
+    (before,) = tracked["priorRuns"]
+    assert before["label"] == "prior run (before this change)"
+    assert before["gate"]["listP95Ms"] == 291.2
+    assert before["routes"]["warm"]["status"]["p95Ms"] == 291.2
+    assert before["routes"]["sequential"]["list"]["p95Ms"] == 291.2
+    assert before["webWorkers"] is None
+    assert before["classesOverThreshold"]["count"] == 2
+    assert tracked["gates"]["warm"]["listP95Ms"] == 150.0
+    assert "## Before and after" in markdown
+    assert "| warm | status | 241.2 | 291.2 | 331.2 | 100.0 | 150.0 | 190.0 |" in markdown
+    assert "Prior run (before this change)" in markdown
+    assert "1 (single uvicorn process" in markdown
+    assert "**Web server:** 4 uvicorn worker processes" in markdown
+    for private in ("/srv/aegis", "IMG_0001", "/var/home", "172.18.0.5", "token@"):
+        assert private not in json.dumps(tracked) + markdown, private

@@ -8,6 +8,8 @@ from typing import NoReturn
 from aegis_apps.common.database_privileges import require_runtime_database_login
 from django.conf import settings
 
+from aegis.config import WEB_DATABASE_POOL_ENV, web_workers_from_environ
+
 
 class ProxyTrustError(RuntimeError):
     """Raised when the sole trusted gateway peer cannot be identified safely."""
@@ -32,6 +34,7 @@ def resolve_trusted_proxy_ips() -> tuple[str, str]:
 
 
 def main() -> NoReturn:
+    workers = web_workers_from_environ(os.environ)
     if settings.AEGIS_ENVIRONMENT != "test":
         require_runtime_database_login("web")
     trusted_proxy_ips = ",".join(resolve_trusted_proxy_ips())
@@ -45,10 +48,16 @@ def main() -> NoReturn:
         "--proxy-headers",
         "--forwarded-allow-ips",
         trusted_proxy_ips,
+        "--workers",
+        str(workers),
         "--log-config",
         "/app/backend/aegis/uvicorn_logging.json",
     ]
-    os.execvp(arguments[0], arguments)
+    environment = {
+        key: value for key, value in os.environ.items() if key != "WEB_CONCURRENCY"
+    }
+    environment[WEB_DATABASE_POOL_ENV] = "enabled"
+    os.execvpe(arguments[0], arguments, environment)
     raise RuntimeError("unreachable")
 
 

@@ -182,3 +182,50 @@ class RuntimeConfig:
             secure_cookies=parsed.scheme == "https",
             trust_proxy_headers=trust_proxy_value == "true",
         )
+
+
+WEB_WORKERS_ENV = "AEGIS_WEB_WORKERS"
+DEFAULT_WEB_WORKERS = 4
+# One web process peaks below 140 MiB in the full benchmark; the maximum plus the
+# uvicorn supervisor stays well inside the 1024 MiB web memory limit.
+MAX_WEB_WORKERS = 4
+
+# Set only by the web server entry point (aegis.proxy) for the uvicorn processes it
+# starts. Management commands, health probes and worker roles never pool.
+WEB_DATABASE_POOL_ENV = "AEGIS_WEB_DATABASE_POOL"
+WEB_DATABASE_POOL_SIZE = 4
+# A pooled login is retired within this lifetime (plus one maintenance interval and
+# one in-flight request), so revoked or rotated database credentials stop serving
+# requests within a bounded time.
+WEB_DATABASE_POOL_MAX_LIFETIME_SECONDS = 60.0
+WEB_DATABASE_POOL_CHECK_INTERVAL_SECONDS = 5.0
+WEB_DATABASE_POOL_TIMEOUT_SECONDS = 10.0
+
+
+def web_workers_from_environ(environ: Mapping[str, str]) -> int:
+    """Return the validated, bounded number of uvicorn web processes."""
+    if WEB_WORKERS_ENV not in environ:
+        return DEFAULT_WEB_WORKERS
+    value = environ[WEB_WORKERS_ENV]
+    message = f"{WEB_WORKERS_ENV} must be an integer from 1 to {MAX_WEB_WORKERS}"
+    if not 1 <= len(value) <= 2 or not value.isascii() or not value.isdigit():
+        raise ConfigurationError(message)
+    workers = int(value)
+    if not 1 <= workers <= MAX_WEB_WORKERS:
+        raise ConfigurationError(message)
+    return workers
+
+
+def web_database_pool_options(environ: Mapping[str, str]) -> dict[str, object] | None:
+    """Return the web server's psycopg pool options, or None outside the web server."""
+    if WEB_DATABASE_POOL_ENV not in environ:
+        return None
+    if environ[WEB_DATABASE_POOL_ENV] != "enabled":
+        raise ConfigurationError(f"{WEB_DATABASE_POOL_ENV} is invalid")
+    return {
+        "name": "aegis-web",
+        "min_size": WEB_DATABASE_POOL_SIZE,
+        "max_size": WEB_DATABASE_POOL_SIZE,
+        "max_lifetime": WEB_DATABASE_POOL_MAX_LIFETIME_SECONDS,
+        "timeout": WEB_DATABASE_POOL_TIMEOUT_SECONDS,
+    }

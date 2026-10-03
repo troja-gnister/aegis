@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import functools
 import hashlib
 import math
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Final, TypedDict
 
 from django.conf import settings
-from django.db import connection
+from django.db import ProgrammingError, connection
 from django.db.migrations.executor import MigrationExecutor
+from django.db.migrations.loader import MigrationLoader
+from django.db.migrations.recorder import MigrationRecorder
 from django.db.models import Count, FloatField, Max, Min, Q
 from django.db.models.functions import Cast
 from django.utils import timezone
@@ -63,17 +67,70 @@ def _freshness(value: object) -> float:
     return seconds
 
 
-def current_schema_identity() -> str:
-    connection.ensure_connection()
-    executor = MigrationExecutor(connection)
-    targets = sorted(executor.loader.graph.leaf_nodes())
-    if executor.migration_plan(targets):
-        raise SchemaCompatibilityError("migrations pending")
+def _schema_identity(targets: Iterable[tuple[str, str]]) -> str:
     encoded = b"aegis.schema-identity.v1\x00" + b"".join(
         app.encode("ascii") + b":" + name.encode("ascii") + b"\x00"
         for app, name in targets
     )
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class _CodeSchema:
+    identity: str
+    migrations: frozenset[tuple[str, str]]
+
+
+@functools.cache
+def _code_schema() -> _CodeSchema | None:
+    """The running code's migration graph; the image's migration files cannot change.
+
+    Squashed (replacing) migrations make the graph depend on the applied history, so
+    with any replacement the per-call database-backed graph is used instead.
+    """
+    loader = MigrationLoader(None)
+    if loader.replacements:
+        return None
+    return _CodeSchema(
+        identity=_schema_identity(sorted(loader.graph.leaf_nodes())),
+        migrations=frozenset(loader.graph.nodes),
+    )
+
+
+def _applied_migrations() -> frozenset[tuple[str, str]]:
+    table = connection.ops.quote_name(MigrationRecorder.Migration._meta.db_table)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(f"SELECT app, name FROM {table}")
+            rows = cursor.fetchall()
+    except ProgrammingError as error:
+        if getattr(error.__cause__, "sqlstate", None) == "42P01":
+            raise SchemaCompatibilityError("migrations pending") from None
+        raise
+    return frozenset((str(app), str(name)) for app, name in rows)
+
+
+def _graph_schema_identity() -> str:
+    executor = MigrationExecutor(connection)
+    targets = sorted(executor.loader.graph.leaf_nodes())
+    if executor.migration_plan(targets):
+        raise SchemaCompatibilityError("migrations pending")
+    return _schema_identity(targets)
+
+
+def current_schema_identity() -> str:
+    """Return the code's schema identity after a live applied-migration check.
+
+    Every call reads the database's migration history; any migration of the code's
+    graph that is not recorded as applied fails closed.
+    """
+    connection.ensure_connection()
+    code = _code_schema()
+    if code is None:
+        return _graph_schema_identity()
+    if not code.migrations <= _applied_migrations():
+        raise SchemaCompatibilityError("migrations pending")
+    return code.identity
 
 
 def current_manifest_identity() -> str:

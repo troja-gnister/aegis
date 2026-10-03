@@ -5,7 +5,7 @@ from pathlib import Path
 from aegis_apps.indexing.config import ScanPolicy
 from aegis_apps.operations.config import WorkerRuntimeConfig
 
-from aegis.config import RuntimeConfig, read_secret
+from aegis.config import RuntimeConfig, read_secret, web_database_pool_options
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 
@@ -102,6 +102,17 @@ DATABASES = {
         "PORT": RUNTIME_CONFIG.db_port,
     }
 }
+
+# Only the uvicorn web server processes started by aegis.proxy reuse connections, from a
+# bounded per-process pool of the web role's own login. Django's persistent connections
+# are per request context under ASGI, so the pool, not CONN_MAX_AGE, provides reuse.
+AEGIS_WEB_DATABASE_POOL = web_database_pool_options(_runtime_environ)
+if AEGIS_WEB_DATABASE_POOL is not None:
+    DATABASES["default"] |= {
+        "CONN_MAX_AGE": 0,
+        "CONN_HEALTH_CHECKS": True,
+        "OPTIONS": {"pool": dict(AEGIS_WEB_DATABASE_POOL)},
+    }
 
 AUTH_USER_MODEL = "identity.User"
 

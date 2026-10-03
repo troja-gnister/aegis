@@ -92,6 +92,53 @@ def test_index_status_is_browse_authorized_stored_and_precision_safe(api_catalog
     assert len(captured) <= 16
 
 
+def test_ready_index_status_reads_the_binding_once_and_migrations_live(
+    api_catalog: Any,
+) -> None:
+    _create_indexer_heartbeat(api_catalog)
+    current_schema_identity()
+    with (
+        api_catalog.database.as_django_role("aegis_web"),
+        CaptureQueriesContext(connection) as captured,
+    ):
+        response = api_catalog.group_client.get(_status_path(api_catalog.root.pk))
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "ready"
+    statements = [query["sql"] for query in captured.captured_queries]
+    assert sum("indexing_indexdeployment" in value for value in statements) == 1
+    assert sum("django_migrations" in value for value in statements) == 1
+    assert not any("pg_catalog.pg_class" in value for value in statements)
+    assert len(statements) <= 13
+
+
+def test_ready_index_status_fails_closed_when_a_code_migration_is_unrecorded(
+    api_catalog: Any,
+) -> None:
+    _create_indexer_heartbeat(api_catalog)
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "DELETE FROM django_migrations WHERE app = 'indexing' "
+            "AND name = (SELECT max(name) FROM django_migrations WHERE app = 'indexing') "
+            "RETURNING app, name, applied"
+        )
+        removed = cursor.fetchone()
+    assert removed is not None
+    try:
+        response = api_catalog.get(_status_path(api_catalog.root.pk))
+    finally:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO django_migrations (app, name, applied) VALUES (%s, %s, %s)",
+                list(removed),
+            )
+
+    assert response.status_code == 503
+    assert response.json() == {"type": "catalog_unavailable", "title": "Catalog unavailable"}
+    assert response.headers["Cache-Control"] == "private, no-store"
+    assert api_catalog.get(_status_path(api_catalog.root.pk)).json()["state"] == "ready"
+
+
 @pytest.mark.parametrize(
     "worker_state",
     ("missing", "stale", "wrong_release", "wrong_schema", "wrong_manifest"),

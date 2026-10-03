@@ -346,6 +346,21 @@ def test_web_uses_bounded_log_config_from_process_start() -> None:
     assert command == ["python", "-m", "aegis.proxy"]
 
 
+def test_only_web_sets_a_bounded_worker_count_and_no_service_enables_pooling() -> None:
+    services = rendered_compose()["services"]
+    configured = rendered_compose(environment={"AEGIS_WEB_WORKERS": "2"})["services"]
+
+    assert services["web"]["environment"]["AEGIS_WEB_WORKERS"] == "4"
+    assert configured["web"]["environment"]["AEGIS_WEB_WORKERS"] == "2"
+    for name, service in services.items():
+        environment = service.get("environment") or {}
+        # Only aegis.proxy enables the pool, for the uvicorn processes it starts.
+        assert "AEGIS_WEB_DATABASE_POOL" not in environment, name
+        assert "WEB_CONCURRENCY" not in environment, name
+        if name != "web":
+            assert "AEGIS_WEB_WORKERS" not in environment, name
+
+
 def test_gateway_creation_does_not_wait_for_web_health() -> None:
     services = rendered_compose(
         "tls", "tls-local", environment={"AEGIS_TLS_HOST": PUBLIC_TLS_HOST}

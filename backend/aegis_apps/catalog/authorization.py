@@ -46,6 +46,8 @@ class BrowseContext:
     root_epoch: int
     user_epoch: int
     namespace: str
+    binding_epoch: int
+    manifest_identity: str
     _connection: object
     _active: bool = True
 
@@ -112,7 +114,7 @@ def browse_context(user: User, root_id: UUID, namespace: str) -> Iterator[Browse
         except ManifestError:
             raise CatalogNotFound() from None
         binding = IndexDeployment.objects.filter(pk=1).values(
-            "manifest_identity", "slot_ids",
+            "manifest_identity", "slot_ids", "epoch",
         ).first()
         if (
             manifest is None or manifest.get(root_row[1]) is None or binding is None
@@ -129,7 +131,8 @@ def browse_context(user: User, root_id: UUID, namespace: str) -> Iterator[Browse
             Root(id=root_row[0], slot_id=root_row[1], active=True,
                  authorization_epoch=root_row[3]),
             User(id=user.pk, is_active=True, authorization_epoch=requested_epoch),
-            root_row[3], requested_epoch, namespace, connection.connection,
+            root_row[3], requested_epoch, namespace, binding["epoch"],
+            binding["manifest_identity"], connection.connection,
         )
         try:
             yield context

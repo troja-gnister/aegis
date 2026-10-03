@@ -341,6 +341,8 @@ def verification_summary(summary: Mapping[str, Any]) -> dict[str, Any]:
         "optimisticFixtureSteps": _scalar(summary.get("optimisticFixtureSteps")),
         "workerLoad": _scalar(summary.get("workerLoad")),
         "signingKeySource": _scalar(evidence.get("signingKeySource")),
+        "webWorkers": _web_workers(((environment.get("containers") or {}).get("web") or {})
+                                   .get("webWorkers")),
         "datasetCounts": {
             "entries": _scalar(counts.get("entries")),
             "kinds": _counts(counts.get("kinds"), _KINDS),
@@ -484,6 +486,89 @@ def verification_summary(summary: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _web_workers(value: Any) -> int | None:
+    return value if type(value) is int and 1 <= value <= 64 else None
+
+
+def prior_run(tracked: Mapping[str, Any]) -> dict[str, Any]:
+    """A compact, labeled before-run built only from an allowlisted tracked summary."""
+    routes = tracked.get("routes") or {}
+    over = classes_over_threshold(tracked)
+    source = (tracked.get("environment") or {}).get("source") or {}
+    return {
+        "label": "prior run (before this change)",
+        "evidenceLabel": tracked.get("evidenceLabel"),
+        "startedAt": tracked.get("startedAt"),
+        "source": {"gitRevision": source.get("gitRevision"),
+                   "workingTreeChanges": source.get("workingTreeChanges")},
+        "webWorkers": _web_workers(tracked.get("webWorkers")),
+        "gate": (tracked.get("gates") or {}).get("warm") or {},
+        "routes": {phase: routes[phase] for phase in ("warm", "sequential") if phase in routes},
+        "classesOverThreshold": {
+            "count": len(over["classes"]), "requests": over["requests"],
+            "shareOfGated": over["shareOfGated"],
+            "filteredWideP95RangeMs": over["filteredWideP95RangeMs"],
+        },
+        "utilization": {"warm": (tracked.get("utilization") or {}).get("warm") or {}},
+        "bottleneck": {"measured": (tracked.get("bottleneck") or {}).get("measured") or {}},
+    }
+
+
+def _workers_text(value: Any) -> str:
+    return (f"{value} uvicorn worker processes (AEGIS_WEB_WORKERS) with pooled web-role "
+            "database logins" if _web_workers(value) else
+            "1 (single uvicorn process and one new database connection per request; the "
+            "run predates AEGIS_WEB_WORKERS)")
+
+
+def _before_after(data: Mapping[str, Any]) -> list[str]:
+    priors = data.get("priorRuns") or []
+    if not priors:
+        return []
+    prior = priors[0]
+    source = prior.get("source") or {}
+    over_now = classes_over_threshold(data)
+    over_then = prior.get("classesOverThreshold") or {}
+    lines = [
+        "## Before and after", "",
+        f"Prior run (before this change): started {prior.get('startedAt')}, source "
+        f"`{source.get('gitRevision')}` with {source.get('workingTreeChanges')} uncommitted "
+        f"working-tree changes; {prior.get('evidenceLabel')}. Web server: "
+        f"{_workers_text(prior.get('webWorkers'))}. Same profile, harness and host.", "",
+        "| Phase | Route | Prior p50 ms | Prior p95 ms | Prior p99 ms | This p50 ms | "
+        "This p95 ms | This p99 ms |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for phase in ("warm", "sequential"):
+        then = (prior.get("routes") or {}).get(phase) or {}
+        now = (data.get("routes") or {}).get(phase) or {}
+        for route in ("list", "details", "status"):
+            if route not in then and route not in now:
+                continue
+            a, b = then.get(route) or {}, now.get(route) or {}
+            lines.append(
+                f"| {phase} | {route} | {_ms(a.get('p50Ms'))} | {_ms(a.get('p95Ms'))} | "
+                f"{_ms(a.get('p99Ms'))} | {_ms(b.get('p50Ms'))} | {_ms(b.get('p95Ms'))} | "
+                f"{_ms(b.get('p99Ms'))} |")
+    lines += [
+        "", f"Directory-page classes over 300 ms (at least 20 samples): prior "
+        f"{over_then.get('count')} classes ({over_then.get('requests')} requests), this run "
+        f"{len(over_now['classes'])} classes ({over_now['requests']} requests).", "",
+        "| Service | Prior mean CPU % of one core | Prior peak memory | This mean CPU % of one "
+        "core | This peak memory |", "| --- | ---: | ---: | ---: | ---: |",
+    ]
+    then_use = (prior.get("utilization") or {}).get("warm") or {}
+    now_use = (data.get("utilization") or {}).get("warm") or {}
+    for service in _SERVICES:
+        if service in then_use or service in now_use:
+            a, b = then_use.get(service) or {}, now_use.get(service) or {}
+            lines.append(
+                f"| {service} | {a.get('cpuMeanPercentOfOneCore')} | "
+                f"{_mib(a.get('memoryMaxBytes'))} | {b.get('cpuMeanPercentOfOneCore')} | "
+                f"{_mib(b.get('memoryMaxBytes'))} |")
+    return [*lines, ""]
+
+
 def _ms(value: Any) -> str:
     return "n/a" if value is None else f"{value:.1f}"
 
@@ -546,8 +631,8 @@ def verification_markdown(data: Mapping[str, Any]) -> str:
         f"{durations.get('measurementSeconds')} s measurement, "
         f"{durations.get('coldOperationsPerUser')} cold operations per user.",
         f"- **Started:** {data.get('startedAt')}, source `{source.get('gitRevision')}` with "
-        f"{source.get('workingTreeChanges')} uncommitted working-tree changes (test-only "
-        "benchmark, seed and documentation files).",
+        f"{source.get('workingTreeChanges')} uncommitted working-tree changes.",
+        f"- **Web server:** {_workers_text(data.get('webWorkers'))}.",
         f"- **Host:** {host.get('cpuModel')}, {host.get('logicalCpus')} logical CPUs, "
         f"{_gib(host.get('memoryBytes'))} RAM, governor {host.get('governor')}, kernel "
         f"{host.get('kernel')}.",
@@ -585,6 +670,7 @@ def verification_markdown(data: Mapping[str, Any]) -> str:
         "diagnostic and reported below; filtered pages stay in the population. Details and "
         "status are measured but not gated; routes over 300 ms: "
         f"{', '.join(gate.get('routesOverThreshold') or []) or 'none'}.", "",
+        *_before_after(data),
         "## Classes over 300 ms (not individually gated)", "",
         f"Warm directory-page classes with at least {over['minimumSamples']} samples whose "
         f"own p95 exceeds 300 ms: **{len(over['classes'])} classes, {over['requests']} "
@@ -775,11 +861,36 @@ def query_evidence(spec: Mapping[str, Any]) -> dict[str, Any]:  # pragma: no cov
     }
 
 
-def regenerate_verification(report_dir: Path, output_dir: Path) -> tuple[Path, Path]:
-    """Rebuild the tracked summary from an existing private report (numbers unchanged)."""
+def _recomputed_bottleneck(summary: dict[str, Any]) -> dict[str, Any]:
+    """Re-derive the labeled inferences from the report's own measured fields."""
+    from .run import bottleneck_evidence
+
+    phases, utilization = summary.get("phases"), summary.get("utilization")
+    measurement = (summary.get("durations") or {}).get("measurementSeconds")
+    if not isinstance(phases, dict) or not isinstance(utilization, dict) or (
+        type(measurement) is not int
+    ):
+        return summary
+    workers = (((summary.get("environment") or {}).get("containers") or {}).get("web")
+               or {}).get("webWorkers")
+    return {**summary, "bottleneck": bottleneck_evidence(
+        phases, utilization, measurement, _web_workers(workers))}
+
+
+def regenerate_verification(report_dir: Path, output_dir: Path,
+                            prior_dir: Path | None = None) -> tuple[Path, Path]:
+    """Rebuild the tracked summary from an existing private report (numbers unchanged).
+
+    With *prior_dir*, the earlier report is kept as a clearly labeled prior run.
+    """
     _private_directory(report_dir)
     summary = json.loads((report_dir / "summary.json").read_text(encoding="utf-8"))
+    summary = _recomputed_bottleneck(summary)
     tracked = verification_summary(summary)
+    if prior_dir is not None:
+        _private_directory(prior_dir)
+        prior = json.loads((prior_dir / "summary.json").read_text(encoding="utf-8"))
+        tracked["priorRuns"] = [prior_run(verification_summary(prior))]
     return (write_report(output_dir, "phase-2a-catalog-benchmark.json", tracked, secrets=()),
             write_text(output_dir, "phase-2a-catalog-benchmark.md",
                        verification_markdown(tracked), secrets=()))
@@ -788,13 +899,16 @@ def regenerate_verification(report_dir: Path, output_dir: Path) -> tuple[Path, P
 def main(arguments: list[str]) -> int:  # pragma: no cover - subprocess entry point
     import sys
 
-    if arguments[:1] == ["verification"] and len(arguments) == 3:
-        for path in regenerate_verification(Path(arguments[1]), Path(arguments[2])):
+    if arguments[:1] == ["verification"] and len(arguments) in (3, 5) and (
+        len(arguments) == 3 or arguments[3] == "--prior"
+    ):
+        prior = Path(arguments[4]) if len(arguments) == 5 else None
+        for path in regenerate_verification(Path(arguments[1]), Path(arguments[2]), prior):
             print(path)
         return 0
     if arguments != ["query-evidence"]:
         raise SystemExit("usage: python -m scripts.benchmarks.report query-evidence | "
-                         "verification REPORT_DIR OUTPUT_DIR")
+                         "verification REPORT_DIR OUTPUT_DIR [--prior PRIOR_REPORT_DIR]")
     spec = json.loads(sys.stdin.read(1 << 20))
     print(json.dumps(query_evidence(spec), sort_keys=True, default=str))
     return 0

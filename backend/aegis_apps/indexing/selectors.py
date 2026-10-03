@@ -14,7 +14,7 @@ from aegis_apps.operations.enums import HeartbeatStatus
 from aegis_apps.operations.models import WorkerHeartbeat
 from aegis_apps.operations.selectors import current_schema_identity
 
-from .models import IndexDeployment, RootIndexState, ScanRun
+from .models import RootIndexState, ScanRun
 from .serializers import index_status_payload
 
 _STATUS_FIELDS = (
@@ -40,9 +40,8 @@ _STATUS_FIELDS = (
 def _active_scan_is_current(
     row: dict[str, object],
     *,
-    deployment: IndexDeployment,
+    context: authorization.BrowseContext,
     root_id: UUID,
-    root_epoch: int,
 ) -> bool:
     run_id = row["active_run_id"]
     if not isinstance(run_id, UUID):
@@ -53,10 +52,10 @@ def _active_scan_is_current(
     )
     expected = (
         root_id,
-        deployment.epoch,
-        deployment.epoch,
-        root_epoch,
-        deployment.manifest_identity,
+        context.binding_epoch,
+        context.binding_epoch,
+        context.root_epoch,
+        context.manifest_identity,
         expected_run_state,
     )
     actual = (
@@ -70,7 +69,7 @@ def _active_scan_is_current(
     return actual == expected
 
 
-def _compatible_indexer_is_fresh(deployment: IndexDeployment) -> bool:
+def _compatible_indexer_is_fresh(manifest_identity: str) -> bool:
     """Require a live indexer using this release, schema, and manifest."""
     freshness = timedelta(seconds=float(settings.AEGIS_WORKER_HEARTBEAT_FRESH_SECONDS))
     return WorkerHeartbeat.objects.filter(
@@ -80,7 +79,7 @@ def _compatible_indexer_is_fresh(deployment: IndexDeployment) -> bool:
         status__in=(HeartbeatStatus.IDLE, HeartbeatStatus.RUNNING),
         release_id=settings.AEGIS_RELEASE_ID,
         schema_identity=current_schema_identity(),
-        manifest_identity=deployment.manifest_identity,
+        manifest_identity=manifest_identity,
         current_job_id__isnull=True,
     ).exists()
 
@@ -88,23 +87,19 @@ def _compatible_indexer_is_fresh(deployment: IndexDeployment) -> bool:
 def index_status(user: User, root_id: UUID) -> dict[str, object]:
     """Return a BROWSE-authorized status without source enumeration."""
     with authorization.browse_context(user, root_id, "index-status") as context:
-        deployment = IndexDeployment.objects.get(pk=1)
+        # The binding (epoch and manifest identity) was read once by browse_context in
+        # this same transaction; it is not read again here.
         row = RootIndexState.objects.filter(root_id=root_id).values(*_STATUS_FIELDS).first()
         if row is None:
             return index_status_payload(None, state="not_indexed")
         stored_state = str(row["status"])
         compatible = (
-            row["binding_epoch"] == deployment.epoch
-            and row["policy_epoch"] == deployment.epoch
+            row["binding_epoch"] == context.binding_epoch
+            and row["policy_epoch"] == context.binding_epoch
         )
         if compatible and stored_state in ("queued", "scanning"):
-            compatible = _active_scan_is_current(
-                row,
-                deployment=deployment,
-                root_id=root_id,
-                root_epoch=context.root_epoch,
-            )
+            compatible = _active_scan_is_current(row, context=context, root_id=root_id)
         if compatible and stored_state in ("queued", "scanning", "ready"):
-            compatible = _compatible_indexer_is_fresh(deployment)
+            compatible = _compatible_indexer_is_fresh(context.manifest_identity)
         state = stored_state if compatible else "unavailable"
         return index_status_payload(row, state=state)

@@ -164,6 +164,17 @@ def engine_identity(bench: BenchmarkEnvironment) -> dict[str, Any]:
     }
 
 
+def web_workers(info: Any) -> int | None:
+    """The web container's configured uvicorn process count, if it is a small integer."""
+    variables = ((info or {}).get("Config") or {}).get("Env") or []
+    for variable in variables:
+        if isinstance(variable, str) and variable.startswith("AEGIS_WEB_WORKERS="):
+            value = variable.split("=", 1)[1]
+            return int(value) if value.isascii() and value.isdigit() and (
+                1 <= int(value) <= 64) else None
+    return None
+
+
 def container_identity(bench: BenchmarkEnvironment) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for service, identity in sorted(bench.container_ids().items()):
@@ -177,6 +188,7 @@ def container_identity(bench: BenchmarkEnvironment) -> dict[str, Any]:
             "cpuQuota": host.get("CpuQuota"), "readOnly": host.get("ReadonlyRootfs"),
             "ips": sorted(str(network.get("IPAddress")) for network in (
                 (info.get("NetworkSettings") or {}).get("Networks") or {}).values()),
+            **({"webWorkers": web_workers(info)} if service == "web" else {}),
         }
     return result
 
@@ -305,7 +317,7 @@ def gate_exit_code(phases: dict[str, Any]) -> int:
 
 
 def bottleneck_evidence(phases: dict[str, Any], utilization: dict[str, Any],
-                        measurement: int) -> dict[str, Any]:
+                        measurement: int, web_workers: int | None = None) -> dict[str, Any]:
     """Measured utilization and service times; the causal attribution stays labeled."""
     warm = phases.get("warm", {})
     sequential = phases.get("sequential", {}).get("routes", {})
@@ -327,7 +339,19 @@ def bottleneck_evidence(phases: dict[str, Any], utilization: dict[str, Any],
         inferences.append(
             f"inferred: concurrent list p50 is {ratio}x the sequential service time, so most "
             "loaded latency is waiting for a shared resource rather than per-query work")
-    if web is not None:
+    pooled = web_workers is not None and web_workers > 1
+    if web is not None and pooled:
+        budget = min(web_workers or 1, 4)
+        if web >= 85.0 * budget:
+            inferences.append(
+                f"inferred: web averaged {web}% of one core across {web_workers} uvicorn "
+                f"processes, near its {budget}-core budget, so web request CPU is the "
+                "remaining limit under this load")
+        else:
+            inferences.append(
+                f"inferred: web averaged {web}% of one core across {web_workers} uvicorn "
+                f"processes, below its {budget}-core budget")
+    elif web is not None:
         if web > 110.0:
             inferences.append(
                 f"inferred: web averaged {web}% of one core, above one core, so request work "
@@ -341,7 +365,7 @@ def bottleneck_evidence(phases: dict[str, Any], utilization: dict[str, Any],
             inferences.append(
                 f"inferred: web averaged {web}% of one core; the single-process bottleneck "
                 "hypothesis is not supported by these samples")
-    if web is not None and postgres is not None and postgres >= web:
+    if web is not None and postgres is not None and postgres >= web and not pooled:
         inferences.append(
             f"inferred: PostgreSQL used at least as much CPU as web ({postgres}% vs {web}% of "
             "one core). With no persistent connections, every request opens a new database "
@@ -606,7 +630,8 @@ def run_catalog(arguments: argparse.Namespace) -> int:
         utilization = sampler.summary()
         log("Collecting SQL counts, sanitized EXPLAIN plans, sizes and settings...")
         evidence = collect_evidence(bench, root_ids, shape)
-        identity["containers"] = container_identity(bench)
+        containers = container_identity(bench)
+        identity["containers"] = containers
         phases = summarize(samples)
         warm_lists = [sample for sample in samples
                       if sample.phase == "warm" and sample.route == "list"]
@@ -638,7 +663,9 @@ def run_catalog(arguments: argparse.Namespace) -> int:
                                       "worker-load run is the counterweight",
             "realizedMix": {"cold": mix_cold, "warm": mix_warm},
             "utilization": utilization,
-            "bottleneck": bottleneck_evidence(phases, utilization, measurement),
+            "bottleneck": bottleneck_evidence(
+                phases, utilization, measurement,
+                containers.get("web", {}).get("webWorkers")),
             "storage": bench.storage,
             "loadedRun": "not run in catalog mode (Task 16 owns worker-load runs)",
             "datasetCounts": counts, "seedCounts": seed["counts"], "timings": timings,

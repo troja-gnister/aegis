@@ -101,6 +101,7 @@ services:
     environment:
       <<: *backend-environment
       AEGIS_TRUST_PROXY_HEADERS: "true"
+      AEGIS_WEB_WORKERS: "${AEGIS_WEB_WORKERS:-4}"
       AEGIS_DB_USER: aegis_web
       AEGIS_DB_PASSWORD_FILE: /run/secrets/db_web_password
       AEGIS_AUTH_THROTTLE_HMAC_KEY_FILE: /run/secrets/auth_throttle_hmac_key

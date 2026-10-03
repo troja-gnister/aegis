@@ -1,28 +1,27 @@
 {
   "bottleneck": {
     "inferences": [
-      "inferred: concurrent list p50 is 4.38x the sequential service time, so most loaded latency is waiting for a shared resource rather than per-query work",
-      "inferred: web averaged 163.9% of one core, above one core, so request work is not purely serialized by one Python GIL (C extensions release it); the single-process hypothesis is only partly supported",
-      "inferred: PostgreSQL used at least as much CPU as web (187.6% vs 163.9% of one core). With no persistent connections, every request opens a new database connection (backend start and SCRAM login) plus a locking transaction; that is a plausible major cost, not profiled here"
+      "inferred: concurrent list p50 is 2.69x the sequential service time, so most loaded latency is waiting for a shared resource rather than per-query work",
+      "inferred: web averaged 361.0% of one core across 4 uvicorn processes, near its 4-core budget, so web request CPU is the remaining limit under this load"
     ],
     "measured": {
       "concurrentP50Ms": {
-        "details": 263.887,
-        "list": 229.357,
-        "status": 457.048
+        "details": 88.244,
+        "list": 86.146,
+        "status": 61.638
       },
-      "concurrentToSequentialListP50": 4.38,
-      "postgresCpuMeanPercentOfOneCore": 187.6,
-      "postgresCpuMsPerRequest": 46.46,
+      "concurrentToSequentialListP50": 2.69,
+      "postgresCpuMeanPercentOfOneCore": 208.0,
+      "postgresCpuMsPerRequest": 18.72,
       "postgresCpuQuotaCores": 4,
       "sequentialP50Ms": {
-        "details": 50.594,
-        "list": 52.419,
-        "status": 53.163
+        "details": 31.579,
+        "list": 32.014,
+        "status": 20.941
       },
-      "warmThroughputRequestsPerSecond": 40.38,
-      "webCpuMeanPercentOfOneCore": 163.9,
-      "webCpuMsPerRequest": 40.59,
+      "warmThroughputRequestsPerSecond": 111.13,
+      "webCpuMeanPercentOfOneCore": 361.0,
+      "webCpuMsPerRequest": 32.48,
       "webCpuQuotaCores": 4
     }
   },
@@ -67,7 +66,7 @@
     "containers": {
       "gateway": {
         "cpusetCpus": "",
-        "image": "sha256:cd9b2e2bdf27dcc8800165d91da12eda96ece2cde3e6edaa208273d17e70ffcf",
+        "image": "sha256:464470c764b80197ee937e6e35032b2521ca16e3e63881bfcbcbeb872a5b360f",
         "imageReference": "aegis-gateway",
         "memoryLimitBytes": 268435456,
         "memorySwapBytes": 268435456,
@@ -75,7 +74,7 @@
       },
       "indexer": {
         "cpusetCpus": "",
-        "image": "sha256:5bca1506fa8d575984c32e37b341b4a196f62c82a64ee8305ac53bc3f7ff308c",
+        "image": "sha256:fd1ca3f1be1af4a37e2499875938b5af87bb6b47e029430ac47fd99c37e6824c",
         "imageReference": "aegis-backend",
         "memoryLimitBytes": 1073741824,
         "memorySwapBytes": 1073741824,
@@ -83,7 +82,7 @@
       },
       "media": {
         "cpusetCpus": "",
-        "image": "sha256:5bca1506fa8d575984c32e37b341b4a196f62c82a64ee8305ac53bc3f7ff308c",
+        "image": "sha256:fd1ca3f1be1af4a37e2499875938b5af87bb6b47e029430ac47fd99c37e6824c",
         "imageReference": "aegis-backend",
         "memoryLimitBytes": 2147483648,
         "memorySwapBytes": 2147483648,
@@ -91,7 +90,7 @@
       },
       "migrate": {
         "cpusetCpus": "",
-        "image": "sha256:5bca1506fa8d575984c32e37b341b4a196f62c82a64ee8305ac53bc3f7ff308c",
+        "image": "sha256:fd1ca3f1be1af4a37e2499875938b5af87bb6b47e029430ac47fd99c37e6824c",
         "imageReference": "aegis-backend",
         "memoryLimitBytes": 0,
         "memorySwapBytes": 0,
@@ -99,7 +98,7 @@
       },
       "operations": {
         "cpusetCpus": "",
-        "image": "sha256:5bca1506fa8d575984c32e37b341b4a196f62c82a64ee8305ac53bc3f7ff308c",
+        "image": "sha256:fd1ca3f1be1af4a37e2499875938b5af87bb6b47e029430ac47fd99c37e6824c",
         "imageReference": "aegis-backend",
         "memoryLimitBytes": 1073741824,
         "memorySwapBytes": 1073741824,
@@ -107,7 +106,7 @@
       },
       "postgres": {
         "cpusetCpus": "",
-        "image": "sha256:24c1ea14ade6f6086ba5411baa8aa64d36b888c94911ec730a5f9bf577860237",
+        "image": "sha256:b1d2e3806bfd755f36d1f92222bad15736078b465fd0f13fbcbf20eb17f51448",
         "imageReference": "aegis-postgres",
         "memoryLimitBytes": 3221225472,
         "memorySwapBytes": 3221225472,
@@ -115,7 +114,7 @@
       },
       "web": {
         "cpusetCpus": "",
-        "image": "sha256:5bca1506fa8d575984c32e37b341b4a196f62c82a64ee8305ac53bc3f7ff308c",
+        "image": "sha256:fd1ca3f1be1af4a37e2499875938b5af87bb6b47e029430ac47fd99c37e6824c",
         "imageReference": "aegis-backend",
         "memoryLimitBytes": 1073741824,
         "memorySwapBytes": 1073741824,
@@ -145,70 +144,62 @@
       "python": "3.13.15"
     },
     "source": {
-      "gitRevision": "0744cab861d76813e9e8d9d4c08270d2e1ef9b92",
+      "gitRevision": "e8ea863c5c1bc4de707ee921addc71186401f418",
       "imagesLockSha256": "036c856617e0c43b25b1b88e5d6feb7daba0a4b60df1fae7e095f75cf52d92f9",
       "npmLockSha256": "d5a8ccfb02a522f17028eba67b93a624b95a6a7a9943ec4b1fd5c3b329b1e1a8",
       "profileSha256": "5b4256154b633f1b28d20509831fb931b43fbf62b899c568fdeb8f2e0fa15c38",
       "uvLockSha256": "708ed167bcceae6b4c08c2efe6ef822dbf6d55643e787e0624fcf06a311218b7",
-      "workingTreeChanges": 8
+      "workingTreeChanges": 21
     }
   },
   "evidenceLabel": "provisional: full profile workload on an uncalibrated development host",
   "fixtureControl": "root_index_state_due_beyond_measurement_window",
   "gates": {
     "cold": {
-      "allRoutesP95Ms": 247.997,
+      "allRoutesP95Ms": 157.306,
       "failures": 0,
       "label": "cold",
-      "listP95Ms": 229.554,
+      "listP95Ms": 153.111,
       "passed": true,
-      "routesOverThreshold": [
-        "status"
-      ],
+      "routesOverThreshold": [],
       "thresholdP95Ms": 300.0
     },
     "matrix": {
-      "allRoutesP95Ms": 125.466,
+      "allRoutesP95Ms": 73.434,
       "failures": 0,
       "label": "matrix",
-      "listP95Ms": 125.466,
+      "listP95Ms": 73.434,
       "passed": true,
       "routesOverThreshold": [],
       "thresholdP95Ms": 300.0
     },
     "sequential": {
-      "allRoutesP95Ms": 63.248,
+      "allRoutesP95Ms": 39.76,
       "failures": 0,
       "label": "sequential",
-      "listP95Ms": 64.272,
+      "listP95Ms": 41.17,
       "passed": true,
       "routesOverThreshold": [],
       "thresholdP95Ms": 300.0
     },
     "warm": {
-      "allRoutesP95Ms": 384.781,
+      "allRoutesP95Ms": 143.666,
       "failures": 0,
       "label": "unloaded",
-      "listP95Ms": 291.173,
+      "listP95Ms": 143.911,
       "passed": true,
-      "routesOverThreshold": [
-        "details",
-        "status"
-      ],
+      "routesOverThreshold": [],
       "thresholdP95Ms": 300.0,
-      "wideFolderListShare": 0.3973,
+      "wideFolderListShare": 0.4006,
       "wideFolderListShareMinimum": 0.25
     },
     "warmup": {
-      "allRoutesP95Ms": 372.932,
+      "allRoutesP95Ms": 145.152,
       "failures": 0,
       "label": "warmup",
-      "listP95Ms": 290.591,
+      "listP95Ms": 145.07,
       "passed": true,
-      "routesOverThreshold": [
-        "details",
-        "status"
-      ],
+      "routesOverThreshold": [],
       "thresholdP95Ms": 300.0
     }
   },
@@ -235,23 +226,182 @@
     "synchronous_commit": "on",
     "work_mem": "4096kB"
   },
+  "priorRuns": [
+    {
+      "bottleneck": {
+        "measured": {
+          "concurrentP50Ms": {
+            "details": 263.126,
+            "list": 229.07,
+            "status": 459.837
+          },
+          "concurrentToSequentialListP50": 4.38,
+          "postgresCpuMeanPercentOfOneCore": 182.2,
+          "postgresCpuMsPerRequest": 44.96,
+          "postgresCpuQuotaCores": 4,
+          "sequentialP50Ms": {
+            "details": 50.755,
+            "list": 52.343,
+            "status": 52.959
+          },
+          "warmThroughputRequestsPerSecond": 40.52,
+          "webCpuMeanPercentOfOneCore": 163.6,
+          "webCpuMsPerRequest": 40.37,
+          "webCpuQuotaCores": 4
+        }
+      },
+      "classesOverThreshold": {
+        "count": 14,
+        "filteredWideP95RangeMs": [
+          332.293,
+          407.311
+        ],
+        "requests": 1692,
+        "shareOfGated": 0.0547
+      },
+      "evidenceLabel": "provisional: full profile workload on an uncalibrated development host",
+      "gate": {
+        "allRoutesP95Ms": 377.023,
+        "failures": 0,
+        "label": "unloaded",
+        "listP95Ms": 287.133,
+        "passed": true,
+        "routesOverThreshold": [
+          "details",
+          "status"
+        ],
+        "thresholdP95Ms": 300.0,
+        "wideFolderListShare": 0.3977,
+        "wideFolderListShareMinimum": 0.25
+      },
+      "label": "prior run (before this change)",
+      "routes": {
+        "sequential": {
+          "details": {
+            "errorRate": 0.0,
+            "failures": 0,
+            "meanPayloadBytes": 477.0,
+            "meanRows": null,
+            "p50Ms": 50.755,
+            "p95Ms": 60.653,
+            "p99Ms": 63.068,
+            "requests": 100
+          },
+          "list": {
+            "errorRate": 0.0,
+            "failures": 0,
+            "meanPayloadBytes": 25406.5,
+            "meanRows": 100.0,
+            "p50Ms": 52.343,
+            "p95Ms": 65.526,
+            "p99Ms": 68.388,
+            "requests": 200
+          },
+          "status": {
+            "errorRate": 0.0,
+            "failures": 0,
+            "meanPayloadBytes": 217.0,
+            "meanRows": null,
+            "p50Ms": 52.959,
+            "p95Ms": 62.8,
+            "p99Ms": 65.787,
+            "requests": 100
+          }
+        },
+        "warm": {
+          "details": {
+            "errorRate": 0.0,
+            "failures": 0,
+            "meanPayloadBytes": 511.8,
+            "meanRows": null,
+            "p50Ms": 263.126,
+            "p95Ms": 327.512,
+            "p99Ms": 360.945,
+            "requests": 3622
+          },
+          "list": {
+            "errorRate": 0.0,
+            "failures": 0,
+            "meanPayloadBytes": 24792.4,
+            "meanRows": 96.24,
+            "p50Ms": 229.07,
+            "p95Ms": 287.133,
+            "p99Ms": 322.98,
+            "requests": 30952
+          },
+          "status": {
+            "errorRate": 0.0,
+            "failures": 0,
+            "meanPayloadBytes": 216.7,
+            "meanRows": null,
+            "p50Ms": 459.837,
+            "p95Ms": 550.812,
+            "p99Ms": 592.323,
+            "requests": 1895
+          }
+        }
+      },
+      "source": {
+        "gitRevision": "e8ea863c5c1bc4de707ee921addc71186401f418",
+        "workingTreeChanges": 0
+      },
+      "startedAt": "2026-10-02T03:34:18.305075+00:00",
+      "utilization": {
+        "warm": {
+          "gateway": {
+            "cpuMaxPercentOfOneCore": 6.4,
+            "cpuMeanPercentOfOneCore": 2.5,
+            "cpuP95PercentOfOneCore": 5.8,
+            "memoryMaxBytes": 16882073,
+            "memoryMeanBytes": 15101882,
+            "samples": 180
+          },
+          "indexer": {
+            "cpuMaxPercentOfOneCore": 102.3,
+            "cpuMeanPercentOfOneCore": 27.7,
+            "cpuP95PercentOfOneCore": 100.2,
+            "memoryMaxBytes": 109366476,
+            "memoryMeanBytes": 63199655,
+            "samples": 180
+          },
+          "postgres": {
+            "cpuMaxPercentOfOneCore": 210.1,
+            "cpuMeanPercentOfOneCore": 182.2,
+            "cpuP95PercentOfOneCore": 196.6,
+            "memoryMaxBytes": 202689740,
+            "memoryMeanBytes": 193663831,
+            "samples": 180
+          },
+          "web": {
+            "cpuMaxPercentOfOneCore": 236.6,
+            "cpuMeanPercentOfOneCore": 163.6,
+            "cpuP95PercentOfOneCore": 233.1,
+            "memoryMaxBytes": 142396620,
+            "memoryMeanBytes": 98416721,
+            "samples": 180
+          }
+        }
+      },
+      "webWorkers": null
+    }
+  ],
   "queryEvidence": [
     {
       "catalogQueries": [
         {
-          "executionMs": 0.383,
+          "executionMs": 0.363,
           "indexes": [
             "catalog_root_id_uniq"
           ],
-          "planningMs": 1.322
+          "planningMs": 1.289
         },
         {
-          "executionMs": 1.938,
+          "executionMs": 1.904,
           "indexes": [
             "catalog_browse_name_asc",
             "catalog_root_id_uniq"
           ],
-          "planningMs": 0.588
+          "planningMs": 0.589
         }
       ],
       "label": "wide-name-asc-first",
@@ -263,19 +413,19 @@
     {
       "catalogQueries": [
         {
-          "executionMs": 0.678,
+          "executionMs": 0.385,
           "indexes": [
             "catalog_root_id_uniq"
           ],
-          "planningMs": 2.114
+          "planningMs": 1.234
         },
         {
-          "executionMs": 2.111,
+          "executionMs": 2.065,
           "indexes": [
             "catalog_browse_name_asc",
             "catalog_root_id_uniq"
           ],
-          "planningMs": 1.479
+          "planningMs": 0.814
         }
       ],
       "label": "wide-name-asc-next",
@@ -287,19 +437,19 @@
     {
       "catalogQueries": [
         {
-          "executionMs": 0.66,
+          "executionMs": 0.389,
           "indexes": [
             "catalog_root_id_uniq"
           ],
-          "planningMs": 2.106
+          "planningMs": 1.251
         },
         {
-          "executionMs": 1.939,
+          "executionMs": 1.98,
           "indexes": [
             "catalog_browse_name_desc",
             "catalog_root_id_uniq"
           ],
-          "planningMs": 0.568
+          "planningMs": 0.607
         }
       ],
       "label": "wide-name-desc-first",
@@ -311,19 +461,19 @@
     {
       "catalogQueries": [
         {
-          "executionMs": 0.555,
+          "executionMs": 0.39,
           "indexes": [
             "catalog_root_id_uniq"
           ],
-          "planningMs": 2.126
+          "planningMs": 1.274
         },
         {
-          "executionMs": 3.728,
+          "executionMs": 2.103,
           "indexes": [
             "catalog_browse_name_desc",
             "catalog_root_id_uniq"
           ],
-          "planningMs": 1.383
+          "planningMs": 0.807
         }
       ],
       "label": "wide-name-desc-next",
@@ -335,19 +485,19 @@
     {
       "catalogQueries": [
         {
-          "executionMs": 0.677,
+          "executionMs": 0.391,
           "indexes": [
             "catalog_root_id_uniq"
           ],
-          "planningMs": 2.106
+          "planningMs": 1.25
         },
         {
-          "executionMs": 3.549,
+          "executionMs": 1.966,
           "indexes": [
             "catalog_browse_modified_asc",
             "catalog_root_id_uniq"
           ],
-          "planningMs": 0.984
+          "planningMs": 0.612
         }
       ],
       "label": "wide-modified-asc-first",
@@ -359,19 +509,19 @@
     {
       "catalogQueries": [
         {
-          "executionMs": 0.696,
+          "executionMs": 0.389,
           "indexes": [
             "catalog_root_id_uniq"
           ],
-          "planningMs": 2.139
+          "planningMs": 1.247
         },
         {
-          "executionMs": 3.865,
+          "executionMs": 2.108,
           "indexes": [
             "catalog_browse_modified_asc",
             "catalog_root_id_uniq"
           ],
-          "planningMs": 1.729
+          "planningMs": 1.016
         }
       ],
       "label": "wide-modified-asc-next",
@@ -383,19 +533,19 @@
     {
       "catalogQueries": [
         {
-          "executionMs": 0.679,
+          "executionMs": 0.401,
           "indexes": [
             "catalog_root_id_uniq"
           ],
-          "planningMs": 2.107
+          "planningMs": 1.256
         },
         {
-          "executionMs": 3.545,
+          "executionMs": 2.006,
           "indexes": [
             "catalog_browse_modified_desc",
             "catalog_root_id_uniq"
           ],
-          "planningMs": 0.977
+          "planningMs": 0.615
         }
       ],
       "label": "wide-modified-desc-first",
@@ -407,19 +557,19 @@
     {
       "catalogQueries": [
         {
-          "executionMs": 0.694,
+          "executionMs": 0.385,
           "indexes": [
             "catalog_root_id_uniq"
           ],
-          "planningMs": 2.127
+          "planningMs": 1.237
         },
         {
-          "executionMs": 3.864,
+          "executionMs": 2.144,
           "indexes": [
             "catalog_browse_modified_desc",
             "catalog_root_id_uniq"
           ],
-          "planningMs": 1.719
+          "planningMs": 1.012
         }
       ],
       "label": "wide-modified-desc-next",
@@ -431,19 +581,19 @@
     {
       "catalogQueries": [
         {
-          "executionMs": 0.648,
+          "executionMs": 0.406,
           "indexes": [
             "catalog_root_id_uniq"
           ],
-          "planningMs": 2.006
+          "planningMs": 1.3
         },
         {
-          "executionMs": 3.368,
+          "executionMs": 2.041,
           "indexes": [
             "catalog_browse_size_asc",
             "catalog_root_id_uniq"
           ],
-          "planningMs": 0.932
+          "planningMs": 0.662
         }
       ],
       "label": "wide-size-asc-first",
@@ -455,70 +605,22 @@
     {
       "catalogQueries": [
         {
-          "executionMs": 0.686,
+          "executionMs": 0.72,
           "indexes": [
             "catalog_root_id_uniq"
           ],
-          "planningMs": 2.124
+          "planningMs": 2.212
         },
         {
-          "executionMs": 3.717,
+          "executionMs": 2.226,
           "indexes": [
             "catalog_browse_size_asc",
             "catalog_root_id_uniq"
           ],
-          "planningMs": 1.715
+          "planningMs": 1.81
         }
       ],
       "label": "wide-size-asc-next",
-      "payloadBytes": 25510,
-      "rows": 100,
-      "sqlCount": 13,
-      "status": 200
-    },
-    {
-      "catalogQueries": [
-        {
-          "executionMs": 0.701,
-          "indexes": [
-            "catalog_root_id_uniq"
-          ],
-          "planningMs": 2.153
-        },
-        {
-          "executionMs": 3.468,
-          "indexes": [
-            "catalog_browse_size_desc",
-            "catalog_root_id_uniq"
-          ],
-          "planningMs": 0.956
-        }
-      ],
-      "label": "wide-size-desc-first",
-      "payloadBytes": 25193,
-      "rows": 100,
-      "sqlCount": 13,
-      "status": 200
-    },
-    {
-      "catalogQueries": [
-        {
-          "executionMs": 0.73,
-          "indexes": [
-            "catalog_root_id_uniq"
-          ],
-          "planningMs": 2.037
-        },
-        {
-          "executionMs": 3.76,
-          "indexes": [
-            "catalog_browse_size_desc",
-            "catalog_root_id_uniq"
-          ],
-          "planningMs": 1.616
-        }
-      ],
-      "label": "wide-size-desc-next",
       "payloadBytes": 25510,
       "rows": 100,
       "sqlCount": 13,
@@ -531,15 +633,63 @@
           "indexes": [
             "catalog_root_id_uniq"
           ],
-          "planningMs": 1.953
+          "planningMs": 1.279
         },
         {
-          "executionMs": 8.86,
+          "executionMs": 2.054,
+          "indexes": [
+            "catalog_browse_size_desc",
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 0.636
+        }
+      ],
+      "label": "wide-size-desc-first",
+      "payloadBytes": 25193,
+      "rows": 100,
+      "sqlCount": 13,
+      "status": 200
+    },
+    {
+      "catalogQueries": [
+        {
+          "executionMs": 0.396,
+          "indexes": [
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 1.285
+        },
+        {
+          "executionMs": 2.214,
+          "indexes": [
+            "catalog_browse_size_desc",
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 1.04
+        }
+      ],
+      "label": "wide-size-desc-next",
+      "payloadBytes": 25510,
+      "rows": 100,
+      "sqlCount": 13,
+      "status": 200
+    },
+    {
+      "catalogQueries": [
+        {
+          "executionMs": 0.405,
+          "indexes": [
+            "catalog_root_id_uniq"
+          ],
+          "planningMs": 1.307
+        },
+        {
+          "executionMs": 5.82,
           "indexes": [
             "catalog_browse_name_asc",
             "catalog_root_id_uniq"
           ],
-          "planningMs": 0.926
+          "planningMs": 0.632
         }
       ],
       "label": "wide-filter-type-common",
@@ -551,19 +701,19 @@
     {
       "catalogQueries": [
         {
-          "executionMs": 0.668,
+          "executionMs": 0.404,
           "indexes": [
             "catalog_root_id_uniq"
           ],
-          "planningMs": 2.135
+          "planningMs": 1.299
         },
         {
-          "executionMs": 12.647,
+          "executionMs": 12.521,
           "indexes": [
             "catalog_catalogentry_logical_parent_id_9f89881d",
             "catalog_root_id_uniq"
           ],
-          "planningMs": 0.976
+          "planningMs": 0.637
         }
       ],
       "label": "wide-filter-type-rare",
@@ -575,19 +725,19 @@
     {
       "catalogQueries": [
         {
-          "executionMs": 0.661,
+          "executionMs": 0.4,
           "indexes": [
             "catalog_root_id_uniq"
           ],
-          "planningMs": 2.028
+          "planningMs": 1.296
         },
         {
-          "executionMs": 12.271,
+          "executionMs": 11.473,
           "indexes": [
             "catalog_catalogentry_logical_parent_id_9f89881d",
             "catalog_root_id_uniq"
           ],
-          "planningMs": 0.919
+          "planningMs": 0.633
         }
       ],
       "label": "wide-filter-type-zero",
@@ -599,19 +749,19 @@
     {
       "catalogQueries": [
         {
-          "executionMs": 0.663,
+          "executionMs": 0.395,
           "indexes": [
             "catalog_root_id_uniq"
           ],
-          "planningMs": 2.09
+          "planningMs": 1.298
         },
         {
-          "executionMs": 3.422,
+          "executionMs": 2.014,
           "indexes": [
             "catalog_browse_name_asc",
             "catalog_root_id_uniq"
           ],
-          "planningMs": 1.105
+          "planningMs": 0.688
         }
       ],
       "label": "wide-filter-prefix-common",
@@ -623,19 +773,19 @@
     {
       "catalogQueries": [
         {
-          "executionMs": 0.688,
+          "executionMs": 0.411,
           "indexes": [
             "catalog_root_id_uniq"
           ],
-          "planningMs": 2.155
+          "planningMs": 1.286
         },
         {
-          "executionMs": 0.269,
+          "executionMs": 0.155,
           "indexes": [
             "catalog_browse_name_asc",
             "catalog_root_id_uniq"
           ],
-          "planningMs": 1.091
+          "planningMs": 0.702
         }
       ],
       "label": "wide-filter-prefix-zero",
@@ -647,19 +797,19 @@
     {
       "catalogQueries": [
         {
-          "executionMs": 0.378,
+          "executionMs": 0.41,
           "indexes": [
             "catalog_root_id_uniq"
           ],
-          "planningMs": 1.205
+          "planningMs": 1.297
         },
         {
-          "executionMs": 11.647,
+          "executionMs": 11.984,
           "indexes": [
             "catalog_catalogentry_logical_parent_id_9f89881d",
             "catalog_root_id_uniq"
           ],
-          "planningMs": 0.596
+          "planningMs": 0.651
         }
       ],
       "label": "wide-filter-size-rare",
@@ -671,19 +821,19 @@
     {
       "catalogQueries": [
         {
-          "executionMs": 0.375,
+          "executionMs": 0.409,
           "indexes": [
             "catalog_root_id_uniq"
           ],
-          "planningMs": 1.228
+          "planningMs": 1.272
         },
         {
-          "executionMs": 1.819,
+          "executionMs": 2.047,
           "indexes": [
             "catalog_browse_name_asc",
             "catalog_root_id_uniq"
           ],
-          "planningMs": 0.571
+          "planningMs": 0.652
         }
       ],
       "label": "wide-filter-modified-common",
@@ -695,19 +845,19 @@
     {
       "catalogQueries": [
         {
-          "executionMs": 0.493,
+          "executionMs": 0.419,
           "indexes": [
             "catalog_root_id_uniq"
           ],
-          "planningMs": 1.619
+          "planningMs": 1.327
         },
         {
-          "executionMs": 3.907,
+          "executionMs": 2.187,
           "indexes": [
-            "catalog_browse_size_desc",
+            "catalog_browse_name_asc",
             "catalog_root_id_uniq"
           ],
-          "planningMs": 0.793
+          "planningMs": 0.662
         }
       ],
       "label": "wide-filter-availability-missing",
@@ -719,19 +869,19 @@
     {
       "catalogQueries": [
         {
-          "executionMs": 0.492,
+          "executionMs": 0.433,
           "indexes": [
             "catalog_root_id_uniq"
           ],
-          "planningMs": 1.449
+          "planningMs": 1.339
         },
         {
-          "executionMs": 2.365,
+          "executionMs": 2.199,
           "indexes": [
             "catalog_browse_name_asc",
             "catalog_root_id_uniq"
           ],
-          "planningMs": 0.981
+          "planningMs": 0.826
         }
       ],
       "label": "wide-filter-all-common",
@@ -743,19 +893,19 @@
     {
       "catalogQueries": [
         {
-          "executionMs": 0.467,
+          "executionMs": 0.407,
           "indexes": [
             "catalog_root_id_uniq"
           ],
-          "planningMs": 1.579
+          "planningMs": 1.313
         },
         {
-          "executionMs": 0.176,
+          "executionMs": 0.165,
           "indexes": [
             "catalog_browse_name_asc",
             "catalog_root_id_uniq"
           ],
-          "planningMs": 0.775
+          "planningMs": 0.799
         }
       ],
       "label": "wide-filter-all-zero",
@@ -767,19 +917,19 @@
     {
       "catalogQueries": [
         {
-          "executionMs": 0.518,
+          "executionMs": 0.419,
           "indexes": [
             "catalog_root_id_uniq"
           ],
-          "planningMs": 1.775
+          "planningMs": 1.347
         },
         {
-          "executionMs": 2.265,
+          "executionMs": 2.158,
           "indexes": [
             "catalog_browse_name_asc",
             "catalog_root_id_uniq"
           ],
-          "planningMs": 0.73
+          "planningMs": 0.631
         }
       ],
       "label": "tree-name-asc-first",
@@ -791,18 +941,18 @@
     {
       "catalogQueries": [
         {
-          "executionMs": 0.311,
+          "executionMs": 0.403,
           "indexes": [
             "catalog_catalogentry_pkey"
           ],
-          "planningMs": 0.654
+          "planningMs": 0.768
         },
         {
-          "executionMs": 0.497,
+          "executionMs": 0.807,
           "indexes": [
             "catalog_root_id_uniq"
           ],
-          "planningMs": 1.619
+          "planningMs": 2.389
         }
       ],
       "label": "details",
@@ -814,7 +964,7 @@
       "catalogQueries": [],
       "label": "index-status",
       "payloadBytes": 217,
-      "sqlCount": 15,
+      "sqlCount": 13,
       "status": 200
     }
   ],
@@ -863,44 +1013,44 @@
     },
     "warm": {
       "alternateSorts:first": {
-        "planned": 1939,
-        "realized": 1941
+        "planned": 5356,
+        "realized": 5358
       },
       "alternateSorts:next": {
-        "planned": 3024,
-        "realized": 3024
+        "planned": 8259,
+        "realized": 8259
       },
       "alternateSorts:previous": {
-        "planned": 539,
-        "realized": 537
+        "planned": 1500,
+        "realized": 1498
       },
       "basicFilters:first": {
-        "planned": 2114,
-        "realized": 2123
+        "planned": 6109,
+        "realized": 6140
       },
       "basicFilters:next": {
-        "planned": 1417,
-        "realized": 1408
+        "planned": 4070,
+        "realized": 4039
       },
       "details:-": {
-        "planned": 3614,
-        "realized": 3614
+        "planned": 10034,
+        "realized": 10034
       },
       "directoryPages:first": {
-        "planned": 7749,
-        "realized": 7754
+        "planned": 21001,
+        "realized": 21020
       },
       "directoryPages:next": {
-        "planned": 11912,
-        "realized": 11912
+        "planned": 32781,
+        "realized": 32781
       },
       "directoryPages:previous": {
-        "planned": 2139,
-        "realized": 2134
+        "planned": 5940,
+        "realized": 5921
       },
       "indexStatus:-": {
-        "planned": 1891,
-        "realized": 1891
+        "planned": 4967,
+        "realized": 4967
       }
     }
   },
@@ -912,9 +1062,9 @@
         "failures": 0,
         "meanPayloadBytes": 514.7,
         "meanRows": null,
-        "p50Ms": 207.206,
-        "p95Ms": 264.067,
-        "p99Ms": 267.668,
+        "p50Ms": 73.406,
+        "p95Ms": 165.841,
+        "p99Ms": 178.813,
         "requests": 29
       },
       "list": {
@@ -922,9 +1072,9 @@
         "failures": 0,
         "meanPayloadBytes": 23967.2,
         "meanRows": 93.09,
-        "p50Ms": 185.752,
-        "p95Ms": 229.554,
-        "p99Ms": 237.538,
+        "p50Ms": 76.82,
+        "p95Ms": 153.111,
+        "p99Ms": 180.617,
         "requests": 258
       },
       "status": {
@@ -932,9 +1082,9 @@
         "failures": 0,
         "meanPayloadBytes": 217.0,
         "meanRows": null,
-        "p50Ms": 401.3,
-        "p95Ms": 614.38,
-        "p99Ms": 614.38,
+        "p50Ms": 69.8,
+        "p95Ms": 212.488,
+        "p99Ms": 212.488,
         "requests": 13
       }
     },
@@ -944,9 +1094,9 @@
         "failures": 0,
         "meanPayloadBytes": 20973.7,
         "meanRows": 82.0,
-        "p50Ms": 61.579,
-        "p95Ms": 125.466,
-        "p99Ms": 154.287,
+        "p50Ms": 38.62,
+        "p95Ms": 73.434,
+        "p99Ms": 95.119,
         "requests": 702
       }
     },
@@ -956,9 +1106,9 @@
         "failures": 0,
         "meanPayloadBytes": 477.0,
         "meanRows": null,
-        "p50Ms": 50.594,
-        "p95Ms": 62.693,
-        "p99Ms": 65.511,
+        "p50Ms": 31.579,
+        "p95Ms": 40.017,
+        "p99Ms": 42.544,
         "requests": 100
       },
       "list": {
@@ -966,9 +1116,9 @@
         "failures": 0,
         "meanPayloadBytes": 25406.5,
         "meanRows": 100.0,
-        "p50Ms": 52.419,
-        "p95Ms": 64.272,
-        "p99Ms": 67.848,
+        "p50Ms": 32.014,
+        "p95Ms": 41.17,
+        "p99Ms": 45.986,
         "requests": 200
       },
       "status": {
@@ -976,9 +1126,9 @@
         "failures": 0,
         "meanPayloadBytes": 217.0,
         "meanRows": null,
-        "p50Ms": 53.163,
-        "p95Ms": 62.836,
-        "p99Ms": 64.647,
+        "p50Ms": 20.941,
+        "p95Ms": 26.046,
+        "p99Ms": 26.808,
         "requests": 100
       }
     },
@@ -986,126 +1136,126 @@
       "details": {
         "errorRate": 0.0,
         "failures": 0,
-        "meanPayloadBytes": 511.8,
+        "meanPayloadBytes": 510.5,
         "meanRows": null,
-        "p50Ms": 263.887,
-        "p95Ms": 328.768,
-        "p99Ms": 359.51,
-        "requests": 3614
+        "p50Ms": 88.244,
+        "p95Ms": 149.851,
+        "p99Ms": 182.141,
+        "requests": 10034
       },
       "list": {
         "errorRate": 0.0,
         "failures": 0,
-        "meanPayloadBytes": 24792.3,
-        "meanRows": 96.23,
-        "p50Ms": 229.357,
-        "p95Ms": 291.173,
-        "p99Ms": 335.636,
-        "requests": 30833
+        "meanPayloadBytes": 24755.3,
+        "meanRows": 96.07,
+        "p50Ms": 86.146,
+        "p95Ms": 143.911,
+        "p99Ms": 189.584,
+        "requests": 85016
       },
       "status": {
         "errorRate": 0.0,
         "failures": 0,
         "meanPayloadBytes": 216.7,
         "meanRows": null,
-        "p50Ms": 457.048,
-        "p95Ms": 554.027,
-        "p99Ms": 589.908,
-        "requests": 1891
+        "p50Ms": 61.638,
+        "p95Ms": 112.727,
+        "p99Ms": 143.262,
+        "requests": 4967
       }
     },
     "warmup": {
       "details": {
         "errorRate": 0.0,
         "failures": 0,
-        "meanPayloadBytes": 510.2,
+        "meanPayloadBytes": 511.2,
         "meanRows": null,
-        "p50Ms": 260.539,
-        "p95Ms": 328.341,
-        "p99Ms": 362.16,
-        "requests": 1198
+        "p50Ms": 90.731,
+        "p95Ms": 152.034,
+        "p99Ms": 185.556,
+        "requests": 3239
       },
       "list": {
         "errorRate": 0.0,
         "failures": 0,
-        "meanPayloadBytes": 24814.5,
-        "meanRows": 96.31,
-        "p50Ms": 226.97,
-        "p95Ms": 290.591,
-        "p99Ms": 336.327,
-        "requests": 10445
+        "meanPayloadBytes": 24807.8,
+        "meanRows": 96.29,
+        "p50Ms": 87.055,
+        "p95Ms": 145.07,
+        "p99Ms": 185.648,
+        "requests": 28049
       },
       "status": {
         "errorRate": 0.0,
         "failures": 0,
         "meanPayloadBytes": 216.7,
         "meanRows": null,
-        "p50Ms": 451.258,
-        "p95Ms": 556.464,
-        "p99Ms": 602.883,
-        "requests": 613
+        "p50Ms": 61.864,
+        "p95Ms": 115.109,
+        "p99Ms": 140.282,
+        "requests": 1724
       }
     }
   },
   "schemaIdentity": "sha256:3a4898d4324c731c43fff0415980d2db5a397a420db950a3babab9643a74d2aa",
-  "seedSeconds": 98.5,
+  "seedSeconds": 102.0,
   "shape": {
     "entries": 1000000,
     "seed": 20260914,
     "wideFolder": 50000
   },
-  "signingKeySource": null,
+  "signingKeySource": "generated protected key file",
   "sizes": {
     "averageRowBytesSampled": 275.41184505805444,
     "budgetBytes": 8589934592,
-    "catalogAndIndexingTablesTotalBytes": 1516314624,
-    "catalogEntryEstimatedRows": 1000011,
+    "catalogAndIndexingTablesTotalBytes": 1519075328,
+    "catalogEntryEstimatedRows": 1000286,
     "catalogEntryHeapBytes": 287178752,
-    "catalogEntryIndexBytes": 1228791808,
-    "catalogEntryTotalBytes": 1516085248,
+    "catalogEntryIndexBytes": 1231552512,
+    "catalogEntryTotalBytes": 1518845952,
     "indexes": [
       {
-        "bytes": 168820736,
+        "bytes": 168755200,
         "index": "catalog_browse_modified_asc",
-        "scans": 2558
+        "scans": 8653
       },
       {
-        "bytes": 183328768,
+        "bytes": 183410688,
         "index": "catalog_browse_modified_desc",
-        "scans": 10412
+        "scans": 25106
       },
       {
-        "bytes": 160456704,
+        "bytes": 159973376,
         "index": "catalog_browse_name_asc",
-        "scans": 26929
+        "scans": 73395
       },
       {
-        "bytes": 158572544,
+        "bytes": 158441472,
         "index": "catalog_browse_name_desc",
-        "scans": 13417
+        "scans": 34514
       },
       {
-        "bytes": 162619392,
+        "bytes": 161349632,
         "index": "catalog_browse_size_asc",
-        "scans": 1911
+        "scans": 5671
       },
       {
-        "bytes": 156622848,
+        "bytes": 157147136,
         "index": "catalog_browse_size_desc",
-        "scans": 10124
+        "scans": 23521
       },
       {
         "bytes": 8167424,
         "index": "catalog_catalogentry_logical_parent_id_9f89881d",
-        "scans": 622
+        "scans": 1474
       },
       {
         "bytes": 39411712,
         "index": "catalog_catalogentry_pkey",
-        "scans": 2006505
+        "scans": 2017751
       },
       {
-        "bytes": 6512640,
+        "bytes": 10264576,
         "index": "catalog_catalogentry_root_id_d4dfa9d5",
         "scans": 0
       },
@@ -1120,12 +1270,12 @@
         "scans": 0
       },
       {
-        "bytes": 62922752,
+        "bytes": 63242240,
         "index": "catalog_root_id_uniq",
-        "scans": 27371351
+        "scans": 69879020
       },
       {
-        "bytes": 113172480,
+        "bytes": 113205248,
         "index": "catalog_source_location_uniq",
         "scans": 0
       }
@@ -1133,11 +1283,11 @@
     "sampledRows": 20498,
     "withinBudget": true
   },
-  "startedAt": "2026-10-02T02:37:22.518260+00:00",
+  "startedAt": "2026-10-02T04:32:06.845328+00:00",
   "storage": {
     "catalogBudgetBytes": 8589934592,
     "filesystem": "btrfs",
-    "freeBytes": 27292774400,
+    "freeBytes": 26491723776,
     "marginBytes": 4294967296,
     "requiredFreeBytes": 12884901888,
     "rotational": "no (SSD/NVMe)",
@@ -1145,139 +1295,105 @@
     "totalBytes": 509315383296
   },
   "utilization": {
-    "cold": {
-      "gateway": {
-        "cpuMaxPercentOfOneCore": 1.7,
-        "cpuMeanPercentOfOneCore": 1.7,
-        "cpuP95PercentOfOneCore": 1.7,
-        "memoryMaxBytes": 14302576,
-        "memoryMeanBytes": 14302576,
-        "samples": 1
-      },
-      "indexer": {
-        "cpuMaxPercentOfOneCore": 100.0,
-        "cpuMeanPercentOfOneCore": 100.0,
-        "cpuP95PercentOfOneCore": 100.0,
-        "memoryMaxBytes": 106430464,
-        "memoryMeanBytes": 106430464,
-        "samples": 1
-      },
-      "postgres": {
-        "cpuMaxPercentOfOneCore": 173.2,
-        "cpuMeanPercentOfOneCore": 173.2,
-        "cpuP95PercentOfOneCore": 173.2,
-        "memoryMaxBytes": 160012697,
-        "memoryMeanBytes": 160012697,
-        "samples": 1
-      },
-      "web": {
-        "cpuMaxPercentOfOneCore": 193.6,
-        "cpuMeanPercentOfOneCore": 193.6,
-        "cpuP95PercentOfOneCore": 193.6,
-        "memoryMaxBytes": 73620520,
-        "memoryMeanBytes": 73620520,
-        "samples": 1
-      }
-    },
     "sequential": {
       "gateway": {
-        "cpuMaxPercentOfOneCore": 0.8,
-        "cpuMeanPercentOfOneCore": 0.7,
-        "cpuP95PercentOfOneCore": 0.8,
-        "memoryMaxBytes": 15403581,
-        "memoryMeanBytes": 15123087,
-        "samples": 4
+        "cpuMaxPercentOfOneCore": 3.8,
+        "cpuMeanPercentOfOneCore": 2.5,
+        "cpuP95PercentOfOneCore": 3.8,
+        "memoryMaxBytes": 16515072,
+        "memoryMeanBytes": 16221470,
+        "samples": 2
       },
       "indexer": {
-        "cpuMaxPercentOfOneCore": 60.8,
-        "cpuMeanPercentOfOneCore": 24.9,
-        "cpuP95PercentOfOneCore": 60.8,
-        "memoryMaxBytes": 76210503,
-        "memoryMeanBytes": 60395355,
-        "samples": 4
+        "cpuMaxPercentOfOneCore": 1.3,
+        "cpuMeanPercentOfOneCore": 1.3,
+        "cpuP95PercentOfOneCore": 1.3,
+        "memoryMaxBytes": 55102668,
+        "memoryMeanBytes": 54735666,
+        "samples": 2
       },
       "postgres": {
-        "cpuMaxPercentOfOneCore": 57.6,
-        "cpuMeanPercentOfOneCore": 56.1,
-        "cpuP95PercentOfOneCore": 57.6,
-        "memoryMaxBytes": 177314201,
-        "memoryMeanBytes": 175479193,
-        "samples": 4
+        "cpuMaxPercentOfOneCore": 36.1,
+        "cpuMeanPercentOfOneCore": 34.7,
+        "cpuP95PercentOfOneCore": 36.1,
+        "memoryMaxBytes": 322856550,
+        "memoryMeanBytes": 322804121,
+        "samples": 2
       },
       "web": {
-        "cpuMaxPercentOfOneCore": 44.5,
-        "cpuMeanPercentOfOneCore": 43.1,
-        "cpuP95PercentOfOneCore": 44.5,
-        "memoryMaxBytes": 89055559,
-        "memoryMeanBytes": 88916622,
-        "samples": 4
+        "cpuMaxPercentOfOneCore": 59.8,
+        "cpuMeanPercentOfOneCore": 59.5,
+        "cpuP95PercentOfOneCore": 59.8,
+        "memoryMaxBytes": 348861235,
+        "memoryMeanBytes": 348651519,
+        "samples": 2
       }
     },
     "warm": {
       "gateway": {
-        "cpuMaxPercentOfOneCore": 6.4,
-        "cpuMeanPercentOfOneCore": 2.5,
-        "cpuP95PercentOfOneCore": 5.7,
-        "memoryMaxBytes": 15728640,
-        "memoryMeanBytes": 15134562,
+        "cpuMaxPercentOfOneCore": 11.4,
+        "cpuMeanPercentOfOneCore": 6.5,
+        "cpuP95PercentOfOneCore": 10.9,
+        "memoryMaxBytes": 18087936,
+        "memoryMeanBytes": 16286015,
         "samples": 180
       },
       "indexer": {
-        "cpuMaxPercentOfOneCore": 102.0,
-        "cpuMeanPercentOfOneCore": 27.3,
-        "cpuP95PercentOfOneCore": 100.1,
-        "memoryMaxBytes": 109681049,
-        "memoryMeanBytes": 63539860,
+        "cpuMaxPercentOfOneCore": 102.2,
+        "cpuMeanPercentOfOneCore": 37.0,
+        "cpuP95PercentOfOneCore": 100.3,
+        "memoryMaxBytes": 109366476,
+        "memoryMeanBytes": 66356685,
         "samples": 180
       },
       "postgres": {
-        "cpuMaxPercentOfOneCore": 223.4,
-        "cpuMeanPercentOfOneCore": 187.6,
-        "cpuP95PercentOfOneCore": 208.5,
-        "memoryMaxBytes": 207827763,
-        "memoryMeanBytes": 194358804,
+        "cpuMaxPercentOfOneCore": 251.7,
+        "cpuMeanPercentOfOneCore": 208.0,
+        "cpuP95PercentOfOneCore": 235.1,
+        "memoryMaxBytes": 345086361,
+        "memoryMeanBytes": 309153991,
         "samples": 180
       },
       "web": {
-        "cpuMaxPercentOfOneCore": 238.0,
-        "cpuMeanPercentOfOneCore": 163.9,
-        "cpuP95PercentOfOneCore": 233.6,
-        "memoryMaxBytes": 143130624,
-        "memoryMeanBytes": 97790721,
+        "cpuMaxPercentOfOneCore": 403.6,
+        "cpuMeanPercentOfOneCore": 361.0,
+        "cpuP95PercentOfOneCore": 400.5,
+        "memoryMaxBytes": 402338611,
+        "memoryMeanBytes": 356262433,
         "samples": 180
       }
     },
     "warmup": {
       "gateway": {
-        "cpuMaxPercentOfOneCore": 6.4,
-        "cpuMeanPercentOfOneCore": 2.7,
-        "cpuP95PercentOfOneCore": 5.9,
-        "memoryMaxBytes": 17165189,
-        "memoryMeanBytes": 15084464,
+        "cpuMaxPercentOfOneCore": 11.4,
+        "cpuMeanPercentOfOneCore": 7.1,
+        "cpuP95PercentOfOneCore": 11.2,
+        "memoryMaxBytes": 16766730,
+        "memoryMeanBytes": 16139331,
         "samples": 60
       },
       "indexer": {
-        "cpuMaxPercentOfOneCore": 101.6,
-        "cpuMeanPercentOfOneCore": 24.5,
-        "cpuP95PercentOfOneCore": 99.9,
-        "memoryMaxBytes": 107583897,
-        "memoryMeanBytes": 61030443,
+        "cpuMaxPercentOfOneCore": 100.5,
+        "cpuMeanPercentOfOneCore": 36.3,
+        "cpuP95PercentOfOneCore": 100.3,
+        "memoryMaxBytes": 109366476,
+        "memoryMeanBytes": 67109737,
         "samples": 60
       },
       "postgres": {
-        "cpuMaxPercentOfOneCore": 234.2,
-        "cpuMeanPercentOfOneCore": 188.3,
-        "cpuP95PercentOfOneCore": 207.1,
-        "memoryMaxBytes": 213175500,
-        "memoryMeanBytes": 193803058,
+        "cpuMaxPercentOfOneCore": 248.4,
+        "cpuMeanPercentOfOneCore": 210.1,
+        "cpuP95PercentOfOneCore": 236.3,
+        "memoryMaxBytes": 346659225,
+        "memoryMeanBytes": 308188719,
         "samples": 60
       },
       "web": {
-        "cpuMaxPercentOfOneCore": 235.3,
-        "cpuMeanPercentOfOneCore": 165.1,
-        "cpuP95PercentOfOneCore": 233.9,
-        "memoryMaxBytes": 138516889,
-        "memoryMeanBytes": 94153386,
+        "cpuMaxPercentOfOneCore": 402.5,
+        "cpuMeanPercentOfOneCore": 365.2,
+        "cpuP95PercentOfOneCore": 398.8,
+        "memoryMaxBytes": 393845145,
+        "memoryMeanBytes": 346183870,
         "samples": 60
       }
     }
@@ -1310,378 +1426,379 @@
   "version": 2,
   "warmClasses": {
     "details": {
-      "p50Ms": 263.887,
-      "p95Ms": 328.768,
-      "p99Ms": 359.51,
-      "requests": 3614
+      "p50Ms": 88.244,
+      "p95Ms": 149.851,
+      "p99Ms": 182.141,
+      "requests": 10034
     },
     "list:alternateSorts:tree:modified-asc:first": {
-      "p50Ms": 227.422,
-      "p95Ms": 289.41,
-      "p99Ms": 306.994,
-      "requests": 256
+      "p50Ms": 85.228,
+      "p95Ms": 140.385,
+      "p99Ms": 159.827,
+      "requests": 674
     },
     "list:alternateSorts:tree:modified-asc:next": {
-      "p50Ms": 237.022,
-      "p95Ms": 291.132,
-      "p99Ms": 315.698,
-      "requests": 355
+      "p50Ms": 91.188,
+      "p95Ms": 147.694,
+      "p99Ms": 184.755,
+      "requests": 1054
     },
     "list:alternateSorts:tree:modified-asc:previous": {
-      "p50Ms": 227.257,
-      "p95Ms": 287.0,
-      "p99Ms": 314.885,
-      "requests": 61
+      "p50Ms": 89.781,
+      "p95Ms": 139.453,
+      "p99Ms": 168.334,
+      "requests": 173
     },
     "list:alternateSorts:tree:modified-desc:first": {
-      "p50Ms": 228.783,
-      "p95Ms": 291.866,
-      "p99Ms": 307.174,
-      "requests": 234
+      "p50Ms": 85.982,
+      "p95Ms": 134.323,
+      "p99Ms": 159.58,
+      "requests": 617
     },
     "list:alternateSorts:tree:modified-desc:next": {
-      "p50Ms": 233.385,
-      "p95Ms": 284.231,
-      "p99Ms": 324.19,
-      "requests": 383
+      "p50Ms": 93.223,
+      "p95Ms": 146.033,
+      "p99Ms": 180.226,
+      "requests": 904
     },
     "list:alternateSorts:tree:modified-desc:previous": {
-      "p50Ms": 241.477,
-      "p95Ms": 290.033,
-      "p99Ms": 292.393,
-      "requests": 64
+      "p50Ms": 91.424,
+      "p95Ms": 142.96,
+      "p99Ms": 164.93,
+      "requests": 159
     },
     "list:alternateSorts:tree:name-desc:first": {
-      "p50Ms": 228.102,
-      "p95Ms": 282.744,
-      "p99Ms": 298.146,
-      "requests": 254
+      "p50Ms": 84.183,
+      "p95Ms": 132.564,
+      "p99Ms": 166.498,
+      "requests": 686
     },
     "list:alternateSorts:tree:name-desc:next": {
-      "p50Ms": 230.753,
-      "p95Ms": 283.748,
-      "p99Ms": 311.72,
-      "requests": 393
+      "p50Ms": 85.978,
+      "p95Ms": 136.891,
+      "p99Ms": 171.988,
+      "requests": 1086
     },
     "list:alternateSorts:tree:name-desc:previous": {
-      "p50Ms": 234.084,
-      "p95Ms": 286.593,
-      "p99Ms": 330.365,
-      "requests": 83
+      "p50Ms": 83.174,
+      "p95Ms": 135.65,
+      "p99Ms": 174.273,
+      "requests": 208
     },
     "list:alternateSorts:tree:size-asc:first": {
-      "p50Ms": 233.584,
-      "p95Ms": 293.553,
-      "p99Ms": 326.201,
-      "requests": 212
+      "p50Ms": 84.962,
+      "p95Ms": 139.283,
+      "p99Ms": 175.195,
+      "requests": 618
     },
     "list:alternateSorts:tree:size-asc:next": {
-      "p50Ms": 234.923,
-      "p95Ms": 292.974,
-      "p99Ms": 309.452,
-      "requests": 364
+      "p50Ms": 91.784,
+      "p95Ms": 146.001,
+      "p99Ms": 169.647,
+      "requests": 987
     },
     "list:alternateSorts:tree:size-asc:previous": {
-      "p50Ms": 236.619,
-      "p95Ms": 314.876,
-      "p99Ms": 330.231,
-      "requests": 54
+      "p50Ms": 91.246,
+      "p95Ms": 132.174,
+      "p99Ms": 178.879,
+      "requests": 195
     },
     "list:alternateSorts:tree:size-desc:first": {
-      "p50Ms": 229.123,
-      "p95Ms": 289.334,
-      "p99Ms": 308.283,
-      "requests": 225
+      "p50Ms": 84.827,
+      "p95Ms": 141.841,
+      "p99Ms": 168.77,
+      "requests": 635
     },
     "list:alternateSorts:tree:size-desc:next": {
-      "p50Ms": 237.194,
-      "p95Ms": 294.545,
-      "p99Ms": 315.19,
-      "requests": 346
+      "p50Ms": 93.038,
+      "p95Ms": 146.896,
+      "p99Ms": 191.071,
+      "requests": 986
     },
     "list:alternateSorts:tree:size-desc:previous": {
-      "p50Ms": 240.607,
-      "p95Ms": 300.486,
-      "p99Ms": 325.406,
-      "requests": 58
-    },
-    "list:alternateSorts:wide:modified-asc:first": {
-      "p50Ms": 227.493,
-      "p95Ms": 285.19,
-      "p99Ms": 304.566,
-      "requests": 136
-    },
-    "list:alternateSorts:wide:modified-asc:next": {
-      "p50Ms": 231.626,
-      "p95Ms": 297.43,
-      "p99Ms": 325.339,
-      "requests": 226
-    },
-    "list:alternateSorts:wide:modified-asc:previous": {
-      "p50Ms": 226.716,
-      "p95Ms": 301.527,
-      "p99Ms": 333.507,
-      "requests": 34
-    },
-    "list:alternateSorts:wide:modified-desc:first": {
-      "p50Ms": 227.864,
-      "p95Ms": 295.786,
-      "p99Ms": 306.093,
-      "requests": 135
-    },
-    "list:alternateSorts:wide:modified-desc:next": {
-      "p50Ms": 237.789,
-      "p95Ms": 293.628,
-      "p99Ms": 309.837,
-      "requests": 203
-    },
-    "list:alternateSorts:wide:modified-desc:previous": {
-      "p50Ms": 231.716,
-      "p95Ms": 289.621,
-      "p99Ms": 327.883,
-      "requests": 35
-    },
-    "list:alternateSorts:wide:name-desc:first": {
-      "p50Ms": 225.43,
-      "p95Ms": 273.945,
-      "p99Ms": 317.816,
-      "requests": 161
-    },
-    "list:alternateSorts:wide:name-desc:next": {
-      "p50Ms": 228.226,
-      "p95Ms": 293.556,
-      "p99Ms": 321.008,
-      "requests": 244
-    },
-    "list:alternateSorts:wide:name-desc:previous": {
-      "p50Ms": 228.905,
-      "p95Ms": 287.859,
-      "p99Ms": 293.429,
-      "requests": 41
-    },
-    "list:alternateSorts:wide:size-asc:first": {
-      "p50Ms": 226.636,
-      "p95Ms": 290.607,
-      "p99Ms": 326.821,
-      "requests": 145
-    },
-    "list:alternateSorts:wide:size-asc:next": {
-      "p50Ms": 232.567,
-      "p95Ms": 286.487,
-      "p99Ms": 342.055,
-      "requests": 225
-    },
-    "list:alternateSorts:wide:size-asc:previous": {
-      "p50Ms": 243.126,
-      "p95Ms": 296.592,
-      "p99Ms": 327.104,
-      "requests": 52
-    },
-    "list:alternateSorts:wide:size-desc:first": {
-      "p50Ms": 229.151,
-      "p95Ms": 287.916,
-      "p99Ms": 318.815,
+      "p50Ms": 94.483,
+      "p95Ms": 136.985,
+      "p99Ms": 159.36,
       "requests": 183
     },
+    "list:alternateSorts:wide:modified-asc:first": {
+      "p50Ms": 80.907,
+      "p95Ms": 127.416,
+      "p99Ms": 164.69,
+      "requests": 421
+    },
+    "list:alternateSorts:wide:modified-asc:next": {
+      "p50Ms": 90.377,
+      "p95Ms": 143.693,
+      "p99Ms": 175.443,
+      "requests": 643
+    },
+    "list:alternateSorts:wide:modified-asc:previous": {
+      "p50Ms": 93.425,
+      "p95Ms": 142.601,
+      "p99Ms": 180.616,
+      "requests": 109
+    },
+    "list:alternateSorts:wide:modified-desc:first": {
+      "p50Ms": 82.991,
+      "p95Ms": 131.96,
+      "p99Ms": 158.065,
+      "requests": 427
+    },
+    "list:alternateSorts:wide:modified-desc:next": {
+      "p50Ms": 87.672,
+      "p95Ms": 139.426,
+      "p99Ms": 171.062,
+      "requests": 671
+    },
+    "list:alternateSorts:wide:modified-desc:previous": {
+      "p50Ms": 85.56,
+      "p95Ms": 148.678,
+      "p99Ms": 173.782,
+      "requests": 125
+    },
+    "list:alternateSorts:wide:name-desc:first": {
+      "p50Ms": 80.427,
+      "p95Ms": 131.963,
+      "p99Ms": 174.038,
+      "requests": 432
+    },
+    "list:alternateSorts:wide:name-desc:next": {
+      "p50Ms": 85.86,
+      "p95Ms": 141.004,
+      "p99Ms": 171.09,
+      "requests": 694
+    },
+    "list:alternateSorts:wide:name-desc:previous": {
+      "p50Ms": 87.55,
+      "p95Ms": 140.695,
+      "p99Ms": 142.502,
+      "requests": 115
+    },
+    "list:alternateSorts:wide:size-asc:first": {
+      "p50Ms": 82.938,
+      "p95Ms": 135.895,
+      "p99Ms": 148.232,
+      "requests": 424
+    },
+    "list:alternateSorts:wide:size-asc:next": {
+      "p50Ms": 90.32,
+      "p95Ms": 146.614,
+      "p99Ms": 177.27,
+      "requests": 656
+    },
+    "list:alternateSorts:wide:size-asc:previous": {
+      "p50Ms": 88.629,
+      "p95Ms": 128.463,
+      "p99Ms": 155.736,
+      "requests": 129
+    },
+    "list:alternateSorts:wide:size-desc:first": {
+      "p50Ms": 80.865,
+      "p95Ms": 145.058,
+      "p99Ms": 178.489,
+      "requests": 424
+    },
     "list:alternateSorts:wide:size-desc:next": {
-      "p50Ms": 235.366,
-      "p95Ms": 288.972,
-      "p99Ms": 300.97,
-      "requests": 285
+      "p50Ms": 89.891,
+      "p95Ms": 142.788,
+      "p99Ms": 168.133,
+      "requests": 578
     },
     "list:alternateSorts:wide:size-desc:previous": {
-      "p50Ms": 239.093,
-      "p95Ms": 296.722,
-      "p99Ms": 306.209,
-      "requests": 55
+      "p50Ms": 83.922,
+      "p95Ms": 130.391,
+      "p99Ms": 139.197,
+      "requests": 102
     },
     "list:basicFilters:tree:modified-asc:first:filter": {
-      "p50Ms": 222.878,
-      "p95Ms": 271.655,
-      "p99Ms": 315.855,
-      "requests": 213
+      "p50Ms": 80.067,
+      "p95Ms": 134.399,
+      "p99Ms": 167.662,
+      "requests": 595
     },
     "list:basicFilters:tree:modified-asc:next:filter": {
-      "p50Ms": 235.495,
-      "p95Ms": 302.265,
-      "p99Ms": 342.285,
-      "requests": 128
+      "p50Ms": 94.464,
+      "p95Ms": 153.227,
+      "p99Ms": 199.219,
+      "requests": 291
     },
     "list:basicFilters:tree:modified-desc:first:filter": {
-      "p50Ms": 226.148,
-      "p95Ms": 290.135,
-      "p99Ms": 311.137,
-      "requests": 190
+      "p50Ms": 79.615,
+      "p95Ms": 129.016,
+      "p99Ms": 151.361,
+      "requests": 604
     },
     "list:basicFilters:tree:modified-desc:next:filter": {
-      "p50Ms": 234.745,
-      "p95Ms": 296.789,
-      "p99Ms": 326.804,
-      "requests": 143
+      "p50Ms": 94.281,
+      "p95Ms": 150.444,
+      "p99Ms": 176.593,
+      "requests": 293
     },
     "list:basicFilters:tree:name-asc:first:filter": {
-      "p50Ms": 224.419,
-      "p95Ms": 279.346,
-      "p99Ms": 291.873,
-      "requests": 219
+      "p50Ms": 77.858,
+      "p95Ms": 131.818,
+      "p99Ms": 159.64,
+      "requests": 603
     },
     "list:basicFilters:tree:name-asc:next:filter": {
-      "p50Ms": 230.577,
-      "p95Ms": 284.859,
-      "p99Ms": 316.926,
-      "requests": 143
+      "p50Ms": 88.103,
+      "p95Ms": 154.072,
+      "p99Ms": 177.551,
+      "requests": 339
     },
     "list:basicFilters:tree:name-desc:first:filter": {
-      "p50Ms": 219.373,
-      "p95Ms": 272.092,
-      "p99Ms": 289.996,
-      "requests": 212
+      "p50Ms": 79.454,
+      "p95Ms": 131.658,
+      "p99Ms": 164.222,
+      "requests": 613
     },
     "list:basicFilters:tree:name-desc:next:filter": {
-      "p50Ms": 231.747,
-      "p95Ms": 276.982,
-      "p99Ms": 324.436,
-      "requests": 94
+      "p50Ms": 87.777,
+      "p95Ms": 139.493,
+      "p99Ms": 180.943,
+      "requests": 331
     },
     "list:basicFilters:tree:size-asc:first:filter": {
-      "p50Ms": 225.585,
-      "p95Ms": 285.27,
-      "p99Ms": 315.806,
-      "requests": 246
+      "p50Ms": 78.171,
+      "p95Ms": 133.279,
+      "p99Ms": 169.004,
+      "requests": 662
     },
     "list:basicFilters:tree:size-asc:next:filter": {
-      "p50Ms": 231.349,
-      "p95Ms": 281.796,
-      "p99Ms": 331.561,
-      "requests": 136
+      "p50Ms": 91.28,
+      "p95Ms": 141.897,
+      "p99Ms": 191.968,
+      "requests": 397
     },
     "list:basicFilters:tree:size-desc:first:filter": {
-      "p50Ms": 224.029,
-      "p95Ms": 275.384,
-      "p99Ms": 296.347,
-      "requests": 213
+      "p50Ms": 78.871,
+      "p95Ms": 129.183,
+      "p99Ms": 153.444,
+      "requests": 637
     },
     "list:basicFilters:tree:size-desc:next:filter": {
-      "p50Ms": 235.981,
-      "p95Ms": 312.329,
-      "p99Ms": 350.307,
-      "requests": 95
+      "p50Ms": 95.595,
+      "p95Ms": 157.975,
+      "p99Ms": 189.738,
+      "requests": 336
     },
     "list:basicFilters:wide:modified-asc:first:filter": {
-      "p50Ms": 249.152,
-      "p95Ms": 386.037,
-      "p99Ms": 413.25,
-      "requests": 136
+      "p50Ms": 103.114,
+      "p95Ms": 232.29,
+      "p99Ms": 268.411,
+      "requests": 409
     },
     "list:basicFilters:wide:modified-asc:next:filter": {
-      "p50Ms": 251.139,
-      "p95Ms": 401.773,
-      "p99Ms": 449.105,
-      "requests": 110
+      "p50Ms": 104.462,
+      "p95Ms": 231.176,
+      "p99Ms": 263.473,
+      "requests": 366
     },
     "list:basicFilters:wide:modified-desc:first:filter": {
-      "p50Ms": 241.706,
-      "p95Ms": 368.733,
-      "p99Ms": 401.966,
-      "requests": 133
+      "p50Ms": 102.337,
+      "p95Ms": 215.564,
+      "p99Ms": 246.474,
+      "requests": 411
     },
     "list:basicFilters:wide:modified-desc:next:filter": {
-      "p50Ms": 261.383,
-      "p95Ms": 403.449,
-      "p99Ms": 434.557,
-      "requests": 108
+      "p50Ms": 115.234,
+      "p95Ms": 239.779,
+      "p99Ms": 302.169,
+      "requests": 387
     },
     "list:basicFilters:wide:name-asc:first:filter": {
-      "p50Ms": 244.503,
-      "p95Ms": 368.015,
-      "p99Ms": 395.049,
-      "requests": 134
+      "p50Ms": 99.95,
+      "p95Ms": 226.519,
+      "p99Ms": 256.875,
+      "requests": 407
     },
     "list:basicFilters:wide:name-asc:next:filter": {
-      "p50Ms": 259.507,
-      "p95Ms": 380.745,
-      "p99Ms": 431.02,
-      "requests": 108
+      "p50Ms": 107.325,
+      "p95Ms": 227.793,
+      "p99Ms": 287.87,
+      "requests": 303
     },
     "list:basicFilters:wide:name-desc:first:filter": {
-      "p50Ms": 234.93,
-      "p95Ms": 359.053,
-      "p99Ms": 385.483,
-      "requests": 146
+      "p50Ms": 98.191,
+      "p95Ms": 219.219,
+      "p99Ms": 264.999,
+      "requests": 421
     },
     "list:basicFilters:wide:name-desc:next:filter": {
-      "p50Ms": 252.546,
-      "p95Ms": 377.653,
-      "p99Ms": 399.085,
-      "requests": 115
+      "p50Ms": 104.47,
+      "p95Ms": 232.261,
+      "p99Ms": 272.646,
+      "requests": 376
     },
     "list:basicFilters:wide:size-asc:first:filter": {
-      "p50Ms": 237.527,
-      "p95Ms": 351.124,
-      "p99Ms": 378.193,
-      "requests": 142
+      "p50Ms": 99.434,
+      "p95Ms": 195.151,
+      "p99Ms": 247.177,
+      "requests": 401
     },
     "list:basicFilters:wide:size-asc:next:filter": {
-      "p50Ms": 275.414,
-      "p95Ms": 419.261,
-      "p99Ms": 470.879,
-      "requests": 115
+      "p50Ms": 112.939,
+      "p95Ms": 233.242,
+      "p99Ms": 295.087,
+      "requests": 328
     },
     "list:basicFilters:wide:size-desc:first:filter": {
-      "p50Ms": 241.184,
-      "p95Ms": 384.416,
-      "p99Ms": 446.049,
-      "requests": 139
+      "p50Ms": 99.493,
+      "p95Ms": 222.808,
+      "p99Ms": 264.835,
+      "requests": 377
     },
     "list:basicFilters:wide:size-desc:next:filter": {
-      "p50Ms": 257.64,
-      "p95Ms": 435.072,
-      "p99Ms": 454.876,
-      "requests": 113
+      "p50Ms": 114.581,
+      "p95Ms": 251.168,
+      "p99Ms": 282.845,
+      "requests": 292
     },
     "list:directoryPages:tree:name-asc:first": {
-      "p50Ms": 226.617,
-      "p95Ms": 283.157,
-      "p99Ms": 308.351,
-      "requests": 4704
+      "p50Ms": 83.279,
+      "p95Ms": 136.776,
+      "p99Ms": 167.894,
+      "requests": 12676
     },
     "list:directoryPages:tree:name-asc:next": {
-      "p50Ms": 229.393,
-      "p95Ms": 287.499,
-      "p99Ms": 313.715,
-      "requests": 7172
+      "p50Ms": 86.854,
+      "p95Ms": 140.472,
+      "p99Ms": 169.603,
+      "requests": 19807
     },
     "list:directoryPages:tree:name-asc:previous": {
-      "p50Ms": 230.817,
-      "p95Ms": 291.553,
-      "p99Ms": 325.039,
-      "requests": 1333
+      "p50Ms": 87.241,
+      "p95Ms": 139.714,
+      "p99Ms": 171.881,
+      "requests": 3612
     },
     "list:directoryPages:wide:name-asc:first": {
-      "p50Ms": 224.906,
-      "p95Ms": 279.439,
-      "p99Ms": 307.357,
-      "requests": 3050
+      "p50Ms": 81.264,
+      "p95Ms": 132.531,
+      "p99Ms": 162.545,
+      "requests": 8344
     },
     "list:directoryPages:wide:name-asc:next": {
-      "p50Ms": 228.385,
-      "p95Ms": 288.047,
-      "p99Ms": 316.555,
-      "requests": 4740
+      "p50Ms": 85.099,
+      "p95Ms": 138.404,
+      "p99Ms": 169.39,
+      "requests": 12974
     },
     "list:directoryPages:wide:name-asc:previous": {
-      "p50Ms": 232.004,
-      "p95Ms": 288.016,
-      "p99Ms": 329.517,
-      "requests": 801
+      "p50Ms": 86.471,
+      "p95Ms": 140.393,
+      "p99Ms": 179.64,
+      "requests": 2309
     },
     "status": {
-      "p50Ms": 457.048,
-      "p95Ms": 554.027,
-      "p99Ms": 589.908,
-      "requests": 1891
+      "p50Ms": 61.638,
+      "p95Ms": 112.727,
+      "p99Ms": 143.262,
+      "requests": 4967
     }
   },
-  "wideFolderListShare": 0.3973,
+  "webWorkers": 4,
+  "wideFolderListShare": 0.4006,
   "workerLoad": "none (catalog seed mode; no scan or preview jobs ran)"
 }

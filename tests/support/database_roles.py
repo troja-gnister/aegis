@@ -41,6 +41,37 @@ class RoleDatabase:
         with _django_login(role, self.passwords[role]):
             yield
 
+    @contextmanager
+    def as_pooled_django_role(self, role: str, pool: dict[str, object]) -> Iterator[None]:
+        """Route Django's default connection through a psycopg pool of *role* logins.
+
+        This is the web server's production configuration (health-checked pool, no
+        persistent-connection mode). The pool is closed and the owner login restored
+        on exit.
+        """
+        if role not in self.passwords:
+            raise ValueError("unknown test database role")
+        settings_dict = connection.settings_dict
+        saved = {key: settings_dict[key] for key in (
+            "USER", "PASSWORD", "CONN_MAX_AGE", "CONN_HEALTH_CHECKS", "OPTIONS")}
+        connection.close()
+        settings_dict.update(
+            USER=role, PASSWORD=self.passwords[role], CONN_MAX_AGE=0,
+            CONN_HEALTH_CHECKS=True, OPTIONS={**saved["OPTIONS"], "pool": dict(pool)},
+        )
+        try:
+            connection.ensure_connection()
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT session_user, current_user")
+                assert cursor.fetchone() == (role, role)
+            connection.close()
+            yield
+        finally:
+            connection.close()
+            connection.close_pool()  # type: ignore[attr-defined]
+            settings_dict.update(saved)
+            connection.ensure_connection()
+
     def connect(self, role: str) -> psycopg.Connection[Any]:
         if role not in self.passwords:
             raise ValueError("unknown test database role")
