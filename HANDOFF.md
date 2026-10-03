@@ -1,47 +1,42 @@
 # Aegis continuation handoff — October 3, 2026
 
-Resume in `/var/home/troja/Dev/aegis` on **`main`**. Docker is the supported, primary runtime; Podman is a secondary, optional runtime whose follow-ups are deferred (see [the Linux/Podman report](docs/verification/linux-podman-prerequisite.md)).
+Resume on **`main`** on a **new computer**; see [Setting up the new computer](#setting-up-the-new-computer) first. Docker is the supported, primary runtime. Podman is a secondary, optional runtime whose follow-ups are deferred; see [the Linux/Podman report](docs/verification/linux-podman-prerequisite.md).
 
-**Phase 2A.1 has 18 tasks: 15 accepted, 3 remaining (16, 17, 18).** Task 15, the streamed 1M-entry authenticated catalog benchmark, was accepted at `e8ea863`, pushed; [CI run 36959823576](https://github.com/troja-gnister/aegis/actions/runs/36959823576) passed all four jobs.
+**Phase 2A.1 has 18 tasks: 15 accepted, 3 remaining (16, 17, 18).** Task 15, the streamed 1M-entry authenticated catalog benchmark, was accepted at `e8ea863`; [CI run 36959823576](https://github.com/troja-gnister/aegis/actions/runs/36959823576) passed all four jobs.
 
-On top of that, a reviewed web performance slice is **committed locally and not pushed**. That commit is `f6db82e`, and the commit carrying this handoff follows it, so `main` is ahead of `origin/main`.
+A reviewed web performance slice, `f6db82e`, followed by this handoff, was **pushed to `origin/main` at the user's request on October 3.** Docker CI for that push had not been inspected when this file was written.
 
-The public docs (README, plan ledger, `docs/development.md` status line, `docs/development-handoff.md`, delivery spec) still say "14 accepted, Task 15 next". **They have not yet been synced for Task 15 acceptance or the web performance slice.**
+The public docs still say "14 accepted, Task 15 next" and **are not yet synced** for Task 15 acceptance or the web performance slice. They are the README, the plan ledger, the `docs/development.md` status line, `docs/development-handoff.md` and the delivery spec.
 
 ## Next actions, in order
 
-1. **Check the repository state.**
+1. **Set up and check the repository.**
+   - Set up the new computer as described below.
    - Read this file and [`docs/development-handoff.md`](docs/development-handoff.md).
-   - Run `git status --short --branch` and `git fetch`. Expect `main` to be ahead of `origin/main` by the two local commits.
-   - Never reset, force-push, auto-stash or discard local work.
-2. **Get the user's decision on the web performance slice (`f6db82e`), then push only with explicit approval.** The user must accept one behavior change first; the push question was interrupted, so ask it again.
-   - **What changed:** pooled web database logins live up to 60 s, plus a 5 s idle check. An out-of-band `ALTER ROLE ... PASSWORD` or `NOLOGIN` on the web database role therefore takes effect within about 65 s instead of on the next request.
-   - **What did not change:**
-     - The documented rotation, which recreates PostgreSQL and its dependents (`docs/operations/phase-1-deployment.md:160`), takes effect as before.
-     - Application sessions, deactivation, epochs and SQL grant changes still take effect immediately.
-   - **Review result:** the independent review found this does not conflict with any accepted contract. It is a user decision.
-   - **Options offered:**
-     - (a) accept, add an operator-runbook note on `AEGIS_WEB_WORKERS` and the 65 s window, push, and watch CI (recommended);
-     - (b) shorten the pool lifetime, then re-measure;
-     - (c) hold.
-   - **After pushing,** confirm all four Docker CI jobs pass. CI is checked through public annotations and the run page; `gh` is not installed, and job logs need authentication.
-3. **Sync the public docs** for Task 15 acceptance (15/18) and the web performance slice:
+   - Run `git status --short --branch` and `git fetch`, and confirm `main` matches `origin/main`.
+   - Never reset, force-push, auto-stash or discard work.
+2. **Inspect the Docker CI run** for the pushed head on the [Actions page](https://github.com/troja-gnister/aegis/actions) and confirm all four jobs pass: backend, frontend, deployment and e2e.
+   - Public annotations carry only the test id and exception type.
+   - Job logs need authentication; use `gh` if it is installed on the new computer.
+   - If a job fails, diagnose it before any new work.
+3. **Confirm the revocation window with the user.**
+   - **What changed:** the web slice pools web database logins for up to 60 s, plus a 5 s idle check. An out-of-band `ALTER ROLE ... PASSWORD` or `NOLOGIN` on the web database role now takes effect within about 65 s instead of on the next request.
+   - **What did not change:** the documented rotation, which recreates PostgreSQL and its dependents (`docs/operations/phase-1-deployment.md:160`), is unchanged. Application sessions, deactivation, epochs and SQL grant changes still take effect immediately.
+   - **Review result:** the independent review found no contract conflict.
+   - **Status:** the user had this question pending when they asked to push; it was never answered explicitly. Mention it once and offer to shorten the lifetime and re-measure.
+   - **Either way:** add the operator-runbook note on `AEGIS_WEB_WORKERS` and the 65 s window (review item m8) to `docs/operations/`.
+4. **Sync the public docs** for Task 15 acceptance (15/18) and the web performance slice:
    - README;
    - the plan ledger and Task 15 evidence row;
    - `docs/development.md`;
    - `docs/development-handoff.md`;
    - the delivery spec status.
 
-   Keep them consistent with each other and with this file.
-4. **Task 16 is blocked on disk space; ask the user.**
-   - `/var/home` has about 26 GB free (95% used).
-   - Task 16 needs at least 12 GiB for catalog and state, plus a 1M-file synthetic source tree, plus margin.
-   - The tree must sit outside the checkout and user storage, and Task 16 needs explicit opt-in.
-   - The user must free space or name another disk before Task 16 starts.
-   - `/tmp` is a 16 GiB tmpfs and is unsuitable.
-5. Then run **Task 16** (real 1M physical scan, recovery and loaded browse at p95 ≤ 500 ms under scan load), **Task 17** (a 30-minute mobile session) and **Task 18** (upgrade from Phase 1 and the acceptance handoff), in order, from the [plan](docs/superpowers/plans/2026-09-14-phase-2a-indexed-browser.md). Read each task's full requirements; this file does not replace them.
+   Keep them consistent with each other and with this file. Ask before pushing.
+5. **Before Task 16,** check the new machine's free disk; see the setup section. Ask the user for the disk or path to use and for explicit opt-in.
+6. Then run **Task 16** (real 1M physical scan, recovery and loaded browse at p95 ≤ 500 ms under scan load), **Task 17** (a 30-minute mobile session) and **Task 18** (upgrade from Phase 1 and the acceptance handoff), in order, from the [plan](docs/superpowers/plans/2026-09-14-phase-2a-indexed-browser.md). Read each task's full requirements; this file does not replace them.
 
-Do not restart Tasks 1–15 or redo the web performance slice. Chronological working notes, briefs, reports and reviews are in `.superpowers/sdd/2026-09-14-phase-2a-indexed-browser/` (ignored, local only): `progress.md` and the `web-perf-{brief,report,review}.md` files.
+Do not restart Tasks 1–15 or redo the web performance slice. The old machine's ignored working notes (`.superpowers/`) do not carry over; everything needed is in this file, the plan's evidence sections and `docs/verification/`.
 
 ## Web performance slice (`f6db82e`) summary
 
@@ -55,7 +50,7 @@ Do not restart Tasks 1–15 or redo the web performance slice. Chronological wor
   - e2e: 22/22. Ruff and mypy are clean.
   - Deployment: 1180 passed, 7 failed. The 7 are known failures specific to the local runner: four from a missing `make`, two from `test_e2e_forces_local_podman_for_compose_boundary`, and one from a `test_container_boundaries` `--env-file` rejection, already recorded in Task 14.
 - **Review:** independent review approved it, with no Critical or Important findings.
-- **Open minor items m1–m8**, from `web-perf-review.md`:
+- **Open minor items m1–m8**, from the independent review:
   - m1: an unexpected exception from the pool check gives a bare 500;
   - m2: up to 16 web connections, with a 10 s acquire queue;
   - m3: the pool switch is not tied to the web role;
@@ -79,41 +74,42 @@ Do not restart Tasks 1–15 or redo the web performance slice. Chronological wor
   - `test_rendered_mounts.py` refusals;
   - `test_database_roles.py:414` host-network check;
   - O11, client source IPs not preserved by rootless published ports.
-- **Scratch directories:** 21 `/tmp/aegis-mount-preflight-*` directories exist. The user knows; do not delete them without asking.
 
-## Tool environment and commands
+## Setting up the new computer
 
-Use the locked local toolchain, not the host's Python 3.14 or Node 22. That means Python 3.13.15 (`.venv`), uv 0.12.8, Node 24.20.0, Playwright 1.63.0 and PostgreSQL 18, with the tracked `uv.lock` and npm lock. Do not upgrade dependencies incidentally.
+Development moves to a **new computer** after this handoff. Nothing from the old machine carries over except what is in git:
 
-```bash
-export PATH="/var/home/troja/Dev/aegis/.superpowers/toolchain/node-v24.20.0-linux-x64/bin:/var/home/troja/Dev/aegis/.superpowers/toolchain/uv-x86_64-unknown-linux-gnu:/usr/local/bin:/usr/bin:/bin"
-export UV_CACHE_DIR=/var/home/troja/Dev/aegis/.superpowers/toolchain/uv-cache
-export UV_PYTHON_INSTALL_DIR=/var/home/troja/Dev/aegis/.superpowers/toolchain/python
-export NPM_CONFIG_CACHE=/var/home/troja/Dev/aegis/.superpowers/toolchain/npm-cache
-export VITEST_MAX_WORKERS=1
-```
+- the ignored `.superpowers/` directory (working notes, reviews, toolchain, the Docker-in-container helper);
+- `.venv`;
+- `node_modules`.
 
-Fast local checks (no engine): `.venv/bin/ruff check backend tests scripts`, `.venv/bin/mypy backend`, `git diff --check`. The project does **not** run `ruff format`, so ignore its output.
+This file and the tracked docs contain everything needed. Old-host details no longer apply: its disk limits, its retained Podman volumes and networks, and its `/tmp` scratch directories.
 
-Full gates use Docker Engine with Compose v2: `make verify`, `make verify-compose`, `make test-e2e`. See the [development guide](docs/development.md).
+1. **Get the code.** Clone `https://github.com/troja-gnister/aegis`, or `git pull` an existing clone, and check out `main`. Confirm `git log -1` is the newest handoff commit (after `805fce4`).
+2. **Install the prerequisites** from [`docs/development.md#prerequisites`](docs/development.md#prerequisites):
+   - Python 3.13 (`.python-version`) and uv 0.12.8;
+   - Node.js 24 (`frontend/package.json` engines `>=24 <25`) and npm;
+   - Git and GNU make;
+   - **Docker Engine with Compose v2.** It is the primary runtime. Prefer a native Docker Engine; the old host's Docker-in-Podman helper was a workaround and is not tracked.
+3. **Set up the project:**
+   - Run `uv sync --locked --group dev`.
+   - In `frontend/`, run `npm ci` and then `npm exec -- playwright install chromium webkit`. Playwright is 1.63.0, from the lockfile.
+   - Use the tracked lockfiles and do not upgrade dependencies incidentally.
+   - Set `VITEST_MAX_WORKERS=1` for frontend gates on small machines.
+4. **Run the gates sequentially:** `make verify`, `make verify-compose`, `make test-e2e`, `git diff --check`. Fast checks without an engine:
+   - `uv run --locked ruff check backend tests scripts`;
+   - `uv run --locked mypy backend`.
 
-### Local Docker engine
+   The project does **not** use `ruff format`.
+5. **Check the new machine against Task 16.** Record its CPU, RAM and free disk. Task 16 needs at least 12 GiB for catalog and state, plus a 1M-file synthetic source tree, plus margin. The tree must be on a filesystem outside the checkout and user storage, and **not** on a tmpfs. Ask the user which disk or path to use, and get explicit opt-in.
+6. **The new machine is not the reference host.** Like the old one, it is not the calibrated N100 reference unless the user says it is, so label its benchmark results provisional.
 
-The host is Fedora Silverblue with rootless Podman and no Docker Engine.
-
-- **The engine:** a disposable `docker:28-dind` container, `aegis-dind-74afb27e`, runs in rootless Podman. Its owner record is `.superpowers/toolchain/dind-owner-74afb27e.json`.
-- **How to run commands:** use `.superpowers/toolchain/dind-run.sh '<command from repo root>'`. It runs a CI-like Ubuntu Noble runner (uid 1000, docker 28.5.2, compose v2.40.3, the locked uv and Node).
-- **No `make` in the runner:** run the underlying commands from the Makefile instead.
-- **Current state:** the container is **stopped** (Exited).
-- **After a host reboot:** recreate the socket directory at the path recorded in the owner file, then `podman start aegis-dind-74afb27e`. See [Local Docker without installing Docker](docs/development.md#local-docker-without-installing-docker-optional).
-- **Removal:** remove it and its images only by the exact identities in the owner file.
-
-Podman, if used directly, needs `AEGIS_CONTAINER_ENGINE=podman` and a fresh, identity-recorded private `AEGIS_PODMAN_SOCKET`. Do not enable a persistent, rootful or TCP API.
+On Podman, set `AEGIS_CONTAINER_ENGINE=podman` and a fresh, identity-recorded private `AEGIS_PODMAN_SOCKET`; see the README's optional Podman section. Do not enable a persistent, rootful or TCP API.
 
 ## Working method and user rules
 
 - **Workflow:**
-  - Use subagent-driven development: one implementer at a time (opus), working from a written brief in the `.superpowers/sdd/...` directory.
+  - Use subagent-driven development: one implementer at a time (opus), working from a written brief in an ignored `.superpowers/sdd/<plan>/` directory.
   - Follow each implementation with an independent spec and quality review, then fix rounds with scoped re-review, at most 5.
   - Record each step in `progress.md`.
   - Implementers must not commit or spawn agents.
@@ -129,9 +125,7 @@ Podman, if used directly, needs `AEGIS_CONTAINER_ENGINE=podman` and a fresh, ide
 - **Untouched data:** no user library, operator database, production deployment, release tag or million-entry physical fixture has been touched. Never use inherited production database configuration.
 - **Keep the existing protections:** networking and no-egress, SELinux, nested-mount rejection, init and reaping, and enforced resource limits. Do not replace failures with skips. Host-level or trust-model changes need user approval.
 - **Ports:** before every harness run, check that ports `18080` and `55432` have no listeners. Never stop an unrelated service to free a port.
-- **Cleanup:**
-  - Delete only exact recorded identities; never delete by name, label or prefix. No broad prune.
-  - **Earlier runs left 18 Podman volumes and 24 networks. They are not cleanup targets.**
+- **Cleanup:** delete only exact recorded identities; never delete by name, label or prefix. No broad prune, and never remove pre-existing containers, volumes or networks you did not create.
 - **Claims:** do not claim full Podman compatibility, scale acceptance or reference-host results. Keep cold/warm, unloaded/loaded, catalog/physical, smoke/full and provisional/reference results separate; an unavailable metric is never a zero-valued pass.
 
 ## Acceptance limits and contracts
@@ -168,8 +162,8 @@ Phase 2A.1 completion still leaves the broader 2A search, events and downloads, 
 
 | Revision | Meaning |
 | --- | --- |
-| commit after `f6db82e` | **Local, not pushed.** This handoff. |
-| `f6db82e` | **Local, not pushed.** Web performance slice: multi-worker web, pooled web-role connections, cheaper status. Reviewed and approved; pending the user's acceptance of the 65 s revocation window before push. |
+| `805fce4` and the following commit | Handoff; pushed October 3. |
+| `f6db82e` | **Pushed October 3** at the user's request; CI not yet inspected. Web performance slice: multi-worker web, pooled web-role connections, cheaper status. Reviewed and approved. |
 | `e8ea863` | **Task 15 accepted; pushed.** Million-entry authenticated catalog benchmark; CI run 36959823576, all four jobs passed. |
 | `0744cab` | Docs: Task 14 acceptance; pushed. |
 | `0682fba` | Admin login behind the gateway and stale-cursor recovery; pushed. |
