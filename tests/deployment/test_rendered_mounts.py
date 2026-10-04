@@ -14,6 +14,7 @@ import yaml
 from aegisctl.container_engine import (
     compose_environment,
     container_command,
+    selected_engine,
 )
 from aegisctl.container_resources import (
     ProjectInventory,
@@ -57,6 +58,16 @@ NGINX_IMAGE = (
     "docker.io/nginxinc/nginx-unprivileged:1.30.4-alpine@"
     "sha256:45ce1e2e699234253d1def7baa96218a5d00b498d1ba0cbb1a17b6bdf73d1351"
 )
+PODMAN_COMMA_REFUSAL = (
+    "mount slot photos: Podman cannot bind-mount an original root whose path contains a comma"
+)
+
+
+def _punctuated_source_name() -> str:
+    """Docker keeps the comma; Podman refuses comma originals up front, keeping the rest."""
+    if selected_engine() == "podman":
+        return "source;with:punctuation"
+    return "source,with:punctuation"
 
 
 def _docker(*arguments: str) -> subprocess.CompletedProcess[str]:
@@ -645,8 +656,13 @@ def test_generated_compose_survives_compose_config_and_has_worker_attest_command
     tmp_path: Path,
 ) -> None:
     tree = record_fresh_test_tree(tmp_path)
-    source = tmp_path / "source,with:punctuation"
+    source = tmp_path / _punctuated_source_name()
     source.mkdir()
+    podman = selected_engine() == "podman"
+    comma_source = tmp_path / "source,with:punctuation"
+    if podman:
+        comma_source.mkdir()
+        record_created_test_path(tree, comma_source)
     config = tmp_path / "mounts.toml"
     manifest = tmp_path / "manifest.json"
     output = tmp_path / "compose.generated.yaml"
@@ -667,6 +683,15 @@ expected_identity = "{local_identity(source)}"
     record_created_test_path(tree, source)
     record_created_test_path(tree, config)
     prepare_owned_test_inventory(record_test_tree_inventory(tree))
+    if podman:
+        # Podman's API splits a bind source at a comma into mount options: refused up front.
+        comma_slots = preflight_slots([SlotSpec(
+            "photos", comma_source, "/srv/aegis/roots/photos", "read_write",
+            local_identity(comma_source),
+        )])
+        with pytest.raises(ConfigError) as refused:
+            observe_mount_fingerprints(comma_slots)
+        assert str(refused.value) == PODMAN_COMMA_REFUSAL
     observed = observe_mount_fingerprints(preflight_slots(parse_config(config)))
     write_manifest(manifest, observed, uid=os.geteuid(), gid=os.getegid())
     render_artifacts(

@@ -10,6 +10,7 @@ from typing import Any, NoReturn
 
 import pytest
 from aegis_apps.roots.manifest import MountManifest
+from aegisctl.container_engine import selected_engine
 from aegisctl.mounts import (
     MAX_MOUNTINFO_BYTES,
     ConfigError,
@@ -23,6 +24,7 @@ from aegisctl.mounts import (
     set_observer_output_limit,
 )
 
+from tests.support.fake_container_engine import select_fake_engine
 from tests.support.observer_engine import (
     ObserverEngine as _ObserverEngine,
 )
@@ -32,6 +34,18 @@ from tests.support.observer_engine import (
 from tests.support.observer_engine import (
     write_observer_record as _write_observer_record,
 )
+
+PODMAN_COMMA_REFUSAL = (
+    "mount slot photos: Podman cannot bind-mount an original root whose path contains a comma"
+)
+
+
+def _punctuated_source_name() -> str:
+    """Docker accepts a comma in a bind source; Podman refuses one up front (its API
+    splits a bind source at commas into mount options), so its journey keeps the rest."""
+    if selected_engine() == "podman":
+        return "source;with:punctuation"
+    return "source,with:punctuation"
 
 
 def _retained_path(error: BaseException) -> Path:
@@ -155,7 +169,7 @@ expected_identity = "{local_identity(source)}"
 def test_container_observer_returns_fingerprinted_slots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    source = tmp_path / "source,with:punctuation"
+    source = tmp_path / _punctuated_source_name()
     source.mkdir()
     config = tmp_path / "mounts.toml"
     config.write_text(
@@ -183,6 +197,58 @@ expected_identity = "{local_identity(source)}"
     _assert_observer_engine_cleaned(engine)
     assert engine.diagnostics is not None
     assert not engine.diagnostics.exists()
+
+
+@pytest.mark.parametrize("engine", ["docker", "podman"])
+def test_observer_refuses_comma_original_on_podman_before_any_container(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine: str,
+) -> None:
+    source = tmp_path / "source,with:punctuation"
+    source.mkdir()
+    config = tmp_path / "mounts.toml"
+    config.write_text(
+        f"""
+version = 1
+[[slots]]
+slot_id = "photos"
+source = "{source}"
+container_path = "/srv/aegis/roots/photos"
+mode = "read_only"
+expected_identity = "{local_identity(source)}"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    validated = preflight_slots(parse_config(config))
+    select_fake_engine(engine, tmp_path, monkeypatch)
+    temp = tmp_path / "observer-temp"
+    temp.mkdir(mode=0o700)
+    monkeypatch.setattr("aegisctl.mounts.tempfile.tempdir", str(temp))
+    if engine == "docker":
+        # Docker is unchanged: the comma-bearing original is observed as before.
+        observer = _ObserverEngine(source)
+        monkeypatch.setattr(
+            "aegisctl.mounts.require_podman_mask_compatibility", observer.checked_policy,
+        )
+        monkeypatch.setattr("aegisctl.mounts.subprocess.run", observer)
+        observed = observe_mount_fingerprints(validated)
+        assert len(observed[0].mount_fingerprint) == 64
+        _assert_observer_engine_cleaned(observer)
+        assert observer.diagnostics is not None
+        assert not observer.diagnostics.exists()
+        return
+
+    def no_container(*args: object, **kwargs: object) -> NoReturn:
+        del args, kwargs
+        pytest.fail("a container was created before the comma refusal")
+
+    # Neither the mask-compatibility probes nor the observer may create a container.
+    monkeypatch.setattr("aegisctl.mounts.require_podman_mask_compatibility", no_container)
+    monkeypatch.setattr("aegisctl.mounts.subprocess.run", no_container)
+    with pytest.raises(ConfigError) as caught:
+        observe_mount_fingerprints(validated)
+    assert str(caught.value) == PODMAN_COMMA_REFUSAL
+    assert not list(temp.iterdir())
 
 
 def test_observer_run_timeout_still_cleans_and_verifies_project_resources(

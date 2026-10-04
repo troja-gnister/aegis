@@ -907,11 +907,26 @@ def _retained_observer_error(root: Path) -> ConfigError:
     return ConfigError(f"container mount observation failed; diagnostics retained at {root}")
 
 
+def _refuse_podman_comma_originals(slots: tuple[ValidatedSlot, ...]) -> None:
+    """Podman's Docker-compatible API splits a bind source at commas into mount options."""
+    # The same Docker short-circuit as the mask policy: Docker accepts commas unchanged.
+    if os.environ.get("AEGIS_CONTAINER_ENGINE", "docker") == "docker":
+        return
+    for slot in slots:
+        if "," in str(slot.source):
+            raise _safe_slot_error(
+                slot.slot_id,
+                "Podman cannot bind-mount an original root whose path contains a comma",
+            )
+
+
 def observe_mount_fingerprints(
     slots: tuple[ValidatedSlot, ...],
 ) -> tuple[ValidatedSlot, ...]:
     if not slots:
         raise ConfigError("mount slot observation requires slots")
+    # Before the mask-compatibility probes or the observer create any container.
+    _refuse_podman_comma_originals(slots)
     # gettempdir() may itself create a write probe. Select and validate the
     # configured location before asking tempfile to create anything.
     temp_parent = Path(tempfile.tempdir or next(
