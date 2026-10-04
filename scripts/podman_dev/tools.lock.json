@@ -1,0 +1,26 @@
+{
+  "uv": {
+    "version": "0.12.8",
+    "kind": "tar-member",
+    "url": "https://github.com/astral-sh/uv/releases/download/0.12.8/uv-x86_64-unknown-linux-gnu.tar.gz",
+    "sha256": "2e2b37e9811e17675a9e70bed5e1a58fc8c0388be63d751d72cc735188c149ff",
+    "member": "uv-x86_64-unknown-linux-gnu/uv",
+    "member_sha256": "fe60af3d6b1771ecea15fdfd3821959912009e1612b3767a4988f135bc3cdd9d",
+    "destination": ".local/bin/uv"
+  },
+  "node": {
+    "version": "24.20.0",
+    "kind": "tar-tree",
+    "url": "https://nodejs.org/dist/v24.20.0/node-v24.20.0-linux-x64.tar.xz",
+    "sha256": "2f2c0da162318f0de47665410c7c8c2ed3d36c8f3105de4bbc61176c70a7cbf2",
+    "member": "node-v24.20.0-linux-x64",
+    "destination": ".local/opt/node-v24.20.0-linux-x64"
+  },
+  "docker-compose": {
+    "version": "2.39.4",
+    "kind": "binary",
+    "url": "https://github.com/docker/compose/releases/download/v2.39.4/docker-compose-linux-x86_64",
+    "sha256": "7af95166a730b87e172d4fc9aefea8725d3c6c7327d59149267b452114ddb7d4",
+    "destination": ".local/libexec/aegis/docker-compose"
+  }
+}
