@@ -87,6 +87,23 @@ def test_snapshot_failure_names_the_command() -> None:
         inventory.snapshot(run)
 
 
+def test_snapshot_rejects_an_unexpected_json_shape() -> None:
+    run = ScriptedPodman([(("ps",), 0, json.dumps({"error": "x"}))])
+    with pytest.raises(
+        SessionError, match="podman ps --all --format json returned unexpected JSON",
+    ):
+        inventory.snapshot(run)
+
+
+def test_compare_refuses_a_baseline_missing_a_kind() -> None:
+    before: inventory.Inventory = {"containers": {}, "volumes": {}, "networks": {}}
+    after: inventory.Inventory = {
+        "containers": {}, "volumes": {}, "networks": {}, "images": {},
+    }
+    with pytest.raises(SessionError, match="baseline is missing images"):
+        inventory.compare(before, after)
+
+
 def test_compare_ignores_new_objects_and_runtime_state() -> None:
     before: inventory.Inventory = {
         "containers": {CONTAINER: [["media-app"], IMAGE, 1]},

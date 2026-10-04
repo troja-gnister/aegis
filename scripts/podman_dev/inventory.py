@@ -16,11 +16,16 @@ Inventory = dict[str, dict[str, list[Any]]]
 
 
 def _listing(run: podman.Runner, arguments: tuple[str, ...]) -> list[dict[str, Any]]:
+    command = f"podman {' '.join(arguments)}"
     result = run(list(arguments))
     if result.returncode != 0:
-        raise SessionError(f"podman {' '.join(arguments)} failed: {result.stderr[-2000:]}")
+        raise SessionError(f"{command} failed: {result.stderr[-2000:]}")
     parsed = json.loads(result.stdout or "null")
-    return parsed if isinstance(parsed, list) else []
+    if parsed is None:
+        return []
+    if not isinstance(parsed, list):
+        raise SessionError(f"{command} returned unexpected JSON: {type(parsed).__name__}")
+    return parsed
 
 
 def snapshot(run: podman.Runner = podman.run) -> Inventory:
@@ -40,10 +45,13 @@ def snapshot(run: podman.Runner = podman.run) -> Inventory:
 
 
 def compare(before: Inventory, after: Inventory) -> list[str]:
+    missing = [kind for kind in KINDS if kind not in before]
+    if missing:
+        raise SessionError(f"inventory baseline is missing {', '.join(missing)}")
     problems: list[str] = []
     for kind in KINDS:
         current = after.get(kind, {})
-        for key, identity in sorted(before.get(kind, {}).items()):
+        for key, identity in sorted(before[kind].items()):
             if key not in current:
                 problems.append(f"pre-existing {kind} {key} disappeared (was {identity})")
             elif current[key] != identity:
