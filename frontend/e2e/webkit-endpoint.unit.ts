@@ -1,6 +1,10 @@
 import {describe, expect, it} from "vitest";
 
-import {browserProjects, validatedWebkitEndpoint} from "./webkit-endpoint";
+import {
+  browserProjects,
+  diagnosticProbeEnvironment,
+  validatedWebkitEndpoint,
+} from "./webkit-endpoint";
 
 const valid = "ws://127.0.0.1:1024/0123456789abcdef0123456789abcdef";
 
@@ -61,5 +65,21 @@ describe("validatedWebkitEndpoint", () => {
         use: {browserName: "webkit", connectOptions: {wsEndpoint: valid}},
       },
     ]);
+  });
+});
+
+describe("diagnosticProbeEnvironment", () => {
+  it("drops caller E2E values but keeps the WebKit connection for the probe runner", () => {
+    expect(diagnosticProbeEnvironment({
+      PATH: "/usr/bin",
+      E2E_ALICE_PASSWORD: "caller-secret",
+      E2E_BASE_URL: "http://127.0.0.1:18080",
+      E2E_DIAGNOSTIC_MARKER: "/caller/marker-",
+      E2E_WEBKIT_WS_ENDPOINT: valid,
+    })).toEqual({PATH: "/usr/bin", E2E_WEBKIT_WS_ENDPOINT: valid});
+    expect(diagnosticProbeEnvironment({
+      PATH: "/usr/bin",
+      E2E_ADMIN_PASSWORD: "caller-secret",
+    })).toEqual({PATH: "/usr/bin"});
   });
 });

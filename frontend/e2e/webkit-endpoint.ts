@@ -23,6 +23,17 @@ export function validatedWebkitEndpoint(
   return endpoint;
 }
 
+// The credential-diagnostic probe supplies its own synthetic E2E values. Every caller E2E
+// value is dropped except the WebKit connection (validated again by the probe's config),
+// so each mobile browser runs where the real gate runs it.
+export function diagnosticProbeEnvironment(
+  environment: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(environment).filter(
+    ([name]) => !name.startsWith("E2E_") || name === "E2E_WEBKIT_WS_ENDPOINT",
+  ));
+}
+
 export function browserProjects(endpoint: string | undefined) {
   return [
     {

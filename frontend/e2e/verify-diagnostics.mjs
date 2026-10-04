@@ -6,6 +6,8 @@ import {tmpdir} from "node:os";
 import {dirname, join, resolve} from "node:path";
 import {fileURLToPath} from "node:url";
 
+import {diagnosticProbeEnvironment} from "./webkit-endpoint.ts";
+
 const frontend = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const temporary = mkdtempSync(join(tmpdir(), "aegis-browser-diagnostics-"));
 const sentinel = `synthetic-diagnostic-${randomUUID()}`;
@@ -43,8 +45,7 @@ import config from ${JSON.stringify(join(frontend, "playwright.config.ts"))};
 export default {...config, testDir: ${JSON.stringify(temporary)},
   outputDir: ${JSON.stringify(join(temporary, "artifacts"))}, retries: 0};
 `);
-  const environment = Object.fromEntries(Object.entries(process.env)
-    .filter(([name]) => !name.startsWith("E2E_")));
+  const environment = diagnosticProbeEnvironment(process.env);
   const result = spawnSync(process.execPath, [
     join(frontend, "node_modules/@playwright/test/cli.js"), "test", "--config",
     join(temporary, "playwright.config.ts"),
