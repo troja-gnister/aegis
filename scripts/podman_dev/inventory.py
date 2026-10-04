@@ -39,7 +39,9 @@ def snapshot(run: podman.Runner = podman.run) -> Inventory:
             for item in containers
         },
         "volumes": {item["Name"]: [item["CreatedAt"]] for item in volumes},
-        "networks": {item["id"]: [item["name"], item["created"]] for item in networks},
+        # Network identity is ID and name only: Podman synthesizes the default
+        # network without a config file and reports each call's time as "created".
+        "networks": {item["id"]: [item["name"]] for item in networks},
         "images": {item["Id"]: [item["Created"]] for item in images},
     }
 

@@ -67,7 +67,7 @@ def test_snapshot_records_identity_fields_and_tolerates_null() -> None:
     assert inventory.snapshot(run) == {
         "containers": {CONTAINER: [["media-app"], IMAGE, 1]},
         "volumes": {},
-        "networks": {NETWORK: ["demo_default", "t0"]},
+        "networks": {NETWORK: ["demo_default"]},
         "images": {IMAGE: [5]},
     }
     run.assert_done()
@@ -128,4 +128,25 @@ def test_compare_reports_disappeared_and_recreated_objects() -> None:
     assert inventory.compare(before, after) == [
         f"pre-existing containers {CONTAINER} disappeared (was [['media-app'], '{IMAGE}', 1])",
         "pre-existing volumes demo_caddy_data changed from ['t1'] to ['t2']",
+    ]
+
+
+def network_snapshot(name: str, created: str) -> inventory.Inventory:
+    run = ScriptedPodman(listing_replies(
+        networks=json.dumps([{"id": NETWORK, "name": name, "created": created}]),
+    ))
+    snapshot = inventory.snapshot(run)
+    run.assert_done()
+    return snapshot
+
+
+def test_network_identity_is_its_id_and_name_only() -> None:
+    # Podman synthesizes the default network without a config file and reports
+    # the time of each call as its creation time.
+    before = network_snapshot("podman", "2026-10-04T09:38:47.311693885-05:00")
+    regenerated = network_snapshot("podman", "2026-10-04T09:41:27.69728746-05:00")
+    assert inventory.compare(before, regenerated) == []
+    renamed = network_snapshot("renamed", "2026-10-04T09:41:27.69728746-05:00")
+    assert inventory.compare(before, renamed) == [
+        f"pre-existing networks {NETWORK} changed from ['podman'] to ['renamed']",
     ]
