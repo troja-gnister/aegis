@@ -357,6 +357,14 @@ def _expected_caddy_service(before: dict[str, Any], after: dict[str, Any]) -> di
     return expected
 
 
+def _decoded_compose_bind_source(source: str) -> str:
+    """Strictly invert Compose's rendered escaping: each "$$" is one literal "$"."""
+    parts = source.split("$$")
+    if any("$" in part for part in parts):
+        raise PodmanMaskError("unpaired dollar in rendered Compose bind source")
+    return "$".join(parts)
+
+
 def _checked_compose_inputs(
     original: list[str],
     selected: list[str],
@@ -399,7 +407,7 @@ def _checked_compose_inputs(
             raise PodmanMaskError("Podman overlay changed service profiles")
         for mount in service.get("volumes", []):
             if mount.get("type") == "bind":
-                roots.append(Path(mount["source"]))
+                roots.append(Path(_decoded_compose_bind_source(mount["source"])))
     return tuple(roots)
 
 

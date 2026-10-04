@@ -654,6 +654,27 @@ def test_docker_launch_is_byte_for_byte_unchanged(monkeypatch: pytest.MonkeyPatc
     assert launch.controlled_container_argv(command) == command
 
 
+@pytest.mark.parametrize(
+    ("rendered", "original"),
+    [
+        ("/roots/a$$b", "/roots/a$b"),
+        ("/roots/a$$$$b", "/roots/a$$b"),
+        ("/roots/plain,with:punctuation", "/roots/plain,with:punctuation"),
+    ],
+)
+def test_compose_bind_source_decode_inverts_compose_dollar_escaping(
+    rendered: str, original: str,
+) -> None:
+    # Compose renders each literal "$" in a bind source as "$$"; the original root is the decode.
+    assert launch_module()._decoded_compose_bind_source(rendered) == original
+
+
+@pytest.mark.parametrize("rendered", ["/roots/a$b", "/roots/a$$$b", "/roots/a$"])
+def test_compose_bind_source_decode_refuses_unpaired_dollar(rendered: str) -> None:
+    with pytest.raises(policy_module().PodmanMaskError, match="unpaired"):
+        launch_module()._decoded_compose_bind_source(rendered)
+
+
 def test_observer_gate_failure_precedes_original_bearing_compose(
     mask_engine: tuple[Any, MaskEngine],
     monkeypatch: pytest.MonkeyPatch,
