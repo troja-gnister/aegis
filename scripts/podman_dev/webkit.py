@@ -66,7 +66,9 @@ def create_arguments(image_id: str, port: int, token: str) -> list[str]:
         "--ipc", "private", "--shm-size", "256m",
         "--memory", "2g", "--cpus", "2", "--pids-limit", "256",
         "--tmpfs", "/tmp:rw,nosuid,nodev,size=512m,mode=1777", "--env", "HOME=/tmp",
-        "--network", f"pasta:-T,{E2E_GATEWAY_PORT}",
+        # Exactly two forwards: "none" stops Podman's default host.containers.internal
+        # mapping, which would reach services on the host's global address.
+        "--network", f"pasta:-T,{E2E_GATEWAY_PORT},--map-guest-addr,none",
         "--publish", f"127.0.0.1:{port}:{port}",
         image_id,
         "node", SERVER_CLI, "run-server", "--host", "0.0.0.0",
