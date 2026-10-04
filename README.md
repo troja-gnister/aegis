@@ -192,14 +192,50 @@ Directory APIs use bounded page sizes, compact list records, compound indexes, a
 
 ### Running on Podman
 
-Rootless Podman 5.x is a secondary, optional runtime, paired with a Docker Compose v2 provider binary (no Docker Engine required). To use it:
+Rootless Podman 5.x is a secondary, optional runtime, paired with a Docker Compose v2 provider binary (no Docker Engine required). On the October 2026 Fedora 44 Server development host (Podman 5.8.7), `make verify` and `make test-e2e` (22/22) passed under rootless Podman, and `make verify-compose` passed except the nine O11 tests listed in the [verification report](docs/verification/linux-podman-prerequisite.md#fedora-server-development-host-october-2026); full Podman compatibility is not claimed while O11 is open. To use it:
 
 - Set `AEGIS_CONTAINER_ENGINE=podman`, `PODMAN_COMPOSE_PROVIDER` (path to the Compose v2 provider binary), and `AEGIS_PODMAN_SOCKET` (a private, user-owned rootless API socket in a 0700 directory — never a TCP or rootful socket).
 - The checked launcher then applies `compose.podman.yaml` automatically.
 - On SELinux hosts, the two Caddyfile binds already carry the `:z` relabel flag in `compose.yaml`, which is universal across engines; no manual SELinux configuration is needed.
 - **Known limitation:** rootless Podman's published ports do not preserve client source IP addresses. This breaks per-client login rate limiting and makes the TLS gateway's anti-spoofing readiness check intermittent. Recommended mitigations: put a host-level reverse proxy in front, use a VPN, or run rootful Podman or Docker instead.
+- **Known limitation:** on Podman, an original root whose path contains a comma is refused, because Podman's API splits such a path into mount options and cannot bind-mount it.
 
 Detailed evidence, the corrected PostgreSQL/Caddy/indexer adaptations, and current status are recorded in the [Linux/Podman prerequisite report](docs/verification/linux-podman-prerequisite.md).
+
+#### Developing on Podman
+
+A committed helper prepares a rootless Podman development session; Docker users can ignore it.
+
+1. Install or verify the pinned user-local tools: uv, Node.js 24 and the Docker Compose provider, which stays outside `PATH`. On a machine without uv, use the system Python from the repository root:
+
+   ```bash
+   python3 -m scripts.podman_dev tools
+   uv sync --locked --group dev
+   ```
+
+2. Start the session, load its environment and install the frontend dependencies:
+
+   ```bash
+   uv run --locked python -m scripts.podman_dev start
+   eval "$(uv run --locked python -m scripts.podman_dev env)"
+   npm --prefix frontend ci
+   (cd frontend && npm exec -- playwright install chromium)
+   ```
+
+3. Run the canonical gates sequentially: `make verify`, `make verify-compose`, `make test-e2e`, `git diff --check`.
+4. Stop the session. It removes only what it created, by recorded identity, and reports any pre-existing Podman object that changed:
+
+   ```bash
+   uv run --locked python -m scripts.podman_dev stop
+   ```
+
+The session is a private foreground `podman system service` socket under `$XDG_RUNTIME_DIR` (never TCP, never the systemd socket unit) plus a locally built Playwright WebKit server container from `docker/dev-webkit.Dockerfile`, because Playwright's WebKit build needs Ubuntu libraries. `status` reports both.
+
+- `status` prints its report to stdout and exits 1 when the session is unhealthy; other refusals print nothing to stdout.
+- Apart from DNS, which is relayed to the host resolver, the WebKit server container reaches the host only through the e2e gateway forward (host loopback port 18080); the host reaches the container through its own published loopback port. General outbound access is not restricted.
+- After a host reboot without `stop`, an exited `aegis-dev-webkit-<port>` container may remain. The helper never deletes by name; remove it yourself with `podman rm <name>`.
+
+**When Podman updates:** the guarded launcher accepts exactly Podman 5.8.7, crun 1.28 and Docker Compose 2.39.4. After a host update it refuses with a message that names the component: `unsupported Podman version`, `unsupported OCI runtime` (crun) or `unsupported Docker Compose provider`. Do not pin or downgrade the host to get past it: re-verify the new version (the focused mask checks, then the full gates) and extend the guard in a reviewed change.
 
 ## Development and documentation
 

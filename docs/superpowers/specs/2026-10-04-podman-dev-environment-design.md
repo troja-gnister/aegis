@@ -2,7 +2,7 @@
 
 **Date:** October 4, 2026
 
-**Status:** Design approved in conversation on October 4, 2026; this written specification awaits user review. No implementation has started.
+**Status:** Written specification approved by the user on October 4, 2026. Part 1 is implemented through the [implementation plan](../plans/2026-10-04-podman-dev-environment.md); [section 11](#11-implementation-notes-october-4-2026) records the implementation notes.
 
 **Parent:** [HANDOFF.md](../../../HANDOFF.md) continuation; [Linux/Podman prerequisite report](../../verification/linux-podman-prerequisite.md)
 
@@ -218,3 +218,27 @@ Once `make test-e2e` passes under Podman:
 - The previous Podman evidence came from Fedora Silverblue on Btrfs; this host uses Fedora Server on xfs.
 - Test resources share Podman storage with the host's existing services; the inventory comparison and exact-identity cleanup are the safeguards.
 - Each future Podman update requires re-verification before the guarded launcher accepts it.
+
+## 11. Implementation notes (October 4, 2026)
+
+Part 1 was implemented on October 4, 2026 (commits `8884a8b` through `5776d58`); the gate results are in the [prerequisite report](../../verification/linux-podman-prerequisite.md#fedora-server-development-host-october-2026). The sections above are unchanged. These deliberate deviations were reviewed during implementation:
+
+1. **Layout (§4, §4.1, §4.6).** The helper is the package `scripts/podman_dev/`; the invocation `python -m scripts.podman_dev` is unchanged. The tool lock is `scripts/podman_dev/tools.lock.json`, and the tests are `tests/deployment/test_podman_dev_{tools,records,webkit,session}.py`.
+2. **Readiness (§4.3).** The helper waits for the API's `GET /_ping`. The guarded launcher queries `/v5.8.7/libpod/info` itself later.
+3. **WebKit container (§4.4).**
+   - It runs with `--pids-limit 1024`, not 256. The e2e case that opens a second browser context peaked at 303 tasks; the other cases peaked at 116–188.
+   - The pasta options are `-T,18080,--map-guest-addr,none`. Podman's default `--map-guest-addr 169.254.1.2` gave the container a path to services bound to the host's own address. It is disabled, and those services were measured unreachable afterwards.
+   - Podman still adds `--dns-forward 169.254.1.1`. It relays DNS to the host resolver only; other ports at that address were unreachable.
+   - General outbound internet and LAN egress from the container is unchanged and was not measured.
+4. **Inventory and recovery (§4.5).**
+   - A network's identity is its ID and name only, because Podman regenerates `created` on every listing of the config-less default network.
+   - Stale-session recovery covers crashes and kills within one boot. A reboot clears `$XDG_RUNTIME_DIR`, so the record is gone and an exited `aegis-dev-webkit-<port>` container may remain. The user removes it by hand; the helper never deletes by name.
+5. **Stale record (§4.2).** A refused `start` reports the stale record's identities: the API process ID and start time, and the WebKit container ID.
+6. **Fail closed (§4.5).** Inventory parsing fails closed on unexpected Podman output and on an incomplete baseline.
+7. **Guard changes found by the gates (§5.3).**
+   - Compose-escaped `$$` bind sources are decoded strictly on the Podman path.
+   - On Podman, original roots (mount preflight) and Compose bind sources (launch gate) whose path contains a comma are refused up front, because Podman's compatibility API splits such a path into mount options.
+8. **Credential diagnostic (§5.3).** The credential-diagnostic probe keeps only `E2E_WEBKIT_WS_ENDPOINT` among the `E2E_*` variables.
+9. **Flake tooling (§6).**
+   - `scripts/test-e2e.sh` accepts allowlisted Playwright arguments, for local investigation only; CI passes none.
+   - The e2e sanitizer keeps only the failing spec line number (`failed_line=<n>`), carried as a constant stack line.

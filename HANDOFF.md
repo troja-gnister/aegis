@@ -1,42 +1,44 @@
-# Aegis continuation handoff — October 3, 2026
+# Aegis continuation handoff — October 4, 2026
 
-Resume on **`main`** on a **new computer**; see [Setting up the new computer](#setting-up-the-new-computer) first. Docker is the supported, primary runtime. Podman is a secondary, optional runtime whose follow-ups are deferred; see [the Linux/Podman report](docs/verification/linux-podman-prerequisite.md).
+Resume on **`main`** on the **Fedora 44 Server development host**, which runs native rootless Podman and no Docker Engine; see [Setting up the new computer](#setting-up-the-new-computer). Docker is the supported, primary runtime. Podman is a secondary, optional runtime; its remaining gap, O11, belongs to part 2. See [the Linux/Podman report](docs/verification/linux-podman-prerequisite.md).
+
+**Part 1 (Podman development environment) is complete:** commits `b6139ef` (spec) through `5776d58`, plus the following documentation commit, made locally on October 4. Final fresh-shell gates under rootless Podman: `make verify` exit 0 (backend 1,892 and frontend 229 tests passed; 202 s); `make verify-compose` 1,258 passed, 0 failed, 0 skipped, plus exactly the nine O11 errors (25 min 13 s); `make test-e2e` 22/22 (164 s); `git diff --check` clean; `stop` exited 0 with no pre-existing Podman object removed or changed. Full Podman compatibility is not claimed while O11 is open. Pushing needs the user's approval. After the push, Docker CI must pass all four jobs; it also has to confirm the Docker branches of the changed deployment tests, because this host has no Docker engine. Details: the [Fedora Server verification section](docs/verification/linux-podman-prerequisite.md#fedora-server-development-host-october-2026) and the [part 1 design](docs/superpowers/specs/2026-10-04-podman-dev-environment-design.md).
 
 **Phase 2A.1 has 18 tasks: 15 accepted, 3 remaining (16, 17, 18).** Task 15, the streamed 1M-entry authenticated catalog benchmark, was accepted at `e8ea863`; [CI run 36959823576](https://github.com/troja-gnister/aegis/actions/runs/36959823576) passed all four jobs.
 
-A reviewed web performance slice, `f6db82e`, followed by this handoff, was **pushed to `origin/main` at the user's request on October 3.** Docker CI for that push had not been inspected when this file was written.
+A reviewed web performance slice, `f6db82e`, followed by the handoff commits `805fce4` and `6bfaa01`, was **pushed to `origin/main` at the user's request on October 3.** Docker CI [run 37123170741](https://github.com/troja-gnister/aegis/actions/runs/37123170741) for `6bfaa01`: attempt 1 failed e2e only (`phase2a.spec.ts:339` in mobile Chromium), and attempt 2 passed all four jobs. Part 1 did not reproduce that failure locally.
 
 The public docs still say "14 accepted, Task 15 next" and **are not yet synced** for Task 15 acceptance or the web performance slice. They are the README, the plan ledger, the `docs/development.md` status line, `docs/development-handoff.md` and the delivery spec.
 
 ## Next actions, in order
 
-1. **Set up and check the repository.**
-   - Set up the new computer as described below.
-   - Read this file and [`docs/development-handoff.md`](docs/development-handoff.md).
-   - Run `git status --short --branch` and `git fetch`, and confirm `main` matches `origin/main`.
-   - Never reset, force-push, auto-stash or discard work.
-2. **Inspect the Docker CI run** for the pushed head on the [Actions page](https://github.com/troja-gnister/aegis/actions) and confirm all four jobs pass: backend, frontend, deployment and e2e.
-   - Public annotations carry only the test id and exception type.
-   - Job logs need authentication; use `gh` if it is installed on the new computer.
-   - If a job fails, diagnose it before any new work.
-3. **Confirm the revocation window with the user.**
-   - **What changed:** the web slice pools web database logins for up to 60 s, plus a 5 s idle check. An out-of-band `ALTER ROLE ... PASSWORD` or `NOLOGIN` on the web database role now takes effect within about 65 s instead of on the next request.
-   - **What did not change:** the documented rotation, which recreates PostgreSQL and its dependents (`docs/operations/phase-1-deployment.md:160`), is unchanged. Application sessions, deactivation, epochs and SQL grant changes still take effect immediately.
-   - **Review result:** the independent review found no contract conflict.
-   - **Status:** the user had this question pending when they asked to push; it was never answered explicitly. Mention it once and offer to shorten the lifetime and re-measure.
-   - **Either way:** add the operator-runbook note on `AEGIS_WEB_WORKERS` and the 65 s window (review item m8) to `docs/operations/`.
-4. **Sync the public docs** for Task 15 acceptance (15/18) and the web performance slice:
+Before new work, run `git status --short --branch` and `git fetch`. If part 1 is still unpushed, ask the user before pushing. Confirm that `main` matches `origin/main` and that Docker CI for the pushed head passed all four jobs: backend, frontend, deployment and e2e. If a job fails, diagnose it first (`gh` is installed on this host). Never reset, force-push, auto-stash or discard work.
+
+1. **Brainstorm part 2: persistent private-network deployment on this host.** It gets its own specification, plan and review. Agreed requirements:
+   - free ports, because default ports may already be taken on a shared host, and a firewall rule that admits only private-network sources;
+   - local-CA HTTPS;
+   - fixing O11, so real client addresses reach Caddy and the gateway;
+   - SELinux and UID mapping for read-only originals, without relabeling or ownership changes;
+   - the user's chosen test root as the first root;
+   - pull-and-run published images, with no checkout or local build on the server;
+   - existing services are left untouched until the user approves replacing anything.
+2. **Part 3, after part 2 is running: sync the public docs** for Task 15 acceptance (15/18) and the web performance slice:
    - README;
    - the plan ledger and Task 15 evidence row;
    - `docs/development.md`;
    - `docs/development-handoff.md`;
-   - the delivery spec status.
+   - the delivery spec status;
+   - the operator-runbook note on `AEGIS_WEB_WORKERS` and the 65 s window (review item m8) in `docs/operations/`.
 
    Keep them consistent with each other and with this file. Ask before pushing.
-5. **Before Task 16,** check the new machine's free disk; see the setup section. Ask the user for the disk or path to use and for explicit opt-in.
-6. Then run **Task 16** (real 1M physical scan, recovery and loaded browse at p95 ≤ 500 ms under scan load), **Task 17** (a 30-minute mobile session) and **Task 18** (upgrade from Phase 1 and the acceptance handoff), in order, from the [plan](docs/superpowers/plans/2026-09-14-phase-2a-indexed-browser.md). Read each task's full requirements; this file does not replace them.
+3. **Part 3, before Task 16:** check the machine's free disk; see the setup section. Ask the user for the disk or path to use and for explicit opt-in.
+4. **Part 3, then** run **Task 16** (real 1M physical scan, recovery and loaded browse at p95 ≤ 500 ms under scan load), **Task 17** (a 30-minute mobile session) and **Task 18** (upgrade from Phase 1 and the acceptance handoff), in order, from the [plan](docs/superpowers/plans/2026-09-14-phase-2a-indexed-browser.md). Read each task's full requirements; this file does not replace them.
 
-Do not restart Tasks 1–15 or redo the web performance slice. The old machine's ignored working notes (`.superpowers/`) do not carry over; everything needed is in this file, the plan's evidence sections and `docs/verification/`.
+Part 4, media viewing (authorized downloads and ranges, thumbnails, photo and video viewers), follows part 3 and needs its own design.
+
+**Revocation window, decided October 4.** The web slice pools web database logins for up to 60 s, plus a 5 s idle check, so an out-of-band `ALTER ROLE ... PASSWORD` or `NOLOGIN` on the web database role takes effect within about 65 s. The documented rotation, which recreates PostgreSQL and its dependents, is unchanged, and application sessions, deactivation, epochs and SQL grant changes still take effect immediately. Decision: keep the 60 s pool lifetime. Part 3 still adds the runbook note m8.
+
+Do not restart Tasks 1–15, the web performance slice or part 1. The old machine's ignored working notes (`.superpowers/`) did not carry over; everything needed is in this file, the plan's evidence sections and `docs/verification/`. On this host, the ignored `.superpowers/sdd/2026-10-04-podman-dev-environment/` directory holds part 1's ledger, evidence and deferred minor review items, and host-specific operational notes for part 2 are kept in ignored local notes.
 
 ## Web performance slice (`f6db82e`) summary
 
@@ -69,15 +71,15 @@ Do not restart Tasks 1–15 or redo the web performance slice. The old machine's
   - M4: e2e coverage of empty and lost-mount roots;
   - M6: the e2e duration is not recorded.
 - **Task 15:** no fail-closed test case for `AEGIS_DJANGO_SECRET_KEY_FILE` in `backend/aegis/settings/test.py`. N100 reference certification is still open; all results are provisional.
-- **Podman-only, deferred:**
-  - core-services NNP assertion;
-  - `test_rendered_mounts.py` refusals;
-  - `test_database_roles.py:414` host-network check;
-  - O11, client source IPs not preserved by rootless published ports.
+- **Podman:**
+  - O11, client source IPs not preserved by rootless published ports: part 2. The nine `test_tls_gateway.py` tests fail under Podman until then; they are not skipped.
+  - Fixed in part 1: the core-services NNP assertion (`4f6e575`) and the `test_rendered_mounts.py` refusals (`d247492`, `6c8486c`, `4a0b0b3`). `test_database_roles.py:414` passes under Podman unchanged.
+  - Recorded and left in place: the guard's per-launch `/tmp/aegis-mask-check-*` folders (529, about 35 MiB, after the final run), observer diagnostics `/tmp/aegis-mount-preflight-*`, and one synthetic `/tmp/aegis-verify-*` folder per `make verify` run from `backend/tests/unit/common/test_verify_targets.py:656`, which should use `tmp_path`.
+- **CI flake:** `phase2a.spec.ts:339` passed 50/50 locally in mobile Chromium, but the server stack was not limited to four CPUs, so CI-like contention was not reproduced. Keep watching CI.
 
 ## Setting up the new computer
 
-Development moves to a **new computer** after this handoff. Nothing from the old machine carries over except what is in git:
+The new computer is the Fedora 44 Server host, set up on October 4. It has no Docker Engine: it uses rootless Podman through the committed helper, so for this host follow the README's [Developing on Podman](README.md#developing-on-podman) subsection instead of installing Docker in step 2. Nothing from the old machine carried over except what is in git:
 
 - the ignored `.superpowers/` directory (working notes, reviews, toolchain, the Docker-in-container helper);
 - `.venv`;
@@ -104,7 +106,7 @@ This file and the tracked docs contain everything needed. Old-host details no lo
 5. **Check the new machine against Task 16.** Record its CPU, RAM and free disk. Task 16 needs at least 12 GiB for catalog and state, plus a 1M-file synthetic source tree, plus margin. The tree must be on a filesystem outside the checkout and user storage, and **not** on a tmpfs. Ask the user which disk or path to use, and get explicit opt-in.
 6. **The new machine is not the reference host.** Like the old one, it is not the calibrated N100 reference unless the user says it is, so label its benchmark results provisional.
 
-On Podman, set `AEGIS_CONTAINER_ENGINE=podman` and a fresh, identity-recorded private `AEGIS_PODMAN_SOCKET`; see the README's optional Podman section. Do not enable a persistent, rootful or TCP API.
+On Podman, use the helper (`python -m scripts.podman_dev tools`, `start`, `env`, `status`, `stop`) described in the README's [Developing on Podman](README.md#developing-on-podman) subsection. It sets `AEGIS_CONTAINER_ENGINE=podman` and a fresh, identity-recorded private `AEGIS_PODMAN_SOCKET`. Do not enable a persistent, rootful or TCP API.
 
 ## Working method and user rules
 
@@ -162,8 +164,9 @@ Phase 2A.1 completion still leaves the broader 2A search, events and downloads, 
 
 | Revision | Meaning |
 | --- | --- |
-| `805fce4` and the following commit | Handoff; pushed October 3. |
-| `f6db82e` | **Pushed October 3** at the user's request; CI not yet inspected. Web performance slice: multi-worker web, pooled web-role connections, cheaper status. Reviewed and approved. |
+| `b6139ef`–`5776d58` and the following documentation commit | **Part 1, Podman development environment; local, push pending the user's approval.** Spec and plan, helper (`8884a8b`–`d52895e`), helper fixes (`538b6b3`, `f7f69c4`), core-services NNP expectation (`4f6e575`), guard fixes (`d247492`, `6c8486c`, `4a0b0b3`), e2e fixes (`1df748a`, `7779fab`) and flake tooling (`5776d58`). |
+| `805fce4` and `6bfaa01` | Handoffs; pushed October 3. CI run 37123170741 for `6bfaa01`: attempt 1 failed e2e only, attempt 2 passed all four jobs. |
+| `f6db82e` | **Pushed October 3** at the user's request; covered by CI run 37123170741 on `6bfaa01`. Web performance slice: multi-worker web, pooled web-role connections, cheaper status. Reviewed and approved. |
 | `e8ea863` | **Task 15 accepted; pushed.** Million-entry authenticated catalog benchmark; CI run 36959823576, all four jobs passed. |
 | `0744cab` | Docs: Task 14 acceptance; pushed. |
 | `0682fba` | Admin login behind the gateway and stale-cursor recovery; pushed. |

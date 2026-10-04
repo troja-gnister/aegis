@@ -2,6 +2,8 @@
 
 Observed September 22–24, 2026, beginning from repository checkpoint `ab57e3037b9daed79aeb691eb486a4d2397ae4aa`, whose last accepted application change is `a82db75d9949170e1d22acfed0f08050f067edf2`. Reviewed engine/verification tooling is committed at `163c02563d95de8e4e3930ae68377e946feef3b8`; guarded duplicate-mask compatibility and focused mount regressions are committed at `71da40ed34bbe05990093afbf12925df40462ccf`. PostgreSQL, Caddy, and indexer tmpfs adaptations are corrected; the rootless client-source-address gap (O11) and complete application gates remain open. Docker Engine with Compose v2 is the supported, primary runtime; Podman is a secondary, optional runtime, and this report's remaining items are deferred, optional follow-ups, not blockers. This report records scoped successes and failed application-gate evidence, not full Podman acceptance. Phase 2A.1 remains **18 tasks: 12 complete, 6 remaining**; Task 13 has not started.
 
+**October 2026 update:** the final section, [Fedora Server development host](#fedora-server-development-host-october-2026), records the October 4 runs of all three canonical gates under rootless Podman on the new development host. O11 remains open. The sections before it are kept as historical evidence.
+
 ## Actual environment
 
 | Item | Observed value |
@@ -230,3 +232,114 @@ The isolated browser container was stopped and removed only after checking its r
 The first full deployment attempt retained **18 volumes and 23 test networks**, plus the unrelated default Podman network. Seven invalid-host TLS probes encountered declared resources omitted from their allowed transitions; two literal-dollar path probes omitted a declared database volume. Cleanup therefore refused. Later observation recorded their identities but is not proof of creation-time ownership or unchanged identity throughout the run. These resources remain untouched; corrected admission rules do not retroactively authorize cleanup.
 
 On September 23 resumption, the old temporary API process, directory and socket were absent. A new identity-recorded foreground Unix API served the probes but had stopped by September 24. Its exact stale socket/directory were removed only after confirming the recorded identities, complete contents, absent process and absent listener. The replacement foreground API used for subsequent prerequisite checks was stopped at the September 24 pause through its recorded session and exited 0. Its process and exact command were absent; the service had removed its socket. The recorded directory's identity, ownership, mode and emptiness were checked before its removal. The local owner record now says stopped; `.superpowers/toolchain/podman-api-stop-20260924.json` retains the cleanup evidence. Native container inventory was empty, and ports 18080/55432 were free. Future runs must check again and create new owned resources with new identity records. Never infer ownership from a reusable name or delete unknown contents to complete cleanup.
+
+## Fedora Server development host, October 2026
+
+On October 4, 2026, development moved to a shared Fedora 44 Server development host that runs native rootless Podman and no Docker Engine. Part 1 of the [Podman development environment design](../superpowers/specs/2026-10-04-podman-dev-environment-design.md) added a committed session helper and ran the three canonical gates under rootless Podman, in commits `8884a8b` through `5776d58`. Docker Engine with Compose v2 remains the primary, supported runtime, and Docker CI remains the acceptance authority. The changed deployment tests' Docker branches could not run on this host and need Docker CI. The host also runs other, pre-existing rootless containers; they were never test or cleanup targets.
+
+### Environment
+
+| Item | Observed value |
+| --- | --- |
+| CPU / memory | 28 logical CPUs; 62 GiB RAM |
+| Distribution / kernel | Fedora 44 Server; Linux 7.1.13-200.fc44.x86_64; SELinux enforcing |
+| Storage | Podman graphroot on xfs `/`; `/tmp` is a tmpfs |
+| Engine | Podman 5.8.7, rootless, cgroup v2 with systemd; crun 1.28; delegated controllers `cpu`, `memory`, `pids` (no `cpuset`) |
+| Networking | netavark 1.17.2, aardvark-dns 1.17.1, pasta (passt 0^20260728.gf8df3f1) |
+| Compose provider | Docker Compose 2.39.4 at `~/.local/libexec/aegis/docker-compose`, outside `PATH`, SHA-256 `7af95166a730b87e172d4fc9aefea8725d3c6c7327d59149267b452114ddb7d4`; no Docker Engine |
+| Locked tools | uv 0.12.8 (`~/.local/bin/uv`); Python 3.13.15 (uv-managed); Node.js 24.20.0 (`~/.local/opt/node-v24.20.0-linux-x64/`, on `PATH` only through the helper's `env`); Playwright 1.63.0 |
+| Browsers | Host Chromium with its sandbox enabled; WebKit in the helper's server container |
+| WebKit image | `localhost/aegis-dev-webkit:eb87b9f291e7d62b`, image ID `ced04362abbab3274c64dcf09b458f34a9133460c6549194dd2a43b0bd54ebf3`, built from `docker/dev-webkit.Dockerfile` |
+| Pinned bases | `mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27`; `docker.io/library/node:24.20.0-bookworm-slim@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e` (as in `deploy/images.lock`) |
+
+The tool checksums are pinned in `scripts/podman_dev/tools.lock.json`. This host is not the calibrated N100 reference.
+
+### Development helper
+
+`python -m scripts.podman_dev` has five commands: `tools` installs or verifies the pinned user-local tools, `start` runs the preflight and starts the session, `env` prints its environment, `status` re-verifies it and `stop` removes what it created and compares the Podman inventory. The README's [Developing on Podman](../../README.md#developing-on-podman) subsection is the procedure.
+
+- **Private API socket.** The `ss -xlp` listener on the private socket was the recorded API process, both in the first smoke run and in the final session. Rootless Podman therefore did not re-exec the service into an unrecorded child.
+- **WebKit container lock-down.** Measured: read-only root, all 11 default capabilities dropped, zero effective and bounding capabilities, no-new-privileges, non-root `pwuser`, 2 GiB memory, 2 CPUs, no bind mounts (only a size-limited `/tmp` tmpfs) and a loopback-only published port. The PID limit is 1024 (see `7779fab` below).
+- **Pasta reachability.** From inside the WebKit container, host loopback port 18080 (the e2e gateway) was reachable and host loopback port 18081 was refused. Before `f7f69c4`, a service bound to the host's own LAN address was reachable through Podman's default `--map-guest-addr 169.254.1.2`. With `--map-guest-addr none`, it was unreachable by every path tried: that address, the host's address, and non-DNS ports on Podman's DNS relay address `169.254.1.1`. General outbound access from the container was not changed or measured.
+
+### Gate results
+
+The final run used a fresh session started without CPU restrictions and ran the gates sequentially. Before each gate, ports 18080 and 55432 were free, and free space on `/` was checked against the gates' 40 GiB minimum.
+
+| Final run, October 4 | Exit | Result | Duration |
+| --- | --- | --- | --- |
+| `make verify` | 0 | Backend 1,892 passed; frontend 18 files, 229 tests passed. Locks, Ruff, mypy (241 sources), Django checks, migration drift and the production build passed. | 202 s |
+| `make verify-compose` | 2 | Compose validation and pinned image builds passed. Deployment 1,258 passed, 0 failed, 0 skipped, and 9 errors: exactly the O11 list below. | 25 min 13 s |
+| `make test-e2e` | 0 | 22/22: mobile Chromium 11/11, mobile WebKit 11/11. Synthetic sources verified unchanged; no project container, volume, network or work directory left. | 164 s |
+| `git diff --check` | 0 | Clean | — |
+
+Earlier runs on the same day, kept as history:
+
+| Gate run | Result | Duration |
+| --- | --- | --- |
+| `make verify` (first run, `f7f69c4`) | Exit 0. Backend 1,881 passed; frontend 17 files, 222 tests passed. | 210 s |
+| `make verify-compose` run 1 (`4f6e575`) | Exit 2. 1,250 passed, 3 failed, 9 errors (O11), 0 skipped. | 24 min 07 s |
+| `make verify-compose` run 2 (after `d247492` and `6c8486c`) | Exit 2. 1,253 passed, 0 failed, 9 errors (O11), 0 skipped. | 24 min 44 s |
+| `make test-e2e` run 1 | Exit 2 in the credential-diagnostic phase, before Playwright (fixed by `1df748a`). | 1 s |
+| `make test-e2e` runs 2–4 | Exit 2. 21/22; mobile WebKit `phase2a.spec.ts:391` failed (fixed by `7779fab`). | 168–177 s |
+| `make test-e2e` run 5 | Exit 0. 22/22: mobile Chromium 11/11, mobile WebKit 11/11. | 197 s |
+
+`tests/deployment/test_database_roles.py:414`, which uses `--network host`, passed under Podman unchanged, in the full gate and alone. Every e2e run that reached the stack ended with its synthetic sources verified unchanged and exact-identity cleanup complete.
+
+### Failures found and fixed
+
+| Commit | Found by | Failure | Cause | Fix |
+| --- | --- | --- | --- | --- |
+| `538b6b3` | Helper smoke run | `stop` reported a changed network and exited 3 | Podman regenerates `created` on every listing of the config-less default network | A network's identity is its ID and name |
+| `f7f69c4` | Helper smoke run | The WebKit container reached a service on the host's LAN address | Podman's default pasta `--map-guest-addr 169.254.1.2` | `--map-guest-addr none` |
+| `4f6e575` | Resource-free deployment run | `test_compose.py::test_core_services_are_unprivileged_and_postgres_is_private` | A Docker-only expectation; the Podman overlay adds the approved `unmask=/sys/devices/virtual/powercap` option | The exact per-engine security options |
+| `d247492` | `make verify-compose` run 1 | `test_rendered_mounts.py::test_compose_bind_sources_preserve_literal_dollars_for_preflight_and_runtime` (2 cases) | The Podman launch check used Compose's `$$`-escaped bind source as the original root path | Strict decoding of `$$` (a lone `$` is refused) |
+| `6c8486c` | `make verify-compose` run 1 | `test_rendered_mounts.py::test_generated_compose_survives_compose_config_and_has_worker_attest_commands` | Podman's compatibility API splits a comma in a bind source into mount options (`invalid mount option`) | On Podman, original roots containing a comma are refused at the mount preflight |
+| `4a0b0b3` | Review of `6c8486c` | A comma path could still reach Podman through the Compose launch gate | Same as above | The launch gate refuses comma bind sources before any container runs |
+| `1df748a` | `make test-e2e` run 1 | Credential diagnostic: "real browser execution" | The probe's `E2E_*` filter removed `E2E_WEBKIT_WS_ENDPOINT`, so WebKit was launched on the host, where it cannot run | The probe keeps only that variable |
+| `7779fab` | `make test-e2e` runs 2–4 | Mobile WebKit `phase2a.spec.ts:391` | The WebKit container reached its 256-task limit (8 refused creations) when the case opened a second browser context | `--pids-limit 1024`; measured peak 303 tasks, other cases 116–188 |
+| `5776d58` | Flake investigation (no failure) | The harness could not repeat one test, and the sanitized output omitted the failing line | Missing test-only tooling | Allowlisted Playwright arguments for local runs; `failed_line=<n>` |
+
+None of these fixes adds a skip or expected-failure marker, relaxes a security assertion, relabels or changes ownership of originals, or uses rootful or privileged execution. Docker semantics of shared files are unchanged.
+
+### O11 exception list
+
+These nine tests **fail under rootless Podman. They are not skipped and carry no skip or expected-failure marker.** They stay failing until O11 is fixed in part 2.
+
+All nine share one module-scoped TLS stack fixture, so a full gate shows either all nine as setup errors or none. The stack's readiness check returns HTTP 400 exactly when Caddy observes its own tls-hop address as the client: rootless published ports do not preserve the client address, Caddy forwards the address it sees, and the gateway's anti-spoofing check refuses a forwarded address equal to its peer. Across 30 Caddy containers, a read-only watcher measured all 14 that observed their own tls-hop address failing readiness and all 16 that did not passing. In 27 single-test reruns, 13 failed, each with a measured collision.
+
+| Test (`tests/deployment/test_tls_gateway.py::`) | Gate run 1 | Gate run 2 | Final run | Reruns 1 / 2 / 3 |
+| --- | --- | --- | --- | --- |
+| `test_tls_listener_alias_is_bound_only_to_tls_hop` | error | error | error | pass / fail / pass |
+| `test_production_admin_login_has_secure_csrf_and_session_flow` | error | error | error | pass / fail / fail |
+| `test_caddy_uses_distinct_actual_client_peer_rate_buckets` | error | error | error | fail / fail / pass |
+| `test_gateway_forwards_distinct_unspoofable_client_ips_to_auth_throttle` | error | error | error | fail / pass / fail |
+| `test_public_gateway_cannot_spoof_proxy_attestation` | error | error | error | fail / fail / pass |
+| `test_gateway_ip_drift_fails_closed_until_web_restarts` | error | error | error | pass / pass / pass |
+| `test_public_http_ignores_spoofed_forwarding_scheme` | error | error | error | pass / fail / pass |
+| `test_caddy_starts_unprivileged_and_output_omits_canaries` | error | error | error | fail / fail / pass |
+| `test_local_caddy_preserves_ca_and_certificate_across_recreation` | error | error | error | pass / pass / fail |
+
+Every failure is the HTTP 400 readiness refusal. The recreation test's third rerun failed after Caddy was recreated, on the same mechanism. `test_gateway_ip_drift_fails_closed_until_web_restarts` passed all three reruns by chance (the watcher confirmed no collision each time); it is listed because its full-gate failures are the shared fixture's.
+
+### Inventory comparison
+
+After the network-identity fix, every `stop` (the smoke rerun, two session restarts during the e2e and flake work, and the stops before and after the final run) exited 0 and printed `inventory: no pre-existing Podman object removed or changed`. The host's existing rootless containers kept their full IDs and names throughout; after the final run they were all still running, and their volumes and networks, including the default `podman` network, were unchanged. The gates' own images were left in place and never pruned: the pinned application builds, base pulls, the WebKit image and its build layers, and 17 dangling build images created on October 4.
+
+### Flake investigation
+
+Docker CI attempt 1 for `6bfaa01` failed `frontend/e2e/phase2a.spec.ts:339` in mobile Chromium only. Locally, that test passed **50 of 50** repetitions in mobile Chromium against one stack (harness 569 s, Playwright phase about 247 s). The test was not reproduced.
+
+This was **not** a CI-like four-vCPU reproduction attempt. `taskset -c 0-3` limited the browser, the Playwright runner and the API service to four CPUs, but the server stack's containers (four uvicorn workers, PostgreSQL, gateway, indexer, media and operations) ran on all 28 CPUs. crun 1.28 resets a container's CPU affinity, and this host delegates no rootless `cpuset` controller. The hypothesis of four web workers contending for four vCPUs remains untested, and CI continues to be watched. The test also passed in every full e2e run here that reached Playwright.
+
+### Leftovers recorded and left in place
+
+- The guard's per-launch `/tmp/aegis-mask-check-*` evidence folders, retained by design: 529 after the final run, about 35 MiB in total.
+- 83 observer diagnostic folders `/tmp/aegis-mount-preflight-*`, mostly from tests that refuse by design.
+- One synthetic `/tmp/aegis-verify-*` folder per `make verify` run (a fake container ID file and a random test password), from `backend/tests/unit/common/test_verify_targets.py:656`. The unit test fakes the engine, so this happens under Docker too.
+
+Names alone do not authorize deleting any of these.
+
+### Status
+
+On this host, `make verify` and `make test-e2e` pass under rootless Podman, and `make verify-compose` passes except the nine O11 tests above. **Full Podman compatibility is not claimed while O11 is open.** Docker remains the primary, supported runtime.
