@@ -675,6 +675,56 @@ def test_compose_bind_source_decode_refuses_unpaired_dollar(rendered: str) -> No
         launch_module()._decoded_compose_bind_source(rendered)
 
 
+@pytest.mark.parametrize(
+    ("rendered", "original"),
+    [
+        # Podman's API would split these at the comma into ",z" / ",U" mount options.
+        ("/roots/photos,z", None),
+        ("/roots/a$$b,U", None),
+        ("/roots/a$$b:with;punctuation", "/roots/a$b:with;punctuation"),
+    ],
+)
+def test_compose_launch_refuses_comma_bind_source_before_any_container(
+    mask_engine: tuple[Any, MaskEngine],
+    monkeypatch: pytest.MonkeyPatch,
+    rendered: str,
+    original: str | None,
+) -> None:
+    policy, fake = mask_engine
+    launch = launch_module()
+    base = fake.root / "compose.yaml"
+
+    def render(options: list[str], *args: Any) -> dict[str, Any]:
+        security = ["no-new-privileges:true"]
+        if str(base.with_name("compose.podman.yaml")) in options:
+            security.append(policy.MASK_OPTION)
+        bind = {"type": "bind", "source": rendered, "target": "/srv/aegis/roots/photos"}
+        return {"services": {"web": {"security_opt": security, "volumes": [bind]}}}
+
+    checked: list[tuple[Path, ...]] = []
+
+    def admit(*args: Any, originals: tuple[Path, ...], **kwargs: Any) -> tuple[str, ...]:
+        if original is None:
+            pytest.fail("a probe container would run before the comma refusal")
+        checked.append(originals)
+        return (policy.MASK_OPTION,)
+
+    monkeypatch.setattr(launch, "_render", render)
+    monkeypatch.setattr(launch, "_run", lambda *a, **k: pytest.fail("container command ran"))
+    monkeypatch.setattr(launch, "require_podman_mask_compatibility", admit)
+    command = ["podman", "--remote=false", "compose", "-f", str(base), "up"]
+    if original is None:
+        with pytest.raises(policy.PodmanMaskError, match=r"^Podman cannot bind-mount a source "
+                           r"whose path contains a comma$"):
+            launch.controlled_container_argv(command, canonical_base=base)
+        assert not checked
+    else:
+        result = launch.controlled_container_argv(command, canonical_base=base)
+        assert result[-1] == "up"
+        assert checked == [(Path(original),)]
+    assert not fake.commands and not fake.created
+
+
 def test_observer_gate_failure_precedes_original_bearing_compose(
     mask_engine: tuple[Any, MaskEngine],
     monkeypatch: pytest.MonkeyPatch,

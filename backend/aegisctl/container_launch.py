@@ -407,7 +407,14 @@ def _checked_compose_inputs(
             raise PodmanMaskError("Podman overlay changed service profiles")
         for mount in service.get("volumes", []):
             if mount.get("type") == "bind":
-                roots.append(Path(_decoded_compose_bind_source(mount["source"])))
+                source = _decoded_compose_bind_source(mount["source"])
+                # Podman's Docker-compatible API splits a bind source at commas into mount
+                # options (",z", ",U"); refuse before any probe or workload container runs.
+                if "," in source:
+                    raise PodmanMaskError(
+                        "Podman cannot bind-mount a source whose path contains a comma"
+                    )
+                roots.append(Path(source))
     return tuple(roots)
 
 
