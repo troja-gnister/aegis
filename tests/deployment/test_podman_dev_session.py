@@ -101,6 +101,37 @@ def test_preflight_refuses_unsafe_hosts(
     assert any(message in problem for problem in problems), problems
 
 
+@pytest.mark.parametrize(
+    "name", ["DOCKER_HOST", "DOCKER_CONTEXT", "CONTAINER_HOST", "CONTAINER_CONNECTION"],
+)
+def test_preflight_refuses_each_remote_engine_variable(
+    runtime: dict[str, str], name: str,
+) -> None:
+    problems = session.preflight_problems(
+        {**runtime, name: "elsewhere"}, euid=os.geteuid(), rootless=True, selinux_enforce="1\n",
+    )
+    assert problems == [f"remote engine variables are set: {name}"]
+
+
+XDG_PROBLEM = "XDG_RUNTIME_DIR must be an absolute private (0700) directory you own"
+
+
+def test_preflight_refuses_an_unset_runtime_directory() -> None:
+    problems = session.preflight_problems(
+        {}, euid=os.geteuid(), rootless=True, selinux_enforce="1\n",
+    )
+    assert problems == [XDG_PROBLEM]
+
+
+def test_preflight_refuses_a_runtime_directory_owned_by_someone_else(
+    runtime: dict[str, str],
+) -> None:
+    problems = session.preflight_problems(
+        runtime, euid=os.geteuid() + 1, rootless=True, selinux_enforce="1\n",
+    )
+    assert problems == [XDG_PROBLEM]
+
+
 def test_preflight_accepts_a_safe_host(runtime: dict[str, str]) -> None:
     assert session.preflight_problems(
         runtime, euid=os.geteuid(), rootless=True, selinux_enforce="1\n",
@@ -237,6 +268,18 @@ def test_stop_api_refuses_a_reused_pid(tmp_path: Path) -> None:
     assert Path(record.socket).exists()
 
 
+def test_stop_api_refuses_a_changed_command_line(tmp_path: Path) -> None:
+    record = api_record(tmp_path)
+    other_command = [*COMMAND[:-1], "unix:///y/podman.sock"]
+    write_proc_entry(tmp_path / "proc", 4242, start_time=111, command=other_command)
+    signals: list[tuple[int, int]] = []
+    with pytest.raises(SessionError, match="no longer matches"):
+        api.stop_api(record, proc=tmp_path / "proc",
+                     kill=lambda pid, number: signals.append((pid, number)))
+    assert signals == []
+    assert Path(record.socket).exists()
+
+
 def test_stop_api_terminates_then_removes_recorded_entries(tmp_path: Path) -> None:
     record = api_record(tmp_path)
     proc = tmp_path / "proc"
@@ -321,9 +364,51 @@ def test_start_refuses_when_state_exists_and_changes_nothing(
     allow_host(monkeypatch)
     state_of(runtime).mkdir(mode=0o700)
     (state_of(runtime) / RECORD_NAME).write_text("sentinel", encoding="utf-8")
-    with pytest.raises(SessionError, match="run stop first"):
+    with pytest.raises(SessionError, match="run stop first") as refused:
         lifecycle.start(runtime, home=tmp_path, run=ScriptedPodman([ROOTLESS]))
     assert (state_of(runtime) / RECORD_NAME).read_text(encoding="utf-8") == "sentinel"
+    assert "record unreadable" in str(refused.value)
+
+
+def test_preflight_reports_a_stale_directory_without_a_record(runtime: dict[str, str]) -> None:
+    state_of(runtime).mkdir(mode=0o700)
+    problems = session.preflight_problems(
+        runtime, euid=os.geteuid(), rootless=True, selinux_enforce="1\n",
+    )
+    assert len(problems) == 1
+    assert "no session record" in problems[0]
+    assert "run stop first" in problems[0]
+    assert list(state_of(runtime).iterdir()) == []
+
+
+def state_snapshot(state: Path) -> tuple[PathIdentity, int, dict[str, tuple[bytes, int, int]]]:
+    entries = {
+        entry.name: (entry.read_bytes(), entry.lstat().st_ino, entry.lstat().st_mtime_ns)
+        for entry in state.iterdir()
+    }
+    return PathIdentity.of(state), state.lstat().st_mode, entries
+
+
+@pytest.mark.parametrize("site", ["preflight", "mkdir"])
+def test_start_reports_the_identities_of_a_stale_session(
+    monkeypatch: pytest.MonkeyPatch, runtime: dict[str, str], tmp_path: Path, site: str,
+) -> None:
+    allow_host(monkeypatch)
+    if site == "mkdir":
+        # The state directory appeared after preflight had passed.
+        monkeypatch.setattr(lifecycle.session, "preflight_problems", lambda environ, **checks: [])
+    state = write_session(
+        runtime, api_record(tmp_path), WebkitRecord(CONTAINER, IMAGE, 41234, "a" * 32),
+    )
+    before = state_snapshot(state)
+    run = ScriptedPodman([ROOTLESS])
+    with pytest.raises(SessionError, match="run stop first") as refused:
+        lifecycle.start(runtime, home=tmp_path, run=run)
+    assert "pid=4242" in str(refused.value)
+    assert "start_time=111" in str(refused.value)
+    assert CONTAINER in str(refused.value)
+    assert state_snapshot(state) == before
+    run.assert_done()
 
 
 def test_start_keeps_a_record_when_the_api_launch_fails(

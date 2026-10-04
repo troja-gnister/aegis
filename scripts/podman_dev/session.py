@@ -7,7 +7,7 @@ import stat
 from collections.abc import Mapping
 from pathlib import Path
 
-from scripts.podman_dev.records import SessionError, SessionRecord
+from scripts.podman_dev.records import RECORD_NAME, SessionError, SessionRecord, load_record
 
 STATE_NAME = "aegis-podman-dev"
 BASELINE_NAME = "inventory-before.json"
@@ -20,6 +20,26 @@ def state_directory(environ: Mapping[str, str]) -> Path:
     if not runtime or not Path(runtime).is_absolute():
         raise SessionError("XDG_RUNTIME_DIR must be set to an absolute path")
     return Path(runtime) / STATE_NAME
+
+
+def stale_session_message(state: Path) -> str:
+    """Report a previous session with its recorded identities; read only, never replaced."""
+    try:
+        if not stat.S_ISREG((state / RECORD_NAME).lstat().st_mode):
+            raise ValueError("not a regular file")
+        record = load_record(state)
+    except FileNotFoundError:
+        details = "no session record"
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        details = f"record unreadable: {type(error).__name__}"
+    else:
+        recorded = []
+        if record.api is not None:
+            recorded.append(f"api pid={record.api.pid} start_time={record.api.start_time}")
+        if record.webkit is not None:
+            recorded.append(f"webkit container={record.webkit.container_id}")
+        details = "recorded " + ", ".join(recorded) if recorded else "no resources recorded"
+    return f"a previous session exists in {state} ({details}); run stop first"
 
 
 def preflight_problems(
@@ -48,8 +68,7 @@ def preflight_problems(
     ):
         problems.append("XDG_RUNTIME_DIR must be an absolute private (0700) directory you own")
     elif os.path.lexists(Path(runtime) / STATE_NAME):
-        problems.append(f"a previous session exists in {Path(runtime) / STATE_NAME}; "
-                        "run stop first")
+        problems.append(stale_session_message(Path(runtime) / STATE_NAME))
     return problems
 
 

@@ -61,7 +61,7 @@ def start(
     try:
         state.mkdir(mode=0o700)
     except FileExistsError as error:
-        raise SessionError(f"a previous session exists in {state}; run stop first") from error
+        raise SessionError(session.stale_session_message(state)) from error
     state.chmod(0o700)
     record = SessionRecord(state_identity=PathIdentity.of(state))
     save_record(state, record)
