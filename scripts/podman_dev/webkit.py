@@ -64,7 +64,7 @@ def create_arguments(image_id: str, port: int, token: str) -> list[str]:
         "create", "--name", f"aegis-dev-webkit-{port}",
         "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
         "--ipc", "private", "--shm-size", "256m",
-        "--memory", "2g", "--cpus", "2", "--pids-limit", "256",
+        "--memory", "2g", "--cpus", "2", "--pids-limit", "1024",
         "--tmpfs", "/tmp:rw,nosuid,nodev,size=512m,mode=1777", "--env", "HOME=/tmp",
         # Exactly two forwards: "none" stops Podman's default host.containers.internal
         # mapping, which would reach services on the host's global address.

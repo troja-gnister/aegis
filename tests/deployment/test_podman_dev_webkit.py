@@ -46,7 +46,7 @@ def test_create_arguments_lock_the_container_down() -> None:
     assert ("--network", "pasta:-T,18080,--map-guest-addr,none") in pairs
     assert ("--publish", "127.0.0.1:41234:41234") in pairs
     assert ("--memory", "2g") in pairs
-    assert ("--pids-limit", "256") in pairs
+    assert ("--pids-limit", "1024") in pairs
     assert "--read-only" in arguments
     for forbidden in ("--privileged", "--volume", "-v", "--mount", "--device", "host"):
         assert forbidden not in arguments
