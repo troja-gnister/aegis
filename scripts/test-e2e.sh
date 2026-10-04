@@ -23,6 +23,19 @@ trap 'early_status=$?; if (( early_status != 0 )); then annotate_phase "$phase";
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repository_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
 cd "$repository_dir"
+# Local investigation only: CI passes no arguments. Each argument must match this
+# allowlist exactly; anything else stops before any resource is created.
+playwright_args=()
+for argument in "$@"; do
+    if [[ "$argument" =~ ^--project=mobile-(chromium|webkit)$ ||
+          "$argument" =~ ^--repeat-each=[1-9][0-9]?$ ||
+          "$argument" =~ ^e2e/[a-z0-9]+\.spec\.ts:[1-9][0-9]*$ ]]; then
+        playwright_args+=("$argument")
+    else
+        printf '%s\n' "Unsupported e2e argument; allowed: --project=mobile-chromium|mobile-webkit, --repeat-each=1-99, e2e/<name>.spec.ts:<line>." >&2
+        exit 64
+    fi
+done
 case "${AEGIS_CONTAINER_ENGINE-docker}" in
     docker) container_engine=(docker) ;;
     podman) container_engine=(podman --remote=false) ;;
@@ -234,4 +247,4 @@ E2E_ALICE_PASSWORD="$E2E_ALICE_PASSWORD" E2E_BOB_PASSWORD="$E2E_BOB_PASSWORD" \
 export E2E_ALICE_PASSWORD E2E_BOB_PASSWORD E2E_ADMIN_PASSWORD
 export E2E_BASE_URL="$AEGIS_PUBLIC_URL"
 phase=playwright
-npm --prefix frontend run test:e2e
+npm --prefix frontend run test:e2e -- "${playwright_args[@]}"

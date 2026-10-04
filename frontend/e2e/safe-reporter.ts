@@ -24,7 +24,11 @@ export default class SafeReporter implements Reporter {
     const project = name === "mobile-chromium" || name === "mobile-webkit" ? name : "unknown";
     const status = testStatuses.has(result.status) ? result.status : "unknown";
     const line = Number.isInteger(test.location.line) ? test.location.line : 0;
-    console.log(`AEGIS_E2E project=${project} case=${this.cases.get(test.id) ?? 0} line=${line} status=${status}`);
+    const failedLine = result.errors
+      .map((error) => (error.location?.file === "withheld.spec.ts" ? error.location.line : 0))
+      .find((value) => Number.isSafeInteger(value) && value > 0);
+    const suffix = failedLine === undefined ? "" : ` failed_line=${failedLine}`;
+    console.log(`AEGIS_E2E project=${project} case=${this.cases.get(test.id) ?? 0} line=${line} status=${status}${suffix}`);
     // The safe fixture already removed free-text error details before capture.
     // Retain only explicit masked screenshots, never automatic error contexts.
     for (const attachment of result.attachments) {

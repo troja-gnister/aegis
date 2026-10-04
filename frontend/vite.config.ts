@@ -6,6 +6,7 @@ export default defineConfig({
   test: {
     include: [
       "src/**/*.test.{ts,tsx}",
+      "e2e/safe-location.unit.ts",
       "e2e/safe-reporter.unit.ts",
       "e2e/webkit-endpoint.unit.ts",
     ],

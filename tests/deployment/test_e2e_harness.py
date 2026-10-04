@@ -677,3 +677,23 @@ def test_e2e_public_refusals_are_exactly_the_constant_raised_messages() -> None:
                 raised[node.exc.func.id].add(argument.value)
     public = SUPPORT["_PUBLIC_REFUSALS"]
     assert {kind.__name__: set(messages) for kind, messages in public.items()} == raised
+
+
+@pytest.mark.parametrize("argument", ["--headed", "--repeat-each=100", "--grep=x", "../x.ts:1"])
+def test_e2e_refuses_unlisted_playwright_arguments(argument: str) -> None:
+    repository = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        ["bash", str(repository / "scripts/test-e2e.sh"), argument],
+        capture_output=True, text=True, timeout=30, env={"PATH": os.environ["PATH"]},
+    )
+    assert result.returncode == 64
+    assert "Unsupported e2e argument" in result.stderr
+
+
+def test_e2e_forwards_only_validated_playwright_arguments() -> None:
+    script = (Path(__file__).resolve().parents[2] / "scripts/test-e2e.sh").read_text(
+        encoding="utf-8",
+    )
+    forward = 'npm --prefix frontend run test:e2e -- "${playwright_args[@]}"'
+    assert script.rstrip().endswith(forward)
+    assert script.index("playwright_args=()") < script.index("container_engine=(")
