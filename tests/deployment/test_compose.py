@@ -337,7 +337,7 @@ def test_core_services_are_unprivileged_and_postgres_is_private() -> None:
     for name in ("gateway", "web", "operations", "indexer", "media"):
         assert services[name]["read_only"] is True
         assert services[name]["cap_drop"] == ["ALL"]
-        assert services[name]["security_opt"] == ["no-new-privileges:true"]
+        assert services[name]["security_opt"] == expected_security_options()
 
 
 def test_web_uses_bounded_log_config_from_process_start() -> None:
