@@ -232,10 +232,11 @@ A committed helper prepares a rootless Podman development session; Docker users 
 The session is a private foreground `podman system service` socket under `$XDG_RUNTIME_DIR` (never TCP, never the systemd socket unit) plus a locally built Playwright WebKit server container from `docker/dev-webkit.Dockerfile`, because Playwright's WebKit build needs Ubuntu libraries. `status` reports both.
 
 - `status` prints its report to stdout and exits 1 when the session is unhealthy; other refusals print nothing to stdout.
+- `stop` exits 3 when a pre-existing Podman object disappeared or changed. It finishes its own cleanup first and prints each such object.
 - Apart from DNS, which is relayed to the host resolver, the WebKit server container reaches the host only through the e2e gateway forward (host loopback port 18080); the host reaches the container through its own published loopback port. General outbound access is not restricted.
-- After a host reboot without `stop`, an exited `aegis-dev-webkit-<port>` container may remain. The helper never deletes by name; remove it yourself with `podman rm <name>`.
+- After a host reboot without `stop`, an exited `aegis-dev-webkit-<port>` container may remain. The helper never deletes by name; remove it yourself with `podman rm <name>` **before the next `start`**. Otherwise that `start` records it in the new baseline, and removing it during the session makes `stop` report it as disappeared and exit 3.
 
-**When Podman updates:** the guarded launcher accepts exactly Podman 5.8.7, crun 1.28 and Docker Compose 2.39.4. After a host update it refuses with a message that names the component: `unsupported Podman version`, `unsupported OCI runtime` (crun) or `unsupported Docker Compose provider`. Do not pin or downgrade the host to get past it: re-verify the new version (the focused mask checks, then the full gates) and extend the guard in a reviewed change.
+**When Podman updates:** the guarded launcher accepts exactly Podman 5.8.7, crun 1.28 and Docker Compose 2.39.4. After a host update it refuses with `Podman mask compatibility refused; diagnostics retained at <folder>`. That message does not name the component, and the retained evidence records only the error type. The failed check is in the chained cause, which pytest tracebacks show (for example in `make verify-compose`): `unsupported Podman version`, `unsupported OCI runtime` (crun) or `unsupported Docker Compose provider`. `make test-e2e` stops at its mount preflight and prints only the top-level message. Do not pin or downgrade the host to get past it: re-verify the new version (the focused mask checks, then the full gates) and extend the guard in a reviewed change.
 
 ## Development and documentation
 

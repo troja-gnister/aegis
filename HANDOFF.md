@@ -2,7 +2,7 @@
 
 Resume on **`main`** on the **Fedora 44 Server development host**, which runs native rootless Podman and no Docker Engine; see [Setting up the new computer](#setting-up-the-new-computer). Docker is the supported, primary runtime. Podman is a secondary, optional runtime; its remaining gap, O11, belongs to part 2. See [the Linux/Podman report](docs/verification/linux-podman-prerequisite.md).
 
-**Part 1 (Podman development environment) is complete:** commits `b6139ef` (spec) through `5776d58`, plus the following documentation commit, made locally on October 4. Final fresh-shell gates under rootless Podman: `make verify` exit 0 (backend 1,892 and frontend 229 tests passed; 202 s); `make verify-compose` 1,258 passed, 0 failed, 0 skipped, plus exactly the nine O11 errors (25 min 13 s); `make test-e2e` 22/22 (164 s); `git diff --check` clean; `stop` exited 0 with no pre-existing Podman object removed or changed. Full Podman compatibility is not claimed while O11 is open. Pushing needs the user's approval. After the push, Docker CI must pass all four jobs; it also has to confirm the Docker branches of the changed deployment tests, because this host has no Docker engine. Details: the [Fedora Server verification section](docs/verification/linux-podman-prerequisite.md#fedora-server-development-host-october-2026) and the [part 1 design](docs/superpowers/specs/2026-10-04-podman-dev-environment-design.md).
+**Part 1 (Podman development environment) is complete:** commits `b6139ef` (spec) through `5776d58`, then part 1's documentation commits starting with `b027e0b`, all made on this host. Final fresh-shell gates under rootless Podman (October 4): `make verify` exit 0 (backend 1,892 and frontend 229 tests passed; 202 s); `make verify-compose` 1,258 passed, 0 failed, 0 skipped, plus exactly the nine O11 errors (25 min 13 s); `make test-e2e` 22/22 (164 s); `git diff --check` clean; `stop` exited 0 with no pre-existing Podman object removed or changed. Full Podman compatibility is not claimed while O11 is open. `git status --short --branch` shows whether these commits are on `origin/main`; pushing them needs the user's approval. Once they are pushed, Docker CI for the pushed head must pass all four jobs; it also has to confirm the Docker branches of the changed deployment tests, because this host has no Docker engine. Details: the [Fedora Server verification section](docs/verification/linux-podman-prerequisite.md#fedora-server-development-host-october-2026) and the [part 1 design](docs/superpowers/specs/2026-10-04-podman-dev-environment-design.md).
 
 **Phase 2A.1 has 18 tasks: 15 accepted, 3 remaining (16, 17, 18).** Task 15, the streamed 1M-entry authenticated catalog benchmark, was accepted at `e8ea863`; [CI run 36959823576](https://github.com/troja-gnister/aegis/actions/runs/36959823576) passed all four jobs.
 
@@ -22,7 +22,14 @@ Before new work, run `git status --short --branch` and `git fetch`. If part 1 is
    - the user's chosen test root as the first root;
    - pull-and-run published images, with no checkout or local build on the server;
    - existing services are left untouched until the user approves replacing anything.
-2. **Part 3, after part 2 is running: sync the public docs** for Task 15 acceptance (15/18) and the web performance slice:
+2. **Follow-ups from the part 1 final review.** All are minor and none blocks the push. Do (c) before part 2 configures a real root on Podman; agree the order of the rest with the user. Part 1's ledger holds the details.
+   - (a) Privacy: write the credential-diagnostic probe under an `/e2e/` path so it exercises the new stack branch, anchor `SPEC_FRAME` to `at` frames, and guard `typeof error.stack` (`frontend/e2e/verify-diagnostics.mjs`, `safe-location.ts`, `safe-test.ts`).
+   - (b) Helper: when the recorded API PID was reused (a different start time proves the API process is gone), `stop` should still never signal it but should continue the identity-checked socket and directory removal; today it refuses there.
+   - (c) Before part 2 configures real roots on Podman: refuse commas in extra `-v`/`--mount` roots of `podman compose run` and in `aegisctl mounts validate`.
+   - (d) Ticket to open: a `$` in the checkout path defeats the "runtime cannot mount the repository" checks (`scripts/e2e_support.py:703`, `scripts/benchmarks/resources.py:249`); pre-existing, both engines.
+   - (e) Helper hardening backlog (tar-tree member path validation, clean errors instead of tracebacks, the WebKit token in journald and the container command line), plus a retention policy for the guard's `/tmp` folders and dangling build images.
+   - (f) The pre-existing high-severity npm advisory in the frontend lockfile.
+3. **Part 3, after part 2 is running: sync the public docs** for Task 15 acceptance (15/18) and the web performance slice:
    - README;
    - the plan ledger and Task 15 evidence row;
    - `docs/development.md`;
@@ -31,8 +38,8 @@ Before new work, run `git status --short --branch` and `git fetch`. If part 1 is
    - the operator-runbook note on `AEGIS_WEB_WORKERS` and the 65 s window (review item m8) in `docs/operations/`.
 
    Keep them consistent with each other and with this file. Ask before pushing.
-3. **Part 3, before Task 16:** check the machine's free disk; see the setup section. Ask the user for the disk or path to use and for explicit opt-in.
-4. **Part 3, then** run **Task 16** (real 1M physical scan, recovery and loaded browse at p95 ≤ 500 ms under scan load), **Task 17** (a 30-minute mobile session) and **Task 18** (upgrade from Phase 1 and the acceptance handoff), in order, from the [plan](docs/superpowers/plans/2026-09-14-phase-2a-indexed-browser.md). Read each task's full requirements; this file does not replace them.
+4. **Part 3, before Task 16:** check the machine's free disk; see the setup section. Ask the user for the disk or path to use and for explicit opt-in.
+5. **Part 3, then** run **Task 16** (real 1M physical scan, recovery and loaded browse at p95 ≤ 500 ms under scan load), **Task 17** (a 30-minute mobile session) and **Task 18** (upgrade from Phase 1 and the acceptance handoff), in order, from the [plan](docs/superpowers/plans/2026-09-14-phase-2a-indexed-browser.md). Read each task's full requirements; this file does not replace them.
 
 Part 4, media viewing (authorized downloads and ranges, thumbnails, photo and video viewers), follows part 3 and needs its own design.
 
@@ -79,7 +86,7 @@ Do not restart Tasks 1–15, the web performance slice or part 1. The old machin
 
 ## Setting up the new computer
 
-The new computer is the Fedora 44 Server host, set up on October 4. It has no Docker Engine: it uses rootless Podman through the committed helper, so for this host follow the README's [Developing on Podman](README.md#developing-on-podman) subsection instead of installing Docker in step 2. Nothing from the old machine carried over except what is in git:
+The new computer is the Fedora 44 Server host, set up on October 4. It has no Docker Engine: it uses rootless Podman through the committed helper, so for this host follow the README's [Developing on Podman](README.md#developing-on-podman) subsection instead of installing Docker in step 2 and both Playwright browsers in step 3: on this host Playwright installs only Chromium, and WebKit runs in the helper's container. Nothing from the old machine carried over except what is in git:
 
 - the ignored `.superpowers/` directory (working notes, reviews, toolchain, the Docker-in-container helper);
 - `.venv`;
@@ -87,7 +94,7 @@ The new computer is the Fedora 44 Server host, set up on October 4. It has no Do
 
 This file and the tracked docs contain everything needed. Old-host details no longer apply: its disk limits, its retained Podman volumes and networks, and its `/tmp` scratch directories.
 
-1. **Get the code.** Clone `https://github.com/troja-gnister/aegis`, or `git pull` an existing clone, and check out `main`. Confirm `git log -1` is the newest handoff commit (after `805fce4`).
+1. **Get the code.** Clone `https://github.com/troja-gnister/aegis`, or `git pull` an existing clone, and check out `main`. Confirm `git log -1` is the newest handoff commit, at or after part 1's documentation commit `b027e0b`.
 2. **Install the prerequisites** from [`docs/development.md#prerequisites`](docs/development.md#prerequisites):
    - Python 3.13 (`.python-version`) and uv 0.12.8;
    - Node.js 24 (`frontend/package.json` engines `>=24 <25`) and npm;
@@ -95,7 +102,7 @@ This file and the tracked docs contain everything needed. Old-host details no lo
    - **Docker Engine with Compose v2.** It is the primary runtime. Prefer a native Docker Engine; the old host's Docker-in-Podman helper was a workaround and is not tracked.
 3. **Set up the project:**
    - Run `uv sync --locked --group dev`.
-   - In `frontend/`, run `npm ci` and then `npm exec -- playwright install chromium webkit`. Playwright is 1.63.0, from the lockfile.
+   - In `frontend/`, run `npm ci` and then `npm exec -- playwright install chromium webkit` (on this Podman host, `chromium` only; see above). Playwright is 1.63.0, from the lockfile.
    - Use the tracked lockfiles and do not upgrade dependencies incidentally.
    - Set `VITEST_MAX_WORKERS=1` for frontend gates on small machines.
 4. **Run the gates sequentially:** `make verify`, `make verify-compose`, `make test-e2e`, `git diff --check`. Fast checks without an engine:
@@ -106,7 +113,7 @@ This file and the tracked docs contain everything needed. Old-host details no lo
 5. **Check the new machine against Task 16.** Record its CPU, RAM and free disk. Task 16 needs at least 12 GiB for catalog and state, plus a 1M-file synthetic source tree, plus margin. The tree must be on a filesystem outside the checkout and user storage, and **not** on a tmpfs. Ask the user which disk or path to use, and get explicit opt-in.
 6. **The new machine is not the reference host.** Like the old one, it is not the calibrated N100 reference unless the user says it is, so label its benchmark results provisional.
 
-On Podman, use the helper (`python -m scripts.podman_dev tools`, `start`, `env`, `status`, `stop`) described in the README's [Developing on Podman](README.md#developing-on-podman) subsection. It sets `AEGIS_CONTAINER_ENGINE=podman` and a fresh, identity-recorded private `AEGIS_PODMAN_SOCKET`. Do not enable a persistent, rootful or TCP API.
+On Podman, use the helper (`python3 -m scripts.podman_dev tools`, then `uv run --locked python -m scripts.podman_dev start`, `env`, `status` and `stop`) described in the README's [Developing on Podman](README.md#developing-on-podman) subsection. It sets `AEGIS_CONTAINER_ENGINE=podman` and a fresh, identity-recorded private `AEGIS_PODMAN_SOCKET`. Do not enable a persistent, rootful or TCP API.
 
 ## Working method and user rules
 
@@ -164,7 +171,7 @@ Phase 2A.1 completion still leaves the broader 2A search, events and downloads, 
 
 | Revision | Meaning |
 | --- | --- |
-| `b6139ef`–`5776d58` and the following documentation commit | **Part 1, Podman development environment; local, push pending the user's approval.** Spec and plan, helper (`8884a8b`–`d52895e`), helper fixes (`538b6b3`, `f7f69c4`), core-services NNP expectation (`4f6e575`), guard fixes (`d247492`, `6c8486c`, `4a0b0b3`), e2e fixes (`1df748a`, `7779fab`) and flake tooling (`5776d58`). |
+| `b6139ef`–`5776d58`, then part 1's documentation commits from `b027e0b` | **Part 1, Podman development environment.** Pushed only with the user's approval; after the push, check that Docker CI passed all four jobs. Spec and plan, helper (`8884a8b`–`d52895e`), helper fixes (`538b6b3`, `f7f69c4`), core-services NNP expectation (`4f6e575`), guard fixes (`d247492`, `6c8486c`, `4a0b0b3`), e2e fixes (`1df748a`, `7779fab`) and flake tooling (`5776d58`). |
 | `805fce4` and `6bfaa01` | Handoffs; pushed October 3. CI run 37123170741 for `6bfaa01`: attempt 1 failed e2e only, attempt 2 passed all four jobs. |
 | `f6db82e` | **Pushed October 3** at the user's request; covered by CI run 37123170741 on `6bfaa01`. Web performance slice: multi-worker web, pooled web-role connections, cheaper status. Reviewed and approved. |
 | `e8ea863` | **Task 15 accepted; pushed.** Million-entry authenticated catalog benchmark; CI run 36959823576, all four jobs passed. |
