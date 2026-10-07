@@ -1,8 +1,8 @@
-# Aegis continuation handoff — October 4, 2026
+# Aegis continuation handoff — October 7, 2026
 
 Resume on **`main`** on the **Fedora 44 Server development host**, which runs native rootless Podman and no Docker Engine; see [Setting up the new computer](#setting-up-the-new-computer). Docker is the supported, primary runtime. Podman is a secondary, optional runtime; its remaining gap, O11, belongs to part 2. See [the Linux/Podman report](docs/verification/linux-podman-prerequisite.md).
 
-**Part 1 (Podman development environment) is complete:** commits `db233c2` (spec) through `0840049`, then part 1's documentation commits starting with `ee41c2d`, all made on this host. Final fresh-shell gates under rootless Podman (October 4): `make verify` exit 0 (backend 1,892 and frontend 229 tests passed; 202 s); `make verify-compose` 1,258 passed, 0 failed, 0 skipped, plus exactly the nine O11 errors (25 min 13 s); `make test-e2e` 22/22 (164 s); `git diff --check` clean; `stop` exited 0 with no pre-existing Podman object removed or changed. Full Podman compatibility is not claimed while O11 is open. `git status --short --branch` shows whether these commits are on `origin/main`; pushing them needs the user's approval. Once they are pushed, Docker CI for the pushed head must pass all four jobs; it also has to confirm the Docker branches of the changed deployment tests, because this host has no Docker engine. Details: the [Fedora Server verification section](docs/verification/linux-podman-prerequisite.md#fedora-server-development-host-october-2026) and the [part 1 design](docs/superpowers/specs/2026-10-04-podman-dev-environment-design.md).
+**Part 1 (Podman development environment) is complete:** commits `db233c2` (spec) through `0840049`, then part 1's documentation commits starting with `ee41c2d`, all made on this host. Final fresh-shell gates under rootless Podman (October 4): `make verify` exit 0 (backend 1,892 and frontend 229 tests passed; 202 s); `make verify-compose` 1,258 passed, 0 failed, 0 skipped, plus exactly the nine O11 errors (25 min 13 s); `make test-e2e` 22/22 (164 s); `git diff --check` clean; `stop` exited 0 with no pre-existing Podman object removed or changed. Full Podman compatibility is not claimed while O11 is open. Part 1 was **pushed to `origin/main` on October 7** (`6bfaa01..dc4a880`, with the user's approval). Docker CI [run 37615719291](https://github.com/troja-gnister/aegis/actions/runs/37615719291): attempt 1 failed e2e only (`phase2a.spec.ts:391`, `failed_line=421`, mobile Chromium; the masked screenshot shows sign-out still at "Signing out…"), and attempt 2 passed all four jobs, which also confirms the Docker branches of the changed deployment tests. Details: the [Fedora Server verification section](docs/verification/linux-podman-prerequisite.md#fedora-server-development-host-october-2026) and the [part 1 design](docs/superpowers/specs/2026-10-04-podman-dev-environment-design.md).
 
 **Phase 2A.1 has 18 tasks: 15 accepted, 3 remaining (16, 17, 18).** Task 15, the streamed 1M-entry authenticated catalog benchmark, was accepted at `e8ea863`; [CI run 36959823576](https://github.com/troja-gnister/aegis/actions/runs/36959823576) passed all four jobs.
 
@@ -14,7 +14,12 @@ The public docs still say "14 accepted, Task 15 next" and **are not yet synced**
 
 Before new work, run `git status --short --branch` and `git fetch`. If part 1 is still unpushed, ask the user before pushing. Confirm that `main` matches `origin/main` and that Docker CI for the pushed head passed all four jobs: backend, frontend, deployment and e2e. If a job fails, diagnose it first (`gh` is installed on this host). Never reset, force-push, auto-stash or discard work.
 
-1. **Brainstorm part 2: persistent private-network deployment on this host.** It gets its own specification, plan and review. Agreed requirements:
+1. **Investigate the intermittent CI e2e Chromium timing failures (decided by the user on October 7: next, before part 2).** Both appeared only in Docker CI's mobile Chromium project after the web performance slice `f6db82e` (four uvicorn workers and pooled web database connections), and both passed on rerun and in every local Podman run:
+   - run 37123170741 attempt 1: `phase2a.spec.ts:339` (stale-cursor restart);
+   - run 37615719291 attempt 1: `phase2a.spec.ts:391`, line 421 — after sign-out with released late requests, the page stayed at "Signing out…" with Sign in disabled past the assertion timeout. Privacy held (access stayed closed); liveness did not.
+
+   Part 1's 50-run repeat of `:339` could not CPU-constrain the stack (crun resets affinity; no rootless `cpuset`), so the hypothesis — four web workers contending with the browser, PostgreSQL and the indexer on CI's four vCPUs — is untested. This host does delegate the cgroup `cpu` controller, so a test-only per-service CPU quota on the e2e stack should reproduce CI-like contention. Compare `AEGIS_WEB_WORKERS=4` with `1`, use the `failed_line` diagnostic and focused repeats (`bash scripts/test-e2e.sh --project=mobile-chromium --repeat-each=N e2e/phase2a.spec.ts:<line>`), and find the root cause before changing the app or the tests. It gets its own short design first.
+2. **Brainstorm part 2: persistent private-network deployment on this host.** It gets its own specification, plan and review. Agreed requirements:
    - free ports, because default ports may already be taken on a shared host, and a firewall rule that admits only private-network sources;
    - local-CA HTTPS;
    - fixing O11, so real client addresses reach Caddy and the gateway;
@@ -22,14 +27,14 @@ Before new work, run `git status --short --branch` and `git fetch`. If part 1 is
    - the user's chosen test root as the first root;
    - pull-and-run published images, with no checkout or local build on the server;
    - existing services are left untouched until the user approves replacing anything.
-2. **Follow-ups from the part 1 final review.** All are minor and none blocks the push. Do (c) before part 2 configures a real root on Podman; agree the order of the rest with the user. Part 1's ledger holds the details.
+3. **Follow-ups from the part 1 final review.** All are minor and none blocks the push. Do (c) before part 2 configures a real root on Podman; agree the order of the rest with the user. Part 1's ledger, kept in the ignored local notes on this host, holds the details.
    - (a) Privacy: write the credential-diagnostic probe under an `/e2e/` path so it exercises the new stack branch, anchor `SPEC_FRAME` to `at` frames, and guard `typeof error.stack` (`frontend/e2e/verify-diagnostics.mjs`, `safe-location.ts`, `safe-test.ts`).
    - (b) Helper: when the recorded API PID was reused (a different start time proves the API process is gone), `stop` should still never signal it but should continue the identity-checked socket and directory removal; today it refuses there.
    - (c) Before part 2 configures real roots on Podman: refuse commas in extra `-v`/`--mount` roots of `podman compose run` and in `aegisctl mounts validate`.
    - (d) Ticket to open: a `$` in the checkout path defeats the "runtime cannot mount the repository" checks (`scripts/e2e_support.py:703`, `scripts/benchmarks/resources.py:249`); pre-existing, both engines.
    - (e) Helper hardening backlog (tar-tree member path validation, clean errors instead of tracebacks, the WebKit token in journald and the container command line), plus a retention policy for the guard's `/tmp` folders and dangling build images.
    - (f) The pre-existing high-severity npm advisory in the frontend lockfile.
-3. **Part 3, after part 2 is running: sync the public docs** for Task 15 acceptance (15/18) and the web performance slice:
+4. **Part 3, after part 2 is running: sync the public docs** for Task 15 acceptance (15/18) and the web performance slice:
    - README;
    - the plan ledger and Task 15 evidence row;
    - `docs/development.md`;
@@ -38,8 +43,8 @@ Before new work, run `git status --short --branch` and `git fetch`. If part 1 is
    - the operator-runbook note on `AEGIS_WEB_WORKERS` and the 65 s window (review item m8) in `docs/operations/`.
 
    Keep them consistent with each other and with this file. Ask before pushing.
-4. **Part 3, before Task 16:** check the machine's free disk; see the setup section. Ask the user for the disk or path to use and for explicit opt-in.
-5. **Part 3, then** run **Task 16** (real 1M physical scan, recovery and loaded browse at p95 ≤ 500 ms under scan load), **Task 17** (a 30-minute mobile session) and **Task 18** (upgrade from Phase 1 and the acceptance handoff), in order, from the [plan](docs/superpowers/plans/2026-09-14-phase-2a-indexed-browser.md). Read each task's full requirements; this file does not replace them.
+5. **Part 3, before Task 16:** check the machine's free disk; see the setup section. Ask the user for the disk or path to use and for explicit opt-in.
+6. **Part 3, then** run **Task 16** (real 1M physical scan, recovery and loaded browse at p95 ≤ 500 ms under scan load), **Task 17** (a 30-minute mobile session) and **Task 18** (upgrade from Phase 1 and the acceptance handoff), in order, from the [plan](docs/superpowers/plans/2026-09-14-phase-2a-indexed-browser.md). Read each task's full requirements; this file does not replace them.
 
 Part 4, media viewing (authorized downloads and ranges, thumbnails, photo and video viewers), follows part 3 and needs its own design.
 
