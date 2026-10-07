@@ -239,6 +239,7 @@ def test_e2e_forces_local_podman_for_compose_boundary(tmp_path: Path, stop_at: s
     ("record-generated", "record-generated"),
     ("prepare-runtime", "prepare-runtime"),
     ("config --format json", "check-compose"),
+    ("e2e_support.py check-compose", "check-compose"),
     ("up --build --wait", "up"),
     ("resources-record", "resources-record"),
     ("bootstrap_admin", "bootstrap-admin"),

@@ -41,6 +41,7 @@ from aegisctl.container_resources import (
     capture_project_inventory,
     cleanup_project_inventory,
     require_empty_project,
+    restart_policy_disabled,
 )
 from aegisctl.mounts import local_identity
 
@@ -205,7 +206,7 @@ def _bytes(value: object) -> int:
 def check_compose_config(config: Mapping[str, Any], *, project: str,
                          profile: Mapping[str, Any],
                          cpu: tuple[str, object] = ("cpuset", CPUSET)) -> None:
-    """Refuse operator volumes, public ports, writable originals or missing limits."""
+    """Refuse operator volumes, public ports, writable originals, restarts or missing limits."""
     _require_project(project)
     if config.get("name") != project:
         raise BenchmarkResourceError("benchmark Compose project changed")
@@ -225,6 +226,9 @@ def check_compose_config(config: Mapping[str, Any], *, project: str,
     for role, service in services.items():
         if role not in SERVICES:
             raise BenchmarkResourceError("benchmark Compose has an unexpected service")
+        if not restart_policy_disabled(service):
+            # A host boot or engine restart must never start a benchmark container.
+            raise BenchmarkResourceError("benchmark services must not have a restart policy")
         if role in limits:
             expected = limits[role] * 1024 * 1024
             if "mem_limit" not in service or _bytes(service["mem_limit"]) != expected:

@@ -33,6 +33,7 @@ from aegisctl.container_resources import (
     capture_project_inventory,
     cleanup_project_inventory,
     require_project_inventory,
+    restart_policy_disabled,
 )
 from aegisctl.mounts import local_identity
 
@@ -682,6 +683,9 @@ def check_compose(config: dict[str, Any]) -> None:
         if volume.get("external") or not volume["name"].startswith(f"{PROJECT}_"):
             raise ValueError("E2E volumes must be disposable and project-scoped")
     services = config["services"]
+    # Tests run only when invoked: a host boot or engine restart never starts one.
+    if not all(restart_policy_disabled(service) for service in services.values()):
+        raise ValueError("E2E services must not have a restart policy")
     if not config["networks"]["backend"]["internal"]:
         raise ValueError("E2E backend requires an internal network")
     for role in ("web", "migrate", "operations", "indexer", "media", "gateway"):
@@ -921,6 +925,7 @@ _PUBLIC_REFUSALS: dict[type[BaseException], frozenset[str]] = {
         "E2E backend requires an internal network",
         "E2E ports must bind loopback",
         "E2E runtime isolation is missing",
+        "E2E services must not have a restart policy",
         "E2E volumes must be disposable and project-scoped",
         "every original mount must be read-only",
         "invalid E2E temporary directory",

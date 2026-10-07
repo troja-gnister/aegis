@@ -1,5 +1,9 @@
+# Test stacks run only when invoked: every service has restart "no", so neither a
+# host boot nor an engine restart starts a test container. The E2E and benchmark
+# gates refuse any rendered restart policy before a stack comes up.
 services:
   postgres:
+    restart: "no"
     labels:
       aegis.test.resource-token: "${AEGIS_TEST_RESOURCE_TOKEN:?AEGIS_TEST_RESOURCE_TOKEN is required}"
     environment:
@@ -7,6 +11,7 @@ services:
     ports:
       - "127.0.0.1:${AEGIS_TEST_DB_PORT:-55432}:5432"
   web:
+    restart: "no"
     labels:
       aegis.test.resource-token: "${AEGIS_TEST_RESOURCE_TOKEN:?AEGIS_TEST_RESOURCE_TOKEN is required}"
     environment:
@@ -23,20 +28,30 @@ services:
       - source: e2e-admin-password
         target: e2e_admin_password
   migrate:
+    restart: "no"
     labels:
       aegis.test.resource-token: "${AEGIS_TEST_RESOURCE_TOKEN:?AEGIS_TEST_RESOURCE_TOKEN is required}"
   operations:
+    restart: "no"
     labels:
       aegis.test.resource-token: "${AEGIS_TEST_RESOURCE_TOKEN:?AEGIS_TEST_RESOURCE_TOKEN is required}"
   indexer:
+    restart: "no"
     labels:
       aegis.test.resource-token: "${AEGIS_TEST_RESOURCE_TOKEN:?AEGIS_TEST_RESOURCE_TOKEN is required}"
   media:
+    restart: "no"
     labels:
       aegis.test.resource-token: "${AEGIS_TEST_RESOURCE_TOKEN:?AEGIS_TEST_RESOURCE_TOKEN is required}"
   gateway:
+    restart: "no"
     labels:
       aegis.test.resource-token: "${AEGIS_TEST_RESOURCE_TOKEN:?AEGIS_TEST_RESOURCE_TOKEN is required}"
+  # Profile-gated, but a service named on the command line still starts.
+  caddy:
+    restart: "no"
+  caddy-local:
+    restart: "no"
 
 networks:
   backend:

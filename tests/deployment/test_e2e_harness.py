@@ -131,6 +131,36 @@ def test_compose_gate_rejects_unsafe_resource_or_original_mount_changes(drift: s
         SUPPORT["check_compose"](changed)
 
 
+RESTART_POLICIES = (
+    {"restart": "unless-stopped"}, {"restart": "always"}, {"restart": "on-failure:3"},
+    {"deploy": {"restart_policy": {}}}, {"deploy": {"restart_policy": {"condition": "any"}}},
+    {"restart": "no", "deploy": {"restart_policy": {"condition": "on-failure"}}},
+)
+
+
+@pytest.mark.parametrize("policy", RESTART_POLICIES)
+@pytest.mark.parametrize("role", ("postgres", "web", "gateway"))
+def test_compose_gate_refuses_any_restart_policy(role: str, policy: dict[str, Any]) -> None:
+    # A host boot or engine restart must never start a test container.
+    changed = _safe_compose()
+    changed["services"][role].update(deepcopy(policy))
+    message = r"^E2E services must not have a restart policy$"
+    with pytest.raises(ValueError, match=message) as refused:
+        SUPPORT["check_compose"](changed)
+    assert SUPPORT["refusal_annotation"]("check-compose", refused.value) == (
+        "::error title=e2e-support check-compose::"
+        "ValueError: E2E services must not have a restart policy"
+    )
+
+
+def test_compose_gate_accepts_absent_or_disabled_restart_policies() -> None:
+    config = _safe_compose()
+    config["services"]["migrate"]["restart"] = "no"
+    config["services"]["web"]["deploy"] = {"restart_policy": {"condition": "none"}}
+    config["services"]["gateway"]["deploy"] = {"resources": {}}
+    SUPPORT["check_compose"](config)
+
+
 def test_test_profile_keeps_fixture_credentials_out_of_the_production_compose() -> None:
     repository = Path(__file__).resolve().parents[2]
     assert "e2e-alice-password" not in (repository / "compose.yaml").read_text()

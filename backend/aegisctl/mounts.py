@@ -962,6 +962,8 @@ def observe_mount_fingerprints(
         "mem_limit": "64m",
         "pids_limit": 64,
         "stop_grace_period": "3s",
+        # One-off: never started again by an engine restart or a host boot.
+        "restart": "no",
         "cap_drop": ["ALL"],
         "security_opt": ["no-new-privileges:true", *mask_options],
         "entrypoint": ["/bin/sh", "-eu", "-c"],

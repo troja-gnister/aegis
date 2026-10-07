@@ -36,6 +36,7 @@ from aegisctl.container_resources import (
     cleanup_project_inventory,
     require_empty_project,
     require_project_inventory,
+    restart_policy_disabled,
 )
 from aegisctl.mounts import MountAttestationError, parse_mountinfo
 from aegisctl.podman_mask_compatibility import POWERCAP
@@ -98,6 +99,20 @@ def _tls_compose_rules(arguments: Sequence[str]) -> tuple[ProjectResourceRule, .
             "derivatives", "model-cache", "quarantine", "frontier-outbox",
         )
     )
+
+
+def without_restart_policies(configuration: Mapping[str, Any]) -> dict[str, Any]:
+    """The TLS override plus restart "no" for every canonical service.
+
+    The disposable stack runs only when invoked: no host boot or engine restart
+    may start any of its containers.
+    """
+    canonical = yaml.safe_load((REPOSITORY / "compose.yaml").read_text())["services"]
+    services = configuration.get("services") or {}
+    return {**configuration, "services": {
+        name: {**(services.get(name) or {}), "restart": "no"}
+        for name in {**canonical, **services}
+    }}
 
 
 def bounded_tail(value: str) -> str:
@@ -1404,6 +1419,24 @@ def test_isolated_tls_subnet_avoids_existing_networks_and_fails_closed() -> None
         isolated_backend_subnet(["10.253.0.0/16"], start=0)
 
 
+def test_tls_stack_override_disables_every_compose_restart_policy() -> None:
+    # A host boot or engine restart must never start the disposable TLS stack.
+    configuration = {
+        "services": {"web": {"environment": {"AEGIS_ENV": "production"}}},
+        "secrets": {"admin-password": {"file": "/synthetic/admin-password"}},
+    }
+    disabled = without_restart_policies(configuration)
+    base = yaml.safe_load((REPOSITORY / "compose.yaml").read_text())["services"]
+    assert {"postgres", "web", "gateway", CADDY_SERVICE} <= set(base)
+    assert disabled == {
+        "services": {name: {"restart": "no"} for name in base} | {
+            "web": {"environment": {"AEGIS_ENV": "production"}, "restart": "no"},
+        },
+        "secrets": {"admin-password": {"file": "/synthetic/admin-password"}},
+    }
+    assert configuration["services"] == {"web": {"environment": {"AEGIS_ENV": "production"}}}
+
+
 @pytest.fixture(scope="module")
 def tls_stack(tmp_path_factory: pytest.TempPathFactory) -> Iterator[TlsStack]:
     root = tmp_path_factory.mktemp("tls-stack")
@@ -1474,6 +1507,7 @@ secrets:
         record_created_test_path(tree, secret)
         configuration["secrets"][name] = {"file": str(secret)}
         container_secret_files.append(secret)
+    configuration = without_restart_policies(configuration)
     override.write_text(yaml.safe_dump(configuration), encoding="utf-8")
     inventory = record_test_tree_inventory(tree)
     prepare_owned_test_inventory(inventory)
@@ -1485,6 +1519,10 @@ secrets:
     )
 
     stack.resources = require_empty_project(project)
+    rendered = json.loads(stack.compose(["config", "--format", "json"]).stdout)
+    assert all(restart_policy_disabled(service) for service in rendered["services"].values()), (
+        "TLS test services must not have a restart policy"
+    )
 
     try:
         started = stack.compose(

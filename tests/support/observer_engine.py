@@ -71,6 +71,7 @@ class ObserverEngine:
             assert service["mem_limit"] == "64m"
             assert service["pids_limit"] == 64
             assert service["stop_grace_period"] == "3s"
+            assert service["restart"] == "no"
             assert kwargs.get("capture_output") is not True
             assert kwargs["stderr"] is subprocess.DEVNULL
             self.resources = {"container": "observer-immutable", "network": "network-immutable"}

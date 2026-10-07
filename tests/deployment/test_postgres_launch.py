@@ -346,11 +346,30 @@ def test_every_canonical_launch_refuses_substitution_before_preparation(
 def launch_inputs(tmp_path: Path) -> Path:
     override = tmp_path / "canonical.json"
     override.write_text(json.dumps({
-        "services": {}, "secrets": {
+        "services": {"postgres": {"restart": "no"}}, "secrets": {
             name: {"file": str(tmp_path / name)} for name in boundary.POSTGRES_SECRET_SOURCES
         },
     }))
     return override
+
+
+@pytest.mark.parametrize("policy", [
+    {"restart": "unless-stopped"},
+    {"restart": "no", "deploy": {"restart_policy": {"condition": "any"}}},
+])
+def test_restart_policy_is_refused_before_create(
+    engine: PostgresEngine, tmp_path: Path, policy: dict[str, Any],
+) -> None:
+    # A host boot or engine restart must never start the disposable PostgreSQL.
+    override = launch_inputs(tmp_path)
+    inputs = json.loads(override.read_text())
+    inputs["services"] = {"postgres": policy}
+    override.write_text(json.dumps(inputs))
+    image = boundary.build_postgres_image("restarting", override)
+    with pytest.raises(AssertionError, match="must not have a restart policy"):
+        boundary.start_postgres_with_private_tmpfs("restarting", override, image)
+    assert not any(event in {"create", "created", "start"} for event, _ in engine.events)
+    assert engine.containers == {} and engine.volumes == {}
 
 
 @pytest.mark.parametrize("fault", [

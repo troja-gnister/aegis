@@ -23,10 +23,12 @@ from aegisctl.container_resources import (
     capture_project_inventory,
     cleanup_project_inventory,
     require_empty_project,
+    restart_policy_disabled,
 )
 from aegisctl.podman_mask_compatibility import MASK_OPTION
 from django.test import override_settings
 
+from scripts.benchmarks import resources as benchmark_resources
 from tests.support.container_runtime import copy_bind_inputs
 from tests.support.container_runtime import run_deployment_process as run_container
 from tests.support.fake_container_engine import ProjectEngine, select_fake_engine
@@ -183,9 +185,12 @@ def test_invalid_tls_probe_propagates_cleanup_query_failure_without_broad_down(
 
 
 def rendered_compose(
-    *profiles: str, environment: dict[str, str] | None = None
+    *profiles: str,
+    environment: dict[str, str] | None = None,
+    files: tuple[str, ...] = ("compose.yaml",),
 ) -> dict[str, Any]:
     profile_arguments = [argument for profile in profiles for argument in ("--profile", profile)]
+    file_arguments = [argument for name in files for argument in ("-f", name)]
     environment_for_compose = (
         os.environ
         | {"AEGIS_RELEASE_ID": "test-release-identity"}
@@ -196,8 +201,7 @@ def rendered_compose(
             *CONTAINER_COMMAND,
             "compose",
             *profile_arguments,
-            "-f",
-            "compose.yaml",
+            *file_arguments,
             "config",
             "--format",
             "json",
@@ -338,6 +342,41 @@ def test_core_services_are_unprivileged_and_postgres_is_private() -> None:
         assert services[name]["read_only"] is True
         assert services[name]["cap_drop"] == ["ALL"]
         assert services[name]["security_opt"] == expected_security_options()
+
+
+def test_test_stacks_never_restart_while_production_keeps_its_policy(tmp_path: Path) -> None:
+    """A host boot or engine restart never starts an E2E or benchmark test container."""
+    environment = {
+        "AEGIS_TEST_RESOURCE_TOKEN": "aegis-restart-render",
+        "AEGIS_TEST_SECRET_DIR": str(tmp_path / "secrets"),
+    }
+    benchmark = tmp_path / "compose.benchmark.yaml"
+    benchmark.write_bytes(benchmark_resources._limits_override(
+        benchmark_resources.load_profile(), ("cpuset", benchmark_resources.CPUSET),
+    ))
+    test_files = ("compose.yaml", "compose.test.yaml")
+    stacks = {
+        "e2e": rendered_compose(environment=environment, files=test_files),
+        "benchmark": rendered_compose(
+            environment=environment, files=(*test_files, str(benchmark)),
+        ),
+        # Profile-gated services too: naming one on the command line starts it.
+        "every-profile": rendered_compose(
+            "tls", "tls-local", environment=environment, files=test_files,
+        ),
+    }
+    assert "mem_limit" in stacks["benchmark"]["services"]["web"]
+    assert {"caddy", "caddy-local"} <= set(stacks["every-profile"]["services"])
+    for name, config in stacks.items():
+        services = config["services"]
+        assert set(benchmark_resources.SERVICES) <= set(services), name
+        restarting = [key for key, service in services.items()
+                      if not restart_policy_disabled(service)]
+        assert restarting == [], name
+    production = rendered_compose("tls", "tls-local")["services"]
+    assert {name: service.get("restart") for name, service in production.items()} == (
+        dict.fromkeys(production, "unless-stopped") | {"migrate": "no"}
+    )
 
 
 def test_web_uses_bounded_log_config_from_process_start() -> None:

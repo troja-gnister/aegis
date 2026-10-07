@@ -147,7 +147,7 @@ def compose_config() -> dict[str, Any]:
     for role in ("postgres", "migrate", "web", "operations", "indexer", "media", "gateway"):
         service: dict[str, Any] = {
             "read_only": True, "cap_drop": ["ALL"], "networks": {"backend": None},
-            "volumes": [],
+            "volumes": [], "restart": "no",
         }
         if role in limits:
             service["mem_limit"] = str(limits[role] * 1024 * 1024)
@@ -210,6 +210,28 @@ def test_compose_gate_refuses_operator_or_unowned_resources(drift: str) -> None:
         config["services"]["web"]["volumes"] = config["services"]["indexer"]["volumes"]
     with pytest.raises(resources.BenchmarkResourceError):
         resources.check_compose_config(config, project=PROJECT, profile=PROFILE)
+
+
+@pytest.mark.parametrize("policy", [
+    {"restart": "unless-stopped"}, {"restart": "always"}, {"restart": "on-failure:3"},
+    {"deploy": {"restart_policy": {}}}, {"deploy": {"restart_policy": {"condition": "any"}}},
+    {"restart": "no", "deploy": {"restart_policy": {"condition": "on-failure"}}},
+])
+@pytest.mark.parametrize("role", ["postgres", "web", "gateway"])
+def test_compose_gate_refuses_any_restart_policy(role: str, policy: dict[str, Any]) -> None:
+    # A host boot or engine restart must never start a benchmark container.
+    config = compose_config()
+    config["services"][role].update(policy)
+    with pytest.raises(resources.BenchmarkResourceError,
+                       match=r"^benchmark services must not have a restart policy$"):
+        resources.check_compose_config(config, project=PROJECT, profile=PROFILE)
+
+
+def test_compose_gate_accepts_absent_or_disabled_restart_policies() -> None:
+    config = compose_config()
+    del config["services"]["migrate"]["restart"]
+    config["services"]["web"]["deploy"] = {"restart_policy": {"condition": "none"}}
+    resources.check_compose_config(config, project=PROJECT, profile=PROFILE)
 
 
 class FakeEngine:

@@ -835,7 +835,10 @@ def test_compose_bind_sources_preserve_literal_dollars_for_preflight_and_runtime
         secret_paths.append(secret)
         secret_sources[name] = {"file": str(secret).replace("$", "$$")}
     secret_override = tmp_path / "compose.secrets.yaml"
-    secret_override.write_text(yaml.safe_dump({"secrets": secret_sources}), encoding="utf-8")
+    # Compose already clears restart for a run one-off; stay explicit regardless.
+    secret_override.write_text(yaml.safe_dump({
+        "services": {"indexer": {"restart": "no"}}, "secrets": secret_sources,
+    }), encoding="utf-8")
     record_created_test_path(tree, secret_override)
     inventory = record_test_tree_inventory(tree)
     prepare_owned_test_inventory(inventory)

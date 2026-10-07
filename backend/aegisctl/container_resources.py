@@ -46,6 +46,19 @@ class ProjectResourceRule:
     name: str | None = None
 
 
+def restart_policy_disabled(service: Mapping[str, Any]) -> bool:
+    """Whether a rendered Compose service gives its containers no restart policy.
+
+    A disposable project's containers must never be started by an engine restart or
+    a host boot. Compose lets ``deploy.restart_policy`` (condition default "any")
+    take precedence over ``restart``, so both must be absent or disabled.
+    """
+    policy = (service.get("deploy") or {}).get("restart_policy")
+    return service.get("restart", "no") == "no" and (
+        policy is None or policy.get("condition") == "none"
+    )
+
+
 def _run(arguments: list[str], environment: Mapping[str, str]) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(

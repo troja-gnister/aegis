@@ -26,6 +26,7 @@ from aegisctl.container_resources import (
     cleanup_project_resource_kinds,
     require_empty_project,
     require_project_inventory,
+    restart_policy_disabled,
 )
 from aegisctl.podman_mask_compatibility import MASK_OPTION
 
@@ -651,6 +652,8 @@ def start_postgres_with_private_tmpfs(
     assert rendered.returncode == 0
     config = json.loads(rendered.stdout)
     service = config["services"]["postgres"]
+    # A host boot or engine restart must never start this disposable container.
+    assert restart_policy_disabled(service), "disposable PostgreSQL must not have a restart policy"
     assert service["image"] == "aegis-postgres"
     assert service["user"] == "0:0" and service["read_only"] is True
     assert not any(
@@ -754,6 +757,8 @@ def test_live_postgres_stages_secrets_and_drops_to_uid_70(tmp_path: Path) -> Non
             {
                 "services": {
                     "postgres": {
+                        # Disposable: a host boot or engine restart never starts it.
+                        "restart": "no",
                         "volumes": [
                             {
                                 "type": "tmpfs",
@@ -1041,9 +1046,11 @@ def test_postgres_reconciles_populated_accepted_base_and_rotated_secrets(
     override.write_text(
         json.dumps(
             {
+                # Disposable: a host boot or engine restart never starts it.
+                "services": {"postgres": {"restart": "no"}},
                 "secrets": {
                     name: {"file": str(path)} for name, path in secret_files.items()
-                }
+                },
             }
         ),
         encoding="utf-8",
