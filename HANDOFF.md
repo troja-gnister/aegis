@@ -2,7 +2,7 @@
 
 Resume on **`main`** on the **Fedora 44 Server development host**, which runs native rootless Podman and no Docker Engine; see [Setting up the new computer](#setting-up-the-new-computer). Docker is the supported, primary runtime. Podman is a secondary, optional runtime; its remaining gap, O11, belongs to part 2. See [the Linux/Podman report](docs/verification/linux-podman-prerequisite.md).
 
-**Part 1 (Podman development environment) is complete:** commits `b6139ef` (spec) through `5776d58`, then part 1's documentation commits starting with `b027e0b`, all made on this host. Final fresh-shell gates under rootless Podman (October 4): `make verify` exit 0 (backend 1,892 and frontend 229 tests passed; 202 s); `make verify-compose` 1,258 passed, 0 failed, 0 skipped, plus exactly the nine O11 errors (25 min 13 s); `make test-e2e` 22/22 (164 s); `git diff --check` clean; `stop` exited 0 with no pre-existing Podman object removed or changed. Full Podman compatibility is not claimed while O11 is open. `git status --short --branch` shows whether these commits are on `origin/main`; pushing them needs the user's approval. Once they are pushed, Docker CI for the pushed head must pass all four jobs; it also has to confirm the Docker branches of the changed deployment tests, because this host has no Docker engine. Details: the [Fedora Server verification section](docs/verification/linux-podman-prerequisite.md#fedora-server-development-host-october-2026) and the [part 1 design](docs/superpowers/specs/2026-10-04-podman-dev-environment-design.md).
+**Part 1 (Podman development environment) is complete:** commits `db233c2` (spec) through `0840049`, then part 1's documentation commits starting with `ee41c2d`, all made on this host. Final fresh-shell gates under rootless Podman (October 4): `make verify` exit 0 (backend 1,892 and frontend 229 tests passed; 202 s); `make verify-compose` 1,258 passed, 0 failed, 0 skipped, plus exactly the nine O11 errors (25 min 13 s); `make test-e2e` 22/22 (164 s); `git diff --check` clean; `stop` exited 0 with no pre-existing Podman object removed or changed. Full Podman compatibility is not claimed while O11 is open. `git status --short --branch` shows whether these commits are on `origin/main`; pushing them needs the user's approval. Once they are pushed, Docker CI for the pushed head must pass all four jobs; it also has to confirm the Docker branches of the changed deployment tests, because this host has no Docker engine. Details: the [Fedora Server verification section](docs/verification/linux-podman-prerequisite.md#fedora-server-development-host-october-2026) and the [part 1 design](docs/superpowers/specs/2026-10-04-podman-dev-environment-design.md).
 
 **Phase 2A.1 has 18 tasks: 15 accepted, 3 remaining (16, 17, 18).** Task 15, the streamed 1M-entry authenticated catalog benchmark, was accepted at `e8ea863`; [CI run 36959823576](https://github.com/troja-gnister/aegis/actions/runs/36959823576) passed all four jobs.
 
@@ -80,7 +80,7 @@ Do not restart Tasks 1–15, the web performance slice or part 1. The old machin
 - **Task 15:** no fail-closed test case for `AEGIS_DJANGO_SECRET_KEY_FILE` in `backend/aegis/settings/test.py`. N100 reference certification is still open; all results are provisional.
 - **Podman:**
   - O11, client source IPs not preserved by rootless published ports: part 2. The nine `test_tls_gateway.py` tests fail under Podman until then; they are not skipped.
-  - Fixed in part 1: the core-services NNP assertion (`4f6e575`) and the `test_rendered_mounts.py` refusals (`d247492`, `6c8486c`, `4a0b0b3`). `test_database_roles.py:414` passes under Podman unchanged.
+  - Fixed in part 1: the core-services NNP assertion (`c97b7da`) and the `test_rendered_mounts.py` refusals (`51d6397`, `0b682e8`, `787e570`). `test_database_roles.py:414` passes under Podman unchanged.
   - Recorded and left in place: the guard's per-launch `/tmp/aegis-mask-check-*` folders (529, about 35 MiB, after the final run), observer diagnostics `/tmp/aegis-mount-preflight-*`, and one synthetic `/tmp/aegis-verify-*` folder per `make verify` run from `backend/tests/unit/common/test_verify_targets.py:656`, which should use `tmp_path`.
 - **CI flake:** `phase2a.spec.ts:339` passed 50/50 locally in mobile Chromium, but the server stack was not limited to four CPUs, so CI-like contention was not reproduced. Keep watching CI.
 
@@ -94,7 +94,7 @@ The new computer is the Fedora 44 Server host, set up on October 4. It has no Do
 
 This file and the tracked docs contain everything needed. Old-host details no longer apply: its disk limits, its retained Podman volumes and networks, and its `/tmp` scratch directories.
 
-1. **Get the code.** Clone `https://github.com/troja-gnister/aegis`, or `git pull` an existing clone, and check out `main`. Confirm `git log -1` is the newest handoff commit, at or after part 1's documentation commit `b027e0b`.
+1. **Get the code.** Clone `https://github.com/troja-gnister/aegis`, or `git pull` an existing clone, and check out `main`. Confirm `git log -1` is the newest handoff commit, at or after part 1's documentation commit `ee41c2d`.
 2. **Install the prerequisites** from [`docs/development.md#prerequisites`](docs/development.md#prerequisites):
    - Python 3.13 (`.python-version`) and uv 0.12.8;
    - Node.js 24 (`frontend/package.json` engines `>=24 <25`) and npm;
@@ -171,7 +171,7 @@ Phase 2A.1 completion still leaves the broader 2A search, events and downloads, 
 
 | Revision | Meaning |
 | --- | --- |
-| `b6139ef`–`5776d58`, then part 1's documentation commits from `b027e0b` | **Part 1, Podman development environment.** Pushed only with the user's approval; after the push, check that Docker CI passed all four jobs. Spec and plan, helper (`8884a8b`–`d52895e`), helper fixes (`538b6b3`, `f7f69c4`), core-services NNP expectation (`4f6e575`), guard fixes (`d247492`, `6c8486c`, `4a0b0b3`), e2e fixes (`1df748a`, `7779fab`) and flake tooling (`5776d58`). |
+| `db233c2`–`0840049`, then part 1's documentation commits from `ee41c2d` | **Part 1, Podman development environment.** Pushed only with the user's approval; after the push, check that Docker CI passed all four jobs. Spec and plan, helper (`7438509`–`3a09caa`), helper fixes (`9fbe83b`, `1723b60`), core-services NNP expectation (`c97b7da`), guard fixes (`51d6397`, `0b682e8`, `787e570`), e2e fixes (`9c0b6c9`, `280cf07`) and flake tooling (`0840049`). |
 | `805fce4` and `6bfaa01` | Handoffs; pushed October 3. CI run 37123170741 for `6bfaa01`: attempt 1 failed e2e only, attempt 2 passed all four jobs. |
 | `f6db82e` | **Pushed October 3** at the user's request; covered by CI run 37123170741 on `6bfaa01`. Web performance slice: multi-worker web, pooled web-role connections, cheaper status. Reviewed and approved. |
 | `e8ea863` | **Task 15 accepted; pushed.** Million-entry authenticated catalog benchmark; CI run 36959823576, all four jobs passed. |

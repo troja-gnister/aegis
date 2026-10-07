@@ -221,7 +221,7 @@ Once `make test-e2e` passes under Podman:
 
 ## 11. Implementation notes (October 4, 2026)
 
-Part 1 was implemented on October 4, 2026 (commits `8884a8b` through `5776d58`); the gate results are in the [prerequisite report](../../verification/linux-podman-prerequisite.md#fedora-server-development-host-october-2026). Apart from the Status line, which now points to this section, and wording-only edits that describe the host generically, the sections above are unchanged. These deliberate deviations were reviewed during implementation:
+Part 1 was implemented on October 4, 2026 (commits `7438509` through `0840049`); the gate results are in the [prerequisite report](../../verification/linux-podman-prerequisite.md#fedora-server-development-host-october-2026). Apart from the Status line, which now points to this section, and wording-only edits that describe the host generically, the sections above are unchanged. These deliberate deviations were reviewed during implementation:
 
 1. **Layout (§4, §4.1, §4.6).** The helper is the package `scripts/podman_dev/`; the invocation `python -m scripts.podman_dev` is unchanged. The tool lock is `scripts/podman_dev/tools.lock.json`, and the tests are `tests/deployment/test_podman_dev_{tools,records,webkit,session}.py`.
 2. **Readiness (§4.3).** The helper waits for the API's `GET /_ping`. The guarded launcher queries `/v5.8.7/libpod/info` itself later.
