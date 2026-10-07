@@ -567,6 +567,23 @@ def recreate_caddy(stack: CaddyRecreator) -> None:
     stack.compose(["up", "--detach", "--no-deps", CADDY_SERVICE])
 
 
+class GatewayRecoverer(Protocol):
+    def compose(self, arguments: Sequence[str]) -> object: ...
+
+
+def recover_gateway_trust(stack: GatewayRecoverer) -> None:
+    """Return a drifted gateway and web to one trusted pair without any restart policy.
+
+    The gateway's bounded startup attestation may already have run out while web still
+    trusted the old address, and nothing revives an exited test container. Restart it
+    explicitly first (fixing its address), then web, which resolves that address while
+    the fresh attestation retries. Restarts keep the recorded identities.
+    """
+    stack.compose(["up", "--detach", "--no-deps", "gateway"])
+    stack.compose(["restart", "--no-deps", "gateway"])
+    stack.compose(["restart", "web"])
+
+
 CADDY_PRIVATE_TMPFS = (("/config", "0700"), ("/tmp", "1777"))
 CADDY_STATUS_PROGRAM = (
     "stat -c '%u:%g:%a:%n' /config /tmp && "
@@ -1074,6 +1091,22 @@ def test_caddy_recreation_records_exact_removal_before_normal_up() -> None:
     assert events == [
         ("remove", CADDY_SERVICE),
         ("compose", ["up", "--detach", "--no-deps", CADDY_SERVICE]),
+    ]
+
+
+def test_gateway_trust_recovery_restarts_the_gateway_explicitly_before_web() -> None:
+    # No restart policy revives a gateway whose bounded startup attestation ran out.
+    events: list[list[str]] = []
+
+    class Stack:
+        def compose(self, arguments: Sequence[str]) -> None:
+            events.append(list(arguments))
+
+    recover_gateway_trust(Stack())
+    assert events == [
+        ["up", "--detach", "--no-deps", "gateway"],
+        ["restart", "--no-deps", "gateway"],
+        ["restart", "web"],
     ]
 
 
@@ -1786,8 +1819,7 @@ def test_gateway_ip_drift_fails_closed_until_web_restarts(
             public_status = None
         assert public_status != 200
     finally:
-        tls_stack.compose(["up", "--detach", "--no-deps", "gateway"])
-        tls_stack.compose(["restart", "web"])
+        recover_gateway_trust(tls_stack)
         tls_stack.wait_until_ready(timeout_seconds=60)
 
     tls_stack.wait_until_service_healthy("gateway")

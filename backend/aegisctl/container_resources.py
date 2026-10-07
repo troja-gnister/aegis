@@ -50,8 +50,10 @@ def restart_policy_disabled(service: Mapping[str, Any]) -> bool:
     """Whether a rendered Compose service gives its containers no restart policy.
 
     A disposable project's containers must never be started by an engine restart or
-    a host boot. Compose lets ``deploy.restart_policy`` (condition default "any")
-    take precedence over ``restart``, so both must be absent or disabled.
+    a host boot. Compose gives ``deploy.restart_policy`` precedence over ``restart``,
+    so both are checked. Deliberately stricter than Compose (fails closed): only an
+    absent or "no" ``restart`` and an absent policy or ``condition: none`` pass, even
+    where Compose would also disable restarts (for example an empty policy).
     """
     policy = (service.get("deploy") or {}).get("restart_policy")
     return service.get("restart", "no") == "no" and (

@@ -64,6 +64,8 @@ COLD_OPERATIONS_PER_USER = 30
 GATE_FAILED_EXIT = 3
 HOLD_MARGIN_SECONDS = 2 * 86_400
 REQUEST_SERVICES = ("postgres", "web", "gateway")
+# Long-running workers that exit when their PostgreSQL session ends.
+DATABASE_WORKERS = ("operations", "indexer", "media")
 
 
 def parse_arguments(argv: Sequence[str]) -> argparse.Namespace:
@@ -510,10 +512,15 @@ def collect_evidence(bench: BenchmarkEnvironment, root_ids: dict[str, str],
 
 
 def restart_cold(bench: BenchmarkEnvironment) -> list[str]:
-    """Restart the request path by exact IDs; re-resolve peers only if an address moved."""
+    """Restart PostgreSQL, its workers and web by exact IDs; re-resolve moved peers.
+
+    Test containers have no restart policy, so nothing revives a worker whose database
+    session ended with PostgreSQL: once it is healthy, each worker is restarted here.
+    """
     before = container_identity(bench)
-    actions = ["postgres", "web"]
+    actions = ["postgres", *DATABASE_WORKERS, "web"]
     bench.restart(["postgres"])
+    bench.restart(DATABASE_WORKERS)
     bench.restart(["web"])
     after = container_identity(bench)
     if after["web"]["ips"] != before["web"]["ips"]:
@@ -522,7 +529,7 @@ def restart_cold(bench: BenchmarkEnvironment) -> list[str]:
         if container_identity(bench)["gateway"]["ips"] != before["gateway"]["ips"]:
             bench.restart(["web"])
             actions.append("web")
-    bench.wait_healthy(["postgres", "web", "gateway", "indexer"])
+    bench.wait_healthy(["postgres", "web", "gateway", *DATABASE_WORKERS])
     return actions
 
 
@@ -595,7 +602,7 @@ def run_catalog(arguments: argparse.Namespace) -> int:
                     if target.label == "tree" and target.root == "main")
         sampler: ResourceSampler | None = None
         try:
-            log("Cold: restarting PostgreSQL and web by exact container ID...")
+            log("Cold: restarting PostgreSQL, its workers and web by exact container ID...")
             restarts = restart_cold(bench)
             sampler = ResourceSampler(bench, ("web", "postgres", "gateway", "indexer"))
             sampler.start()

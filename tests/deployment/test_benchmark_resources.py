@@ -671,6 +671,81 @@ def test_storage_check_refuses_insufficient_capacity_and_records_the_medium() ->
         storage_bench("garbage\n", "0").storage_check()
 
 
+def cold_stack(moved: tuple[str, ...]) -> tuple[resources.BenchmarkEnvironment, dict[str, Any]]:
+    """Exact-ID engine double: restarting PostgreSQL ends every worker's database session.
+
+    Nothing restarts on its own (test containers have no restart policy): a worker stays
+    exited until it is restarted by its recorded ID. Services in ``moved`` get a new
+    address on their first restart.
+    """
+    bench = resources.BenchmarkEnvironment(
+        PROFILE, Path("/tmp"), resources.Workspace(Path("/tmp/x")), PROJECT, TOKEN,
+        f"aegis_bench_{TOKEN}", {}, (), 1, 2,
+    )
+    ids = {service: f"{service}-recorded-id" for service in resources.SERVICES}
+    state: dict[str, Any] = {
+        "running": {service: service != "migrate" for service in ids},
+        "ips": {service: f"10.0.0.{number}" for number, service in enumerate(ids, 1)},
+        "restarted": [], "verified": 0, "moved": list(moved),
+    }
+    by_id = {identity: service for service, identity in ids.items()}
+
+    def engine(*arguments: str, timeout: int = 120) -> subprocess.CompletedProcess[str]:
+        del timeout
+        if arguments[:2] == ("container", "inspect"):
+            service = by_id[arguments[2]]
+            output = json.dumps([{
+                "State": {"Running": state["running"][service],
+                          "Health": {"Status": "healthy"}},
+                "NetworkSettings": {"Networks": {"backend": {
+                    "IPAddress": state["ips"][service]}}},
+            }])
+            return subprocess.CompletedProcess(list(arguments), 0, output, "")
+        assert arguments[:3] == ("restart", "--time", "30") and len(arguments) == 4
+        service = by_id[arguments[3]]
+        state["restarted"].append(service)
+        state["running"][service] = True
+        if service == "postgres":
+            for worker in ("operations", "indexer", "media"):
+                state["running"][worker] = False
+        if service in state["moved"]:
+            state["moved"].remove(service)
+            state["ips"][service] += "0"
+        return subprocess.CompletedProcess(list(arguments), 0, "", "")
+
+    def wait_healthy(services: Any, deadline_seconds: int = 300) -> None:
+        del deadline_seconds
+        if not all(state["running"][service] for service in services):
+            raise resources.BenchmarkResourceError("benchmark service did not become healthy")
+
+    def require_recorded() -> None:
+        state["verified"] += 1
+
+    bench.container_ids = lambda: dict(ids)  # type: ignore[method-assign]
+    bench.engine = engine  # type: ignore[method-assign]
+    bench.wait_healthy = wait_healthy  # type: ignore[method-assign]
+    bench.require_recorded = require_recorded  # type: ignore[method-assign]
+    return bench, state
+
+
+@pytest.mark.parametrize(("moved", "readdressed"), [
+    ((), []), (("web",), ["gateway"]), (("web", "gateway"), ["gateway", "web"]),
+])
+def test_cold_restart_revives_every_database_worker_by_exact_recorded_id(
+    moved: tuple[str, ...], readdressed: list[str],
+) -> None:
+    bench, state = cold_stack(moved)
+    actions = run.restart_cold(bench)
+    expected = ["postgres", "operations", "indexer", "media", "web", *readdressed]
+    assert actions == state["restarted"] == expected
+    assert all(state["running"][service] for service in resources.SERVICES
+               if service != "migrate")
+    assert state["running"]["migrate"] is False  # The completed one-off is never restarted.
+    # Recorded identities are proved before and after each of the restart calls:
+    # PostgreSQL, the workers, web, and any re-addressed peer.
+    assert state["verified"] == 2 * (3 + len(readdressed))
+
+
 def test_matrix_counts_non_json_success_bodies_as_failures() -> None:
     directory = private_directory()
     try:
