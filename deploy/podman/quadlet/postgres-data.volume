@@ -1,0 +1,3 @@
+# Mirrors compose.yaml volume `postgres-data`.
+[Volume]
+VolumeName=@@PREFIX@@postgres-data

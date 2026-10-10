@@ -1,0 +1,61 @@
+# Mirrors compose.yaml service `postgres`. The entrypoint starts as root to stage private
+# copies of the database secrets for uid 70, then runs PostgreSQL as uid 70.
+[Unit]
+Description=Aegis PostgreSQL
+StartLimitIntervalSec=0
+
+[Container]
+ContainerName=@@PREFIX@@postgres
+Image=@@IMAGE_POSTGRES@@
+# The installer pulls the release images; a boot never reaches a registry.
+Pull=never
+Entrypoint=/usr/local/bin/aegis-postgres-entrypoint
+Exec=postgres
+User=0
+Group=0
+Environment=POSTGRES_DB=aegis
+Environment=POSTGRES_USER=postgres
+Environment=POSTGRES_PASSWORD_FILE=/run/secrets/postgres_superuser_password
+Network=@@PREFIX@@backend.network:alias=postgres
+Volume=@@PREFIX@@postgres-data.volume:/var/lib/postgresql
+ReadOnly=true
+Tmpfs=/run/aegis-source-secrets:size=64k,noexec,nosuid,nodev,mode=0700
+Tmpfs=/run/secrets:size=64k,noexec,nosuid,nodev,mode=0700
+Tmpfs=/run/postgresql:size=16m,noexec,nosuid,nodev,mode=0775
+Tmpfs=/tmp:size=16m,noexec,nosuid,nodev,mode=1777
+DropCapability=ALL
+AddCapability=CHOWN DAC_OVERRIDE FOWNER SETGID SETUID
+NoNewPrivileges=true
+Unmask=/sys/devices/virtual/powercap
+# Compose's file secrets are read-only binds, and the entrypoint refuses any other source
+# mount; Podman's own secrets are mounted read-write. The installer owns these files: mode
+# 0600, owned by container 10001:10001, labeled container_file_t. As under compose, the root
+# entrypoint reads them through CAP_DAC_OVERRIDE.
+Volume=@@SECRETS_DIR@@/postgres-superuser-password:/run/aegis-source-secrets/postgres_superuser_password:ro
+Volume=@@SECRETS_DIR@@/db-migrator-password:/run/aegis-source-secrets/db_migrator_password:ro
+Volume=@@SECRETS_DIR@@/db-web-password:/run/aegis-source-secrets/db_web_password:ro
+Volume=@@SECRETS_DIR@@/db-operations-password:/run/aegis-source-secrets/db_operations_password:ro
+Volume=@@SECRETS_DIR@@/db-indexer-password:/run/aegis-source-secrets/db_indexer_password:ro
+Volume=@@SECRETS_DIR@@/db-media-password:/run/aegis-source-secrets/db_media_password:ro
+# TCP, not the socket: the entrypoint's reconcile server listens only on the socket.
+HealthCmd=pg_isready -h 127.0.0.1 -p 5432 -U postgres -d "aegis"
+HealthInterval=5s
+HealthTimeout=3s
+HealthRetries=20
+Notify=healthy
+
+[Service]
+# Like compose's unless-stopped: retry without limit, backing off from 5s to Docker's 1min cap
+# (RestartSteps= and RestartMaxDelaySec= need systemd 254 or newer).
+Restart=on-failure
+RestartSec=5
+RestartSteps=8
+RestartMaxDelaySec=60
+# A failed attempt stays activating, so the queued migrate and backend starts wait
+# instead of failing with "dependency" (an explicit restart still propagates).
+RestartMode=direct
+# The start waits for health; allow crash recovery well beyond the compose window.
+TimeoutStartSec=900
+
+[Install]
+WantedBy=default.target

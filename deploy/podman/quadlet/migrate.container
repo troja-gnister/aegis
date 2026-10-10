@@ -1,0 +1,53 @@
+# Mirrors compose.yaml service `migrate`: runs once PostgreSQL is healthy and stays active
+# after it succeeds, so dependents start only after a successful run.
+[Unit]
+Description=Aegis database migrations
+Requires=@@PREFIX@@postgres.container
+After=@@PREFIX@@postgres.container
+StartLimitIntervalSec=0
+
+[Container]
+ContainerName=@@PREFIX@@migrate
+Image=@@IMAGE_BACKEND@@
+# The installer pulls the release images; a boot never reaches a registry.
+Pull=never
+Exec=python manage.py deploy_database
+User=10001
+Group=10001
+Environment=AEGIS_ENV=production
+Environment=AEGIS_RELEASE_ID=@@RELEASE@@
+Environment=AEGIS_PUBLIC_URL=@@PUBLIC_URL@@
+Environment=AEGIS_ALLOWED_HOSTS=@@ALLOWED_HOSTS@@
+Environment=AEGIS_DB_HOST=postgres
+Environment=AEGIS_DB_PORT=5432
+Environment=AEGIS_DB_NAME=aegis
+Environment=AEGIS_SCAN_INTERVAL_SECONDS=3600
+Environment=AEGIS_SCAN_IDLE_TIMEOUT_SECONDS=120
+Environment=AEGIS_SCAN_BATCH_RECORDS=500
+Environment=AEGIS_SCAN_READERS=2
+Environment=AEGIS_DJANGO_SECRET_KEY_FILE=/run/secrets/django_secret_key
+Environment=DJANGO_SETTINGS_MODULE=aegis.settings.production
+Environment=AEGIS_DB_USER=aegis_migrator
+Environment=AEGIS_DB_PASSWORD_FILE=/run/secrets/db_migrator_password
+Network=@@PREFIX@@backend.network:alias=migrate
+ReadOnly=true
+Tmpfs=/tmp:size=64m,noexec,nosuid,nodev
+DropCapability=ALL
+NoNewPrivileges=true
+Unmask=/sys/devices/virtual/powercap
+# Compose's file secrets are read-only binds. The installer owns these files: mode 0600,
+# owned by container 10001:10001, labeled container_file_t.
+Volume=@@SECRETS_DIR@@/django-secret-key:/run/secrets/django_secret_key:ro
+Volume=@@SECRETS_DIR@@/db-migrator-password:/run/secrets/db_migrator_password:ro
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# A failed run, such as PostgreSQL not yet accepting connections, retries in place.
+# RestartMode=direct keeps the unit activating meanwhile, so the queued starts of the
+# services that require it wait for success instead of failing (systemd 254+).
+Restart=on-failure
+RestartMode=direct
+RestartSec=5
+RestartSteps=6
+RestartMaxDelaySec=60

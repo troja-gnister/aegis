@@ -1,0 +1,9 @@
+# Mirrors compose.yaml network `backend`: services and PostgreSQL; no route off the host.
+# Quadlet recreates containers on restart, and nginx and web's proxy trust each resolve the
+# other only at start, so web and the gateway keep fixed addresses in the lower half of the
+# subnet. Podman assigns every other address from the upper half.
+[Network]
+NetworkName=@@PREFIX@@backend
+Internal=true
+Subnet=@@BACKEND_SUBNET@@
+IPRange=@@BACKEND_IP_RANGE@@

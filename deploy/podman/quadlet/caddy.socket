@@ -1,0 +1,12 @@
+# The HTTPS listener, owned by the user's systemd manager (D2). systemd hands it to the
+# same-named service that Quadlet generates from @@PREFIX@@caddy.container. Quadlet does not
+# read .socket files, so this unit belongs with the user's systemd units. A bare port listens
+# on every IPv4 and IPv6 address; the firewall decides who may connect (D7).
+[Unit]
+Description=Aegis HTTPS socket
+
+[Socket]
+ListenStream=@@HTTPS_PORT@@
+
+[Install]
+WantedBy=sockets.target

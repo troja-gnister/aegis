@@ -1,0 +1,42 @@
+# Mirrors compose.yaml service `caddy`, but serves Caddyfile.lan, shipped in the image, on
+# the socket that systemd passes in as fd 3 (D2, D8). Compose's caddy has no health check,
+# so systemd waits only for the container to start.
+[Unit]
+Description=Aegis HTTPS edge
+Requires=@@PREFIX@@caddy.socket
+After=@@PREFIX@@caddy.socket
+# Compose waits for a healthy gateway. Here the gateway turns healthy right after web does.
+After=@@PREFIX@@gateway.container @@PREFIX@@web.container
+StartLimitIntervalSec=0
+
+[Container]
+ContainerName=@@PREFIX@@caddy
+Image=@@IMAGE_CADDY@@
+# The installer pulls the release images; a boot never reaches a registry.
+Pull=never
+Exec=caddy run --config /etc/caddy/Caddyfile.lan --adapter caddyfile
+User=10001
+Group=10001
+Environment="AEGIS_LAN_SITES=@@LAN_SITES@@"
+Network=@@PREFIX@@edge.network:alias=caddy
+Network=@@PREFIX@@tls-hop.network:alias=caddy
+Volume=@@PREFIX@@caddy-data.volume:/data
+ReadOnly=true
+# Podman refuses uid/gid tmpfs options: U takes the owner from the 10001:10001 user and
+# notmpcopyup keeps each mount empty, as compose.podman.yaml does.
+Tmpfs=/config:size=16m,noexec,nosuid,nodev,U,notmpcopyup,mode=0700
+Tmpfs=/tmp:size=16m,noexec,nosuid,nodev,U,notmpcopyup,mode=1777
+DropCapability=ALL
+NoNewPrivileges=true
+Unmask=/sys/devices/virtual/powercap
+
+[Service]
+# Like compose's unless-stopped: retry without limit, backing off from 5s to Docker's 1min cap
+# (RestartSteps= and RestartMaxDelaySec= need systemd 254 or newer).
+Restart=on-failure
+RestartSec=5
+RestartSteps=8
+RestartMaxDelaySec=60
+
+[Install]
+WantedBy=default.target

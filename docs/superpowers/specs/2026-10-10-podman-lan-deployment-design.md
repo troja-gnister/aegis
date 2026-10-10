@@ -48,6 +48,10 @@ Quadlet gives three things compose on Podman cannot:
 
 The services, images, users, read-only roots, capabilities, security options, tmpfs mounts, networks, aliases, volumes, secrets and health checks mirror `compose.yaml` one for one. A parity test (D10) enforces this.
 
+Quadlet recreates a container on every restart, so its address can change. nginx pins web's address at start, and web pins the gateway's for proxy trust. So web and the gateway get fixed addresses on the backend network:
+- the installer chooses a private /24 that collides with no existing network or route;
+- dynamic allocation is limited to the upper half of that /24.
+
 ### D2. O11 fix: a socket-activated edge
 
 The user's systemd manager owns the HTTPS listening socket (`aegis-caddy.socket`) and passes it to the Caddy container, which binds it with `bind fd/3`. The kernel accepts each connection on a host socket, so Caddy sees the real client address. Caddy keeps its place in the existing topology: on `edge`, and on the internal `tls-hop` network where only it can reach the gateway's TLS listener. The gateway's trust model is unchanged.
@@ -148,7 +152,11 @@ Caddy's CA and certificates persist in the `caddy-data` volume. `aegis-podman ca
 
 ### D9. Secrets and configuration
 
-- **Secrets:** `init` creates the eight secrets as Podman secrets with the existing names, each 32 random bytes hex-encoded and never printed. Units mount them at the same targets, owners and modes as compose. Rotation follows the existing runbook: recreate PostgreSQL and its dependents.
+- **Secrets:** `init` creates the eight secrets as installer-owned files with the existing names in a private directory (0700), each 32 random bytes hex-encoded and never printed.
+  - Files are mode 0600, labeled `container_file_t` and owned by container user 10001:10001 (`podman unshare chown`).
+  - Units bind them read-only at compose's targets, which matches compose's own file-secret semantics.
+  - Podman's `--secret type=mount` is not used, because it mounts secrets read-write, which PostgreSQL's secret staging correctly refuses (measured October 10).
+  - Rotation follows the existing runbook: recreate PostgreSQL and its dependents.
 - **Non-secret configuration:** kept in `~/.config/aegis/aegis.env` (mode 0600).
 - **Installer records:** unit names, image digests, root manifest and secret names live in `~/.local/share/aegis/`.
 - **Removal:** `uninstall` removes only the units recorded there. It removes recorded volumes and secrets only with `--purge-data`.
@@ -157,10 +165,13 @@ Caddy's CA and certificates persist in the `caddy-data` volume. `aegis-podman ca
 
 A static deployment test, which runs in CI's deployment job and locally on either engine, renders the Quadlet templates with fixed sample values. It compares each service against `docker compose config` of `compose.yaml` on the security-relevant fields.
 
-The only allowed differences are listed in the test:
-- ports and restart policy, which are replaced by the socket and systemd;
+The only allowed differences are listed in the test, each scoped to exact services and failing when unused:
+- ports and restart policy, which are replaced by the socket and systemd (D13);
+- dependency conditions, which are replaced by systemd ordering and `Notify=healthy`;
 - `GIDMap`, `SecurityLabelType` and `Unmask` (powercap, as in `compose.podman.yaml`);
-- Caddy's socket binding and `Caddyfile.lan`;
+- static backend addresses (D1);
+- image references by digest;
+- Caddy's socket binding, `Caddyfile.lan`, profile, sysctl and tmpfs ownership form;
 - production environment values.
 
 A second static test runs Podman's Quadlet generator in dry-run mode on the rendered units where Podman is available. Docker CI checks the templates through the parity test only.
@@ -185,19 +196,31 @@ How the commands behave:
 
 ### D12. Deployment verification without boot persistence
 
-The Podman deployment test, `make verify-podman-deploy`, runs only on Podman hosts. It must not install or enable units or anything that could start at boot.
+The Podman deployment test, `make verify-podman-deploy`, runs only on Podman hosts. It exercises real systemd semantics without creating anything that could start at boot.
 
-- **Render:** it renders the units with a test prefix and resource token, then takes each generated `podman run` command from Quadlet's dry-run.
-- **Launch:** it starts those commands directly in dependency order, with no restart policy and with Caddy under `systemd-socket-activate`. The roots are synthetic and labeled `container_file_t`.
+- **Install:** it renders the units with a unique test prefix, a resource token and no `[Install]` sections. It installs them for the run's duration only, into the user's Quadlet directory, with the socket in the user systemd directory. Then it runs `daemon-reload`.
+  - Units without `[Install]` are never enabled, so a reboot during a run starts nothing.
+  - The harness records every file it writes and removes exactly those on every exit path.
+  - A rerun removes recorded leftovers of an interrupted run.
+- **Data:** roots are synthetic and labeled `container_file_t`. Secrets and images are run-unique and recorded.
 - **Assert:**
-  - all services become healthy;
+  - all services become healthy through systemd ordering;
   - local-CA HTTPS serves the configured name;
   - two different client source addresses land in different gateway login-throttle buckets (loopback and a non-loopback host address);
   - the indexer reads a group-only (`750`/`640`) synthetic root through the ID mapping;
-  - writes to the root fail.
+  - writes to the root fail;
+  - a PostgreSQL restart and a failed migrate attempt both recover without manual action;
+  - no container has a Podman restart policy.
 - **Cleanup:** it deletes exactly the recorded objects. Port, disk and stack-left-running checks match the existing harness rules.
 
 The SELinux module itself is verified on the real host after the user installs it (section 6), because loading policy needs root.
+
+### D13. Restart and readiness semantics
+
+- **Retries:** long-running services retry without limit, with exponential backoff (`Restart=on-failure`, `RestartSteps`, `RestartMaxDelaySec`, `StartLimitIntervalSec=0`). This mirrors compose's `unless-stopped`, and needs systemd 254 or newer.
+- **Migrate:** a failure retries with `RestartMode=direct`, so a transient failure does not fail the queued dependents.
+- **PostgreSQL readiness:** the health check probes TCP (`pg_isready -h 127.0.0.1`) in both compose and the unit. The entrypoint's reconcile server listens only on the Unix socket, so a socket probe could report ready before clients can connect. This corrects a shared latent race; Docker behavior otherwise stays the same.
+- **Image pulls:** containers use `Pull=never`, so a boot never contacts a registry.
 
 ## 4. Repository changes
 
@@ -268,7 +291,7 @@ The root session pushes after local verification and watches CI. Each new Docker
 2. `Caddyfile.lan` and the socket activation contract.
 3. The `aegis-podman` installer with records and refusals.
 4. ID mapping, the SELinux module and the host-setup template.
-5. The D12 harness and the Makefile target.
+5. The D12 harness (temporary units without `[Install]`) and the Makefile target.
 6. Image changes and the CI `publish` job.
 7. The operator guide and the verification notes.
 8. Deployment on this host (section 6).

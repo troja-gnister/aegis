@@ -1,0 +1,47 @@
+# Mirrors compose.yaml service `gateway`, minus its published port: the systemd-owned Caddy
+# socket is the only way in (D2, D7).
+[Unit]
+Description=Aegis gateway
+# Start after migrations, so the gateway's bounded wait for web overlaps web's start. web
+# needs this container running to resolve it, and the gateway turns healthy only once web
+# answers it, so systemd waits for the container start rather than its health.
+After=@@PREFIX@@migrate.container
+StartLimitIntervalSec=0
+
+[Container]
+ContainerName=@@PREFIX@@gateway
+Image=@@IMAGE_GATEWAY@@
+# The installer pulls the release images; a boot never reaches a registry.
+Pull=never
+User=101
+Group=101
+Environment=NGINX_ENTRYPOINT_QUIET_LOGS=1
+Environment=AEGIS_PUBLIC_URL=@@PUBLIC_URL@@
+Network=@@PREFIX@@backend.network:alias=gateway,ip=@@GATEWAY_ADDRESS@@
+Network=@@PREFIX@@edge.network:alias=gateway
+Network=@@PREFIX@@tls-hop.network:alias=gateway,alias=tls-gateway
+Volume=@@PREFIX@@derivatives.volume:/srv/aegis/derivatives:ro
+ReadOnly=true
+Tmpfs=/tmp:size=32m,noexec,nosuid,nodev
+Tmpfs=/var/cache/nginx:size=64m,noexec,nosuid,nodev
+DropCapability=ALL
+NoNewPrivileges=true
+Unmask=/sys/devices/virtual/powercap
+# D5: read originals through the operator's group only; D6: the read-only reader type.
+GIDMap=+g101:@@@HOST_GID@@:1
+SecurityLabelType=@@READER_TYPE@@
+HealthCmd=test -f /tmp/aegis-upstream-ready && nc -z 127.0.0.1 8080
+HealthInterval=5s
+HealthTimeout=3s
+HealthRetries=20
+
+[Service]
+# Like compose's unless-stopped: retry without limit, backing off from 5s to Docker's 1min cap
+# (RestartSteps= and RestartMaxDelaySec= need systemd 254 or newer).
+Restart=on-failure
+RestartSec=5
+RestartSteps=8
+RestartMaxDelaySec=60
+
+[Install]
+WantedBy=default.target

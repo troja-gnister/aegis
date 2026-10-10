@@ -47,7 +47,8 @@
   - `PodmanArgs=--init` for the indexer;
   - `Unmask=/sys/devices/virtual/powercap` on every container;
   - Caddy's tmpfs mounts use the `U,notmpcopyup` form from `compose.podman.yaml`.
-- **Secrets:** `Secret=<prefix><secret-name>,type=mount,target=<compose target>`, with uid, gid and mode chosen so in-container ownership matches compose. Compose short targets resolve to `/run/secrets/<target>`.
+- **Secrets:** read-only binds `Volume=@@SECRETS_DIR@@/<secret-name>:<compose target>:ro` (fix round 1; spec D9). Compose short targets resolve to `/run/secrets/<target>`.
+- **Fixed backend addresses (fix round 1; spec D1):** `backend.network` uses `Subnet=@@BACKEND_SUBNET@@` with `IPRange=` set to the upper /25. web takes `.10` and the gateway `.11`.
 - **Health checks:** `HealthCmd`, `HealthInterval`, `HealthTimeout`, `HealthRetries` and `HealthStartPeriod` copy compose. Long-running services set `Notify=healthy`.
 - **Ordering:**
   - `migrate` is `Type=oneshot` with `RemainAfterExit=yes`, after PostgreSQL.
@@ -182,7 +183,8 @@
   - checks Podman is rootless with SELinux enforcing;
   - checks the port has no listener (socket bind test) and is not claimed by any container's port mapping (`podman ps -a --format json`);
   - pulls the four images by tag and resolves their digests (`podman image inspect --format '{{.Digest}}'` plus repository);
-  - creates the eight secrets with `podman secret create <prefix><name> -` from 32 random bytes hex-encoded, refusing if any already exists unless recorded;
+  - creates the eight secret files in `~/.local/share/aegis/secrets/` (directory 0700): 32 random bytes hex-encoded, mode 0600, `chcon -t container_file_t`, then `podman unshare chown 10001:10001`. It refuses if any file already exists unless recorded. Spec D9 explains why Podman `--secret` is not used;
+  - chooses a free private /24 for the backend network, colliding with no `podman network inspect` subnet and no host route, and records it;
   - writes `~/.config/aegis/aegis.env` (0600);
   - writes the record `~/.local/share/aegis/state.json` (0600), holding release, digests, prefix, secret names, unit names, port, names and host gid.
 - `install`:
@@ -196,7 +198,7 @@
 - `ca-cert`: prints the Caddy local root certificate from the running Caddy container (`podman exec <prefix>caddy cat /data/caddy/pki/authorities/local/root.crt`).
 - `uninstall [--purge-data]`:
   - stops and removes the recorded unit files, then reloads systemd;
-  - with `--purge-data`, also removes the recorded volumes and secrets by exact name, after re-checking each against the record (volume and secret IDs recorded at creation);
+  - with `--purge-data`, also removes the recorded volumes (by exact name, after re-checking the volume IDs recorded at creation) and the recorded secret files;
   - never matches by pattern.
 - `bootstrap-password`: runs the existing bootstrap-password management command in a one-off container from the backend digest, on the backend network, with the migrator or web secret as the runbook specifies. Read the runbook's bootstrap-password section and mirror it.
 
@@ -275,38 +277,41 @@ It never changes zone targets or services and never touches other rules. Zones a
 
 ## Task 6: Deployment harness (`make verify-podman-deploy`)
 
-**Goal:** D12. Run only on Podman hosts. It must never install or enable units.
+**Goal:** D12, revised after the Tasks 1–2 review: real systemd semantics with nothing that can start at boot. Run only on Podman hosts.
 
 **Files:**
 - `scripts/podman_deploy_check.py`;
 - `Makefile` target `verify-podman-deploy`;
-- tests of the script's resource recording in `tests/deployment/test_podman_deploy_harness.py` (fake runner).
+- tests of the script's recording and cleanup in `tests/deployment/test_podman_deploy_harness.py` (fake runner).
 
 **Flow:**
 1. Preflight checks:
    - the engine is Podman;
-   - the guard passes;
+   - systemd is 254 or newer;
    - ports 18080 and 55432 and the chosen test socket port are free;
-   - at least 40 GiB free on the Podman graph root's filesystem.
-2. Build the four images locally, through the existing guarded build path, and tag them with a run-unique tag. Use their local IDs as digest stand-ins; the renderer's test flag allows local image IDs.
-3. Create test secrets as Podman secrets with the test prefix (recorded).
-4. Render the units with the test prefix, the host gid, and reader type `container_t`. No custom SELinux type is used here; the synthetic root is `container_file_t`.
-5. Run `quadlet -dryrun` into a temporary directory and extract each service's `ExecStart` podman command. Run the networks' and volumes' generated commands first, then each container's `podman run` command with `--label <resource token>` added, in dependency order. Wait on `podman healthcheck run` / `podman wait --condition healthy`.
-6. Caddy runs as `systemd-socket-activate -l <test port> <its podman run command>`, as a recorded child process.
-7. Create the synthetic root under a fresh temporary directory: directories 0750, files 0640 owned by the operator, labeled `container_file_t` (a test fixture, not an original). Render it through `aegisctl mounts render --format quadlet` with the Podman observer, apply the drop-in options to the gateway, operations, indexer and media commands, and start the stack.
-8. Assertions, each reported as `AEGIS_PODMAN_DEPLOY check=<name> status=passed|failed`:
-   - all services are healthy;
-   - `https://<test name>:<port>` answers through local-CA TLS, verified with the exported root;
-   - login throttling is per address: exhaust the gateway login rate limit from `127.0.0.1`, then show that a request from the host's non-loopback address is not limited, and the reverse;
+   - at least 40 GiB free on the graph root's filesystem;
+   - no file the run would write already exists.
+2. Build the four images locally through the existing guarded build path, with run-unique tags. The renderer's test flag allows local image IDs.
+3. Create the test secret files (prepared as in Task 4) and a synthetic root (0750/0640, `container_file_t`, in a fresh temporary directory). Choose a free test backend subnet. Render the root drop-ins with `aegisctl mounts render --format quadlet`.
+4. Render the units with the test prefix, `install_sections=False`, reader type `container_t` and the test socket port. Record each path, then write them into `~/.config/containers/systemd/` and the socket into `~/.config/systemd/user/`, and run `systemctl --user daemon-reload`.
+5. Start `<prefix>caddy.socket` and the services through `systemctl --user start`, and wait for all of them to become active and healthy.
+6. Assertions, each reported as `AEGIS_PODMAN_DEPLOY check=<name> status=passed|failed`:
+   - healthy through systemd ordering;
+   - local-CA HTTPS on the test name, verified with the exported root;
+   - per-address login throttling (`127.0.0.1` against the host's non-loopback address, both directions);
    - the indexer attests and reads the synthetic root;
-   - a write attempt into the root from the indexer fails with `EROFS`;
-   - the gateway publishes no host port;
-   - no container has a restart policy.
-9. Cleanup on every exit path: stop the socket child, then remove exactly the recorded containers, networks, volumes, secrets and image tags, and the temporary directories. Report leftovers as a failure.
+   - a write into the root fails with `EROFS`;
+   - no published host port on the gateway;
+   - no Podman restart policy on any container;
+   - recovery after `systemctl --user restart <prefix>postgres.service`: the backend becomes healthy again without manual steps;
+   - a migrate attempt failed on purpose recovers. For example, stop PostgreSQL, start migrate so it fails and retries, then start PostgreSQL and see migrate and its dependents complete.
+7. Cleanup on every exit path:
+   1. `systemctl --user stop` the recorded units;
+   2. remove exactly the recorded unit files, then `daemon-reload`;
+   3. remove the recorded containers, networks, volumes, image tags and temporary directories by exact identity;
+   4. report any leftover as a failure.
 
-Long-running containers get no restart policy. If the run is interrupted, a rerun finds and removes the recorded leftovers from its own record file, by exact identity.
-
----
+A rerun first cleans up an interrupted run's record.
 
 ## Task 7: CI publish job
 

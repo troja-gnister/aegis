@@ -1,0 +1,4 @@
+# Mirrors compose.yaml network `tls-hop`: Caddy to the gateway's TLS listener only.
+[Network]
+NetworkName=@@PREFIX@@tls-hop
+Internal=true

@@ -1,0 +1,70 @@
+# Mirrors compose.yaml service `web`.
+[Unit]
+Description=Aegis web application
+Requires=@@PREFIX@@migrate.container
+After=@@PREFIX@@migrate.container
+# web resolves the gateway's address once at start and trusts only that peer (aegis.proxy),
+# so the gateway container must already be running.
+Wants=@@PREFIX@@gateway.container
+After=@@PREFIX@@gateway.container
+StartLimitIntervalSec=0
+
+[Container]
+ContainerName=@@PREFIX@@web
+Image=@@IMAGE_BACKEND@@
+# The installer pulls the release images; a boot never reaches a registry.
+Pull=never
+Exec=python -m aegis.proxy
+User=10001
+Group=10001
+Environment=AEGIS_ENV=production
+Environment=AEGIS_RELEASE_ID=@@RELEASE@@
+Environment=AEGIS_PUBLIC_URL=@@PUBLIC_URL@@
+Environment=AEGIS_ALLOWED_HOSTS=@@ALLOWED_HOSTS@@
+Environment=AEGIS_DB_HOST=postgres
+Environment=AEGIS_DB_PORT=5432
+Environment=AEGIS_DB_NAME=aegis
+Environment=AEGIS_SCAN_INTERVAL_SECONDS=3600
+Environment=AEGIS_SCAN_IDLE_TIMEOUT_SECONDS=120
+Environment=AEGIS_SCAN_BATCH_RECORDS=500
+Environment=AEGIS_SCAN_READERS=2
+Environment=AEGIS_DJANGO_SECRET_KEY_FILE=/run/secrets/django_secret_key
+Environment=DJANGO_SETTINGS_MODULE=aegis.settings.production
+Environment=AEGIS_TRUST_PROXY_HEADERS=true
+Environment=AEGIS_WEB_WORKERS=4
+Environment=AEGIS_DB_USER=aegis_web
+Environment=AEGIS_DB_PASSWORD_FILE=/run/secrets/db_web_password
+Environment=AEGIS_AUTH_THROTTLE_HMAC_KEY_FILE=/run/secrets/auth_throttle_hmac_key
+Network=@@PREFIX@@backend.network:alias=web,ip=@@WEB_ADDRESS@@
+Volume=@@PREFIX@@staging.volume:/srv/aegis/staging
+ReadOnly=true
+Tmpfs=/tmp:size=64m,noexec,nosuid,nodev
+DropCapability=ALL
+NoNewPrivileges=true
+Unmask=/sys/devices/virtual/powercap
+# D5: web shares the staging volume with operations, so it maps the same group.
+GIDMap=+g10001:@@@HOST_GID@@:1
+# Compose's file secrets are read-only binds. The installer owns these files: mode 0600,
+# owned by container 10001:10001, labeled container_file_t.
+Volume=@@SECRETS_DIR@@/django-secret-key:/run/secrets/django_secret_key:ro
+Volume=@@SECRETS_DIR@@/db-web-password:/run/secrets/db_web_password:ro
+Volume=@@SECRETS_DIR@@/auth-throttle-hmac-key:/run/secrets/auth_throttle_hmac_key:ro
+HealthCmd=["python","manage.py","check_runtime","--role","web","--require-http"]
+HealthInterval=5s
+HealthTimeout=5s
+HealthRetries=20
+HealthStartPeriod=10s
+Notify=healthy
+
+[Service]
+# Like compose's unless-stopped: retry without limit, backing off from 5s to Docker's 1min cap
+# (RestartSteps= and RestartMaxDelaySec= need systemd 254 or newer).
+Restart=on-failure
+RestartSec=5
+RestartSteps=8
+RestartMaxDelaySec=60
+# The start waits for health: allow the whole compose window, 10s + 20 x (5s + 5s).
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

@@ -29,6 +29,7 @@ from aegisctl.podman_mask_compatibility import MASK_OPTION
 from django.test import override_settings
 
 from scripts.benchmarks import resources as benchmark_resources
+from tests.support.compose_render import rendered_compose
 from tests.support.container_runtime import copy_bind_inputs
 from tests.support.container_runtime import run_deployment_process as run_container
 from tests.support.fake_container_engine import ProjectEngine, select_fake_engine
@@ -182,36 +183,6 @@ def test_invalid_tls_probe_propagates_cleanup_query_failure_without_broad_down(
         _run_invalid_tls_host_probe("probe", ["compose", "run"], {})
     assert commands == [["compose", "run"]]
     assert all("down" not in command for command in commands)
-
-
-def rendered_compose(
-    *profiles: str,
-    environment: dict[str, str] | None = None,
-    files: tuple[str, ...] = ("compose.yaml",),
-) -> dict[str, Any]:
-    profile_arguments = [argument for profile in profiles for argument in ("--profile", profile)]
-    file_arguments = [argument for name in files for argument in ("-f", name)]
-    environment_for_compose = (
-        os.environ
-        | {"AEGIS_RELEASE_ID": "test-release-identity"}
-        | (environment or {})
-    )
-    result = run_container(
-        [
-            *CONTAINER_COMMAND,
-            "compose",
-            *profile_arguments,
-            *file_arguments,
-            "config",
-            "--format",
-            "json",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-        env=validated_compose_environment(environment_for_compose),
-    )
-    return cast(dict[str, Any], json.loads(result.stdout))
 
 
 def adapted_caddyfile(path: Path, *, tls_host: str | None = None) -> dict[str, Any]:
@@ -854,6 +825,16 @@ def test_only_the_two_caddyfile_binds_are_relabeled_shared_read_only() -> None:
     assert rendered == [
         ("caddy", str(caddy / "Caddyfile"), "/etc/caddy/Caddyfile", True, relabel),
         ("caddy-local", str(caddy / "Caddyfile.local"), "/etc/caddy/Caddyfile", True, relabel),
+    ]
+
+
+def test_postgres_health_probes_tcp_so_the_reconcile_socket_never_reports_ready() -> None:
+    """The entrypoint's reconcile server listens only on the Unix socket."""
+    declared = yaml.safe_load((REPOSITORY / "compose.yaml").read_text(encoding="utf-8"))
+
+    assert declared["services"]["postgres"]["healthcheck"]["test"] == [
+        "CMD-SHELL",
+        'pg_isready -h 127.0.0.1 -p 5432 -U postgres -d "${AEGIS_DB_NAME:-aegis}"',
     ]
 
 

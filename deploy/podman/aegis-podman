@@ -1,0 +1,309 @@
+#!/usr/bin/env python3
+"""Aegis on rootless Podman: Quadlet unit rendering.
+
+The operator runs this file with the host's system Python (3.11 or newer), outside any
+checkout, so it imports only the standard library. The Quadlet templates ship beside it in
+``quadlet/``. Their only substitution syntax is ``@@NAME@@``, every value is validated before
+it reaches a unit file, and an unknown or leftover token fails the whole render. The units
+need systemd 254 or newer (RestartSteps=, RestartMaxDelaySec= and RestartMode=).
+"""
+from __future__ import annotations
+
+import ipaddress
+import posixpath
+import re
+import stat
+import sys
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+
+TEMPLATE_DIRECTORY = Path(__file__).resolve().parent / "quadlet"
+TEMPLATE_NAMES = frozenset({
+    "backend.network", "edge.network", "tls-hop.network",
+    "postgres-data.volume", "indexer-coordination.volume", "staging.volume",
+    "derivatives.volume", "quarantine.volume", "caddy-data.volume",
+    "postgres.container", "migrate.container", "web.container", "operations.container",
+    "indexer.container", "media.container", "gateway.container", "caddy.container",
+    "caddy.socket",
+})
+TOKEN = re.compile(r"@@([A-Z][A-Z0-9_]*)@@")
+PREFIX = re.compile(r"[a-z][a-z0-9-]{0,30}-")
+RELEASE = re.compile(r"sha-[0-9a-f]{40}")
+TEST_RELEASE = re.compile(r"test-[0-9a-z][0-9a-z-]{0,58}")
+_COMPONENT = r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*"
+# A registry port, 1 to 65535.
+_PORT = (
+    r"(?:6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}"
+    r"|[1-9][0-9]{0,3})"
+)
+IMAGE = re.compile(
+    rf"(?:[a-z0-9]+(?:[.-][a-z0-9]+)*(?::{_PORT})?/)?{_COMPONENT}(?:/{_COMPONENT})*"
+    r"@sha256:[0-9a-f]{64}"
+)
+# Local image IDs stand in for release digests only when the test flag allows them.
+LOCAL_IMAGE_ID = re.compile(r"[0-9a-f]{64}")
+HOST_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+# The containers that read originals run as an Aegis reader type, or, in the deployment
+# test, as plain container_t. Nothing else may lift or change their confinement.
+READER_TYPE = re.compile(r"container_t|aegis_[a-z0-9_]{1,50}\.process")
+MAX_GID = 2**32 - 2
+# Absolute and normalized, of plain components that Podman's volume syntax, unit-file words
+# and systemd specifier or variable expansion all read literally.
+SECRETS_DIR = re.compile(r"(?:/[A-Za-z0-9._@+-]+)+")
+PRIVATE_IPV4 = tuple(
+    ipaddress.IPv4Network(network) for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+)
+# Fixed backend hosts, in the lower half of the subnet; the IPRange pool is the upper half.
+WEB_HOST = 10
+GATEWAY_HOST = 11
+# Where each rendered unit goes, relative to the user's configuration directory. Quadlet reads
+# only its own unit types, so the socket is installed as a plain systemd user unit.
+UNIT_DIRECTORIES = {
+    ".container": "containers/systemd",
+    ".network": "containers/systemd",
+    ".volume": "containers/systemd",
+    ".socket": "systemd/user",
+}
+
+
+class RenderError(ValueError):
+    """An install value or template is unsafe; nothing is rendered."""
+
+
+@dataclass(frozen=True)
+class UnitConfig:
+    """Install-time values for the Quadlet templates.
+
+    ``names`` are the hostnames and IP literals Caddy serves; the first one is canonical
+    and forms the public URL. ``secrets_dir`` holds one file per secret, named as in
+    compose.yaml. ``backend_subnet`` is a private IPv4 /24 that collides with nothing else.
+    With ``install_sections`` false, no unit carries an [Install] section, so nothing it
+    renders starts at boot (the deployment test installs units that way).
+    """
+
+    prefix: str
+    release: str
+    https_port: int
+    names: tuple[str, ...]
+    host_gid: int
+    reader_type: str
+    image_backend: str
+    image_gateway: str
+    image_postgres: str
+    image_caddy: str
+    secrets_dir: str
+    backend_subnet: str
+    allow_test_values: bool = False
+    install_sections: bool = True
+
+
+def _text(field: str, value: object) -> str:
+    if not isinstance(value, str):
+        raise RenderError(f"{field} must be a string")
+    if "\n" in value or "\r" in value or "\0" in value or "@@" in value:
+        raise RenderError(f"{field} contains a line break, NUL or token marker")
+    return value
+
+
+def _matching(field: str, value: object, pattern: re.Pattern[str]) -> str:
+    text = _text(field, value)
+    if pattern.fullmatch(text) is None:
+        raise RenderError(f"{field} is invalid")
+    return text
+
+
+def _integer(field: str, value: object, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise RenderError(f"{field} must be an integer")
+    if not minimum <= value <= maximum:
+        raise RenderError(f"{field} must be between {minimum} and {maximum}")
+    return value
+
+
+def _image(field: str, value: object, allow_test_values: bool) -> str:
+    text = _text(field, value)
+    if IMAGE.fullmatch(text) or (allow_test_values and LOCAL_IMAGE_ID.fullmatch(text)):
+        return text
+    raise RenderError(f"{field} must be a repository@sha256:<64 hex> reference")
+
+
+def _host(value: object) -> str:
+    """One site name as it appears in URLs and host lists: IPv6 literals in brackets."""
+    text = _text("names", value)
+    if not text.isascii():
+        raise RenderError("names must be ASCII; give internationalized names in punycode")
+    if "%" in text:
+        raise RenderError("names must not carry an IPv6 zone")
+    try:
+        address = ipaddress.ip_address(text)
+    except ValueError:
+        address = None
+    if address is not None:
+        if address.is_unspecified or address.is_multicast:
+            raise RenderError("names must not be an unspecified or multicast address")
+        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+            raise RenderError("names must give an IPv4 address in IPv4 form")
+        return f"[{address}]" if address.version == 6 else str(address)
+    # RFC 1123 hostname. An all-numeric last label would read as a malformed address.
+    hostname = text.lower()
+    labels = hostname.split(".")
+    if (
+        len(hostname) > 253
+        or any(HOST_LABEL.fullmatch(label) is None for label in labels)
+        or labels[-1].isdigit()
+    ):
+        raise RenderError(f"names: {text!r} is not a hostname or IP literal")
+    return hostname
+
+
+def _secrets_dir(value: object) -> str:
+    text = _matching("secrets_dir", value, SECRETS_DIR)
+    if posixpath.normpath(text) != text:
+        raise RenderError("secrets_dir must be a normalized absolute path")
+    return text
+
+
+def _backend_subnet(value: object) -> ipaddress.IPv4Network:
+    text = _text("backend_subnet", value)
+    try:
+        network = ipaddress.ip_network(text)
+    except ValueError:
+        raise RenderError("backend_subnet must be an IPv4 network address") from None
+    if (
+        not isinstance(network, ipaddress.IPv4Network)
+        or network.prefixlen != 24
+        or str(network) != text
+        or not any(network.subnet_of(private) for private in PRIVATE_IPV4)
+    ):
+        raise RenderError("backend_subnet must be a private IPv4 /24 such as 192.168.240.0/24")
+    return network
+
+
+def unit_values(config: UnitConfig) -> dict[str, str]:
+    """Validate ``config`` and derive every token's value."""
+    for flag in ("allow_test_values", "install_sections"):
+        if not isinstance(getattr(config, flag), bool):
+            raise RenderError(f"{flag} must be a boolean")
+    test = config.allow_test_values
+    prefix = _matching("prefix", config.prefix, PREFIX)
+    release = _text("release", config.release)
+    if not (RELEASE.fullmatch(release) or (test and TEST_RELEASE.fullmatch(release))):
+        raise RenderError("release must be sha-<40 hex>")
+    port = _integer("https_port", config.https_port, 1024, 65535)
+    gid = _integer("host_gid", config.host_gid, 1, MAX_GID)
+    reader_type = _matching("reader_type", config.reader_type, READER_TYPE)
+    if not isinstance(config.names, tuple) or not config.names:
+        raise RenderError("names must be a non-empty tuple")
+    hosts = [_host(name) for name in config.names]
+    if len(set(hosts)) != len(hosts):
+        raise RenderError("names must not repeat")
+    sites = [f"https://{host}:{port}" for host in hosts]
+    subnet = _backend_subnet(config.backend_subnet)
+    return {
+        "PREFIX": prefix,
+        "RELEASE": release,
+        "HTTPS_PORT": str(port),
+        "HOST_GID": str(gid),
+        "READER_TYPE": reader_type,
+        "IMAGE_BACKEND": _image("image_backend", config.image_backend, test),
+        "IMAGE_GATEWAY": _image("image_gateway", config.image_gateway, test),
+        "IMAGE_POSTGRES": _image("image_postgres", config.image_postgres, test),
+        "IMAGE_CADDY": _image("image_caddy", config.image_caddy, test),
+        "PUBLIC_URL": sites[0],
+        "ALLOWED_HOSTS": ",".join(hosts),
+        # Caddy needs a space between site addresses (Caddyfile.lan: {$AEGIS_LAN_SITES}).
+        "LAN_SITES": ", ".join(sites),
+        "SECRETS_DIR": _secrets_dir(config.secrets_dir),
+        # Quadlet recreates a container on every restart, but nginx resolves web and web
+        # resolves the gateway only once, at start: both keep fixed addresses.
+        "BACKEND_SUBNET": str(subnet),
+        "BACKEND_IP_RANGE": str(list(subnet.subnets(new_prefix=25))[1]),
+        "WEB_ADDRESS": str(subnet[WEB_HOST]),
+        "GATEWAY_ADDRESS": str(subnet[GATEWAY_HOST]),
+    }
+
+
+def load_templates(directory: Path = TEMPLATE_DIRECTORY) -> dict[str, str]:
+    """Read exactly the expected templates: regular files only, no other entries."""
+    try:
+        entries = {path.name: path for path in directory.iterdir()}
+        if set(entries) != TEMPLATE_NAMES:
+            raise RenderError(f"the Quadlet template set in {directory} is not the expected one")
+        templates = {}
+        for name, path in sorted(entries.items()):
+            if not stat.S_ISREG(path.lstat().st_mode):
+                raise RenderError(f"template {name} is not a regular file")
+            templates[name] = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise RenderError(f"cannot read the Quadlet templates in {directory}: {error}") from None
+    return templates
+
+
+def _substitute(name: str, text: str, values: Mapping[str, str]) -> str:
+    def replace(match: re.Match[str]) -> str:
+        token = match.group(1)
+        if token not in values:
+            raise RenderError(f"{name}: unknown token @@{token}@@")
+        return values[token]
+
+    if "\0" in text:
+        raise RenderError(f"{name}: template contains NUL")
+    rendered = TOKEN.sub(replace, text)
+    if "@@" in rendered:
+        raise RenderError(f"{name}: malformed or leftover token")
+    return rendered
+
+
+def unit_directory(name: str) -> str:
+    """The directory a rendered unit belongs in, relative to the user's config directory."""
+    suffix = posixpath.splitext(name)[1]
+    if suffix not in UNIT_DIRECTORIES:
+        raise RenderError(f"{name} is not a rendered unit")
+    return UNIT_DIRECTORIES[suffix]
+
+
+def _without_install(text: str) -> str:
+    """Drop every line of the [Install] section, up to the next section header."""
+    kept = []
+    installing = False
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            installing = stripped == "[Install]"
+        if not installing:
+            kept.append(line)
+    return "".join(kept).rstrip("\n") + "\n"
+
+
+def render_units(
+    config: UnitConfig, templates: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Render every template for ``config``: rendered unit file name -> unit text.
+
+    Unit file names, and so the unit and Podman object names, are ``<prefix><template>``.
+    Install each file under ``unit_directory(name)``. Quadlet ignores ``.socket`` files, so
+    ``<prefix>caddy.socket`` goes with the user's systemd units (``systemd/user``), not with
+    the Quadlet units (``containers/systemd``).
+    """
+    values = unit_values(config)
+    sources = load_templates() if templates is None else dict(templates)
+    if set(sources) != TEMPLATE_NAMES:
+        raise RenderError("the Quadlet template set is not the expected one")
+    rendered = {
+        values["PREFIX"] + name: _substitute(name, text, values)
+        for name, text in sorted(sources.items())
+    }
+    if not config.install_sections:
+        rendered = {name: _without_install(text) for name, text in rendered.items()}
+    return rendered
+
+
+def main(argv: list[str] | None = None) -> int:
+    del argv
+    print("aegis-podman: this build provides only the unit renderer", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

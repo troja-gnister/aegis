@@ -1,0 +1,3 @@
+# Mirrors compose.yaml volume `staging`.
+[Volume]
+VolumeName=@@PREFIX@@staging
