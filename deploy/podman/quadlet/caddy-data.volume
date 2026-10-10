@@ -1,3 +1,5 @@
 # Mirrors compose.yaml volume `caddy-data`.
 [Volume]
 VolumeName=@@PREFIX@@caddy-data
+# The install's token: aegis-podman removes only objects that carry it.
+Label=io.aegis.install=@@INSTALL_TOKEN@@

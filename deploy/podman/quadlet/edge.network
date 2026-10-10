@@ -1,3 +1,5 @@
 # Mirrors compose.yaml network `edge`: the gateway and Caddy; not internal.
 [Network]
 NetworkName=@@PREFIX@@edge
+# The install's token: aegis-podman removes only objects that carry it.
+Label=io.aegis.install=@@INSTALL_TOKEN@@

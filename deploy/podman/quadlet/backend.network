@@ -7,3 +7,5 @@ NetworkName=@@PREFIX@@backend
 Internal=true
 Subnet=@@BACKEND_SUBNET@@
 IPRange=@@BACKEND_IP_RANGE@@
+# The install's token: aegis-podman removes only objects that carry it.
+Label=io.aegis.install=@@INSTALL_TOKEN@@

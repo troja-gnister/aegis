@@ -1,24 +1,55 @@
 #!/usr/bin/env python3
-"""Aegis on rootless Podman: Quadlet unit rendering.
+"""Aegis on rootless Podman: the host installer and its Quadlet unit renderer.
 
 The operator runs this file with the host's system Python (3.11 or newer), outside any
-checkout, so it imports only the standard library. The Quadlet templates ship beside it in
-``quadlet/``. Their only substitution syntax is ``@@NAME@@``, every value is validated before
-it reaches a unit file, and an unknown or leftover token fails the whole render. The units
-need systemd 254 or newer (RestartSteps=, RestartMaxDelaySec= and RestartMode=).
+checkout, so it imports only the standard library. Bootstrap copies just this script out of
+the release's backend image (spec D4); ``init`` and ``upgrade`` then extract that release's
+own ``/usr/share/aegis/podman/`` and render with its renderer and templates, so the units
+always come from the release they install.
+
+Rendering: the Quadlet templates live in ``quadlet/``. Their only substitution syntax is
+``@@NAME@@``, every value is validated before it reaches a unit file, and an unknown or
+leftover token fails the whole render. The units need systemd 254 or newer (RestartSteps=,
+RestartMaxDelaySec= and RestartMode=).
+
+Installing: the installer creates, changes and removes only what its record names, by exact
+path, identity or object name, never by pattern. Every program runs through one runner as an
+argument vector; there is no shell and no sudo.
 """
 from __future__ import annotations
 
+import argparse
+import base64
+import binascii
+import contextlib
+import dataclasses
+import datetime
+import errno
+import fcntl
+import hashlib
 import ipaddress
+import json
+import os
 import posixpath
 import re
+import secrets
+import shlex
+import shutil
+import socket
 import stat
+import subprocess
 import sys
-from collections.abc import Mapping
-from dataclasses import dataclass
+import time
+import types
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, TextIO
 
 TEMPLATE_DIRECTORY = Path(__file__).resolve().parent / "quadlet"
+# The interface an installer relies on when it renders with a release's own copy of this file:
+# UnitConfig, load_templates, render_units and unit_directory. Change it only with a new value.
+RENDER_API = 1
 TEMPLATE_NAMES = frozenset({
     "backend.network", "edge.network", "tls-hop.network",
     "postgres-data.volume", "indexer-coordination.volume", "staging.volume",
@@ -51,6 +82,8 @@ MAX_GID = 2**32 - 2
 # Absolute and normalized, of plain components that Podman's volume syntax, unit-file words
 # and systemd specifier or variable expansion all read literally.
 SECRETS_DIR = re.compile(r"(?:/[A-Za-z0-9._@+-]+)+")
+# Marks the volumes and networks one install created, so removal can match exact identity.
+INSTALL_TOKEN = re.compile(r"[0-9a-f]{32}")
 PRIVATE_IPV4 = tuple(
     ipaddress.IPv4Network(network) for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
 )
@@ -78,6 +111,8 @@ class UnitConfig:
     ``names`` are the hostnames and IP literals Caddy serves; the first one is canonical
     and forms the public URL. ``secrets_dir`` holds one file per secret, named as in
     compose.yaml. ``backend_subnet`` is a private IPv4 /24 that collides with nothing else.
+    ``install_token`` (32 hex) labels every volume and network, so the installer removes
+    only objects that carry it.
     With ``install_sections`` false, no unit carries an [Install] section, so nothing it
     renders starts at boot (the deployment test installs units that way).
     """
@@ -94,6 +129,7 @@ class UnitConfig:
     image_caddy: str
     secrets_dir: str
     backend_subnet: str
+    install_token: str
     allow_test_values: bool = False
     install_sections: bool = True
 
@@ -221,6 +257,7 @@ def unit_values(config: UnitConfig) -> dict[str, str]:
         "BACKEND_IP_RANGE": str(list(subnet.subnets(new_prefix=25))[1]),
         "WEB_ADDRESS": str(subnet[WEB_HOST]),
         "GATEWAY_ADDRESS": str(subnet[GATEWAY_HOST]),
+        "INSTALL_TOKEN": _matching("install_token", config.install_token, INSTALL_TOKEN),
     }
 
 
@@ -299,10 +336,2512 @@ def render_units(
     return rendered
 
 
-def main(argv: list[str] | None = None) -> int:
-    del argv
-    print("aegis-podman: this build provides only the unit renderer", file=sys.stderr)
-    return 2
+# ==========================================================================================
+# The host installer (spec D3, D4, D7, D9, D11, D13)
+# ==========================================================================================
+
+DEFAULT_REGISTRY = "ghcr.io/troja-gnister"
+PRODUCTION_PREFIX = "aegis-"
+PRODUCTION_READER_TYPE = "aegis_reader.process"
+ROLES = ("backend", "gateway", "postgres", "caddy")
+# Always the local engine: a CONTAINER_HOST in the environment would otherwise make Podman
+# talk to a remote service.
+PODMAN = ("podman", "--remote=false")
+SYSTEMCTL = ("systemctl", "--user")
+RELEASE_SOURCE = "/usr/share/aegis/podman"
+RELEASE_INSTALLER = "aegis-podman"
+RELEASE_TEMPLATES = "quadlet"
+CA_CERTIFICATE = "/data/caddy/pki/authorities/local/root.crt"
+# The label every volume and network carries; its value is the install's recorded token.
+INSTALL_LABEL = "io.aegis.install"
+# Releases are ordered by the backend image's commit time, which CI's publish job sets.
+CREATED_LABEL = "org.opencontainers.image.created"
+# Exactly the secret files the templates bind, named as in compose.yaml (spec D9).
+SECRET_NAMES = (
+    "postgres-superuser-password", "db-migrator-password", "db-web-password",
+    "db-operations-password", "db-indexer-password", "db-media-password",
+    "django-secret-key", "auth-throttle-hmac-key",
+)
+BOOTSTRAP_PASSWORD = "bootstrap-password"
+BOOTSTRAP_TARGET = "/run/secrets/bootstrap-password"
+# The images' runtime user reads every secret file, which must have mode 0600. Secrets keep
+# the default mapping's 10001:10001: PostgreSQL reads them as root, and read_secret checks
+# only their owner and mode.
+SECRET_OWNER = "10001:10001"
+# Files the group-mapped containers (GIDMap=+g10001:@<host gid>:1, spec D5) must see as owned
+# by 10001:10001, such as the mount manifest: inside ``podman unshare`` the operator's own
+# group, which those containers see as 10001, is gid 0.
+MAPPED_OWNER = "10001:0"
+CONTAINER_FILE_TYPE = "container_file_t"
+MINIMUM_SYSTEMD = 254
+MINIMUM_PORT = 1024
+DEFAULT_DEADLINE = 600.0
+POLL_SECONDS = 5.0
+STATE_VERSION = 1
+PHASES = ("initializing", "ready")
+DESIRED = ("stopped", "running")
+REGISTRY = re.compile(rf"[a-z0-9]+(?:[.-][a-z0-9]+)*(?::{_PORT})?(?:/{_COMPONENT})*")
+CONTAINER_ID = re.compile(r"[0-9a-f]{64}")
+DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+USERNAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9@.+_-]{0,149}")
+_DOMAIN_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+EMAIL = re.compile(rf"[A-Za-z0-9_+][A-Za-z0-9._%+-]{{0,63}}@{_DOMAIN_LABEL}(?:\.{_DOMAIN_LABEL})+")
+PEM_CERTIFICATE = re.compile(
+    r"-----BEGIN CERTIFICATE-----\n((?:[A-Za-z0-9+/=]{1,76}\n){1,400})"
+    r"-----END CERTIFICATE-----\n?"
+)
+RFC3339 = re.compile(
+    r"(\d{4})-(\d{2})-(\d{2})[Tt ](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?"
+    r"(?:([Zz])|([+-])(\d{2}):(\d{2}))"
+)
+# A fixed list of rarely used /24s. The first that overlaps no Podman network and no host
+# route, in any routing table, becomes the backend subnet.
+SUBNET_CANDIDATES = tuple(
+    ipaddress.IPv4Network(f"{prefix}.{octet}.0/24")
+    for prefix in ("10.213", "172.29") for octet in range(16)
+)
+INSTALL_DIRECTORIES = frozenset(UNIT_DIRECTORIES.values())
+UNIT_PROPERTIES = ("Id", "LoadState", "ActiveState", "SubState", "Result", "NRestarts", "Job")
+# Temporary names the installer itself uses; status reports leftovers of an interrupted run.
+TEMPORARY_SUFFIXES = (".tmp", ".partial", ".cid")
+# web unit keys bootstrap-password copies, and those it knowingly leaves out. Any other key
+# is refused, so a later release cannot add a confinement the one-off container would miss.
+BOOTSTRAP_COPIED = frozenset({
+    "User", "Group", "Environment", "Volume", "ReadOnly", "Tmpfs", "DropCapability",
+    "AddCapability", "NoNewPrivileges", "Unmask", "GIDMap", "SecurityLabelType", "RunInit",
+})
+BOOTSTRAP_IGNORED = frozenset({
+    "ContainerName", "Image", "Exec", "Pull", "Network", "HealthCmd", "HealthInterval",
+    "HealthTimeout", "HealthRetries", "HealthStartPeriod", "Notify",
+})
+
+Runner = Callable[..., "subprocess.CompletedProcess[str]"]
+Network = ipaddress.IPv4Network | ipaddress.IPv6Network
+
+
+class InstallError(RuntimeError):
+    """The installer refuses, or cannot finish safely; what it did so far is recorded."""
+
+
+class LockBusy(InstallError):
+    """Another aegis-podman command holds the lock."""
+
+
+def run_command(arguments: Sequence[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
+    """Run one program as an argument vector, never through a shell, with nothing on stdin."""
+    return subprocess.run(
+        list(arguments), stdin=subprocess.DEVNULL, capture_output=True, text=True,
+        timeout=timeout, check=False,
+    )
+
+
+def port_in_use(port: int) -> bool:
+    """Whether something already listens on ``port`` on any IPv4 or IPv6 address.
+
+    It binds each family's wildcard address, as the systemd socket will, and closes at once.
+    """
+    for family, address in ((socket.AF_INET, "0.0.0.0"), (socket.AF_INET6, "::")):
+        try:
+            probe = socket.socket(family, socket.SOCK_STREAM)
+        except OSError:
+            continue  # the host does not offer this address family
+        with probe:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if family == socket.AF_INET6:
+                probe.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            try:
+                probe.bind((address, port))
+            except OSError as error:
+                if error.errno == errno.EADDRINUSE:
+                    return True
+                if error.errno in (errno.EADDRNOTAVAIL, errno.EAFNOSUPPORT):
+                    continue
+                raise InstallError(f"cannot test port {port}: {error.strerror}") from None
+    return False
+
+
+@dataclass
+class Host:
+    """Everything outside the installer's own code: programs, clock, sockets and paths.
+
+    Every program runs through ``run``, and every file the installer writes is under
+    ``home`` or the XDG directories ``environ`` names, so tests replace the host with fakes
+    and a temporary directory.
+    """
+
+    home: Path
+    run: Runner = run_command
+    out: TextIO = field(default_factory=lambda: sys.stdout)
+    err: TextIO = field(default_factory=lambda: sys.stderr)
+    uid: int = field(default_factory=os.getuid)
+    gid: int = field(default_factory=os.getgid)
+    environ: Mapping[str, str] = field(default_factory=lambda: dict(os.environ))
+    monotonic: Callable[[], float] = time.monotonic
+    sleep: Callable[[float], None] = time.sleep
+    port_in_use: Callable[[int], bool] = port_in_use
+    quadlet: Path = Path("/usr/libexec/podman/quadlet")
+    selinux_enforce: Path = Path("/sys/fs/selinux/enforce")
+
+
+def _absolute(name: str, value: str) -> Path:
+    if not os.path.isabs(value):
+        raise InstallError(f"{name} must be an absolute path, not {value!r}")
+    return Path(os.path.normpath(value))
+
+
+@dataclass(frozen=True)
+class Paths:
+    """Where the installer keeps its files.
+
+    ``config`` is the XDG configuration home, under which systemd and Quadlet read user
+    units. ``data`` holds the record, secrets, release trees and lock. It is always
+    ``~/.local/share/aegis``, whatever a shell sets ``XDG_DATA_HOME`` to, so every session
+    finds the same record; ``--state-home`` is the only alternative, and the configuration
+    file then moves there too, so a test install never shares a file with the operator's.
+    """
+
+    config: Path
+    data: Path
+    config_directory: Path
+
+    @classmethod
+    def resolve(
+        cls, home: Path, environ: Mapping[str, str], state_home: str | None = None,
+    ) -> Paths:
+        config_value = environ.get("XDG_CONFIG_HOME", "")
+        config = _absolute("XDG_CONFIG_HOME", config_value) if config_value else home / ".config"
+        if state_home is not None:
+            data = _absolute("--state-home", state_home)
+            return cls(config=config, data=data, config_directory=data)
+        data = home / ".local" / "share" / "aegis"
+        return cls(config=config, data=data, config_directory=config / "aegis")
+
+    @property
+    def env_file(self) -> Path:
+        return self.config_directory / "aegis.env"
+
+    @property
+    def secrets(self) -> Path:
+        return self.data / "secrets"
+
+    @property
+    def releases(self) -> Path:
+        return self.data / "releases"
+
+    @property
+    def state(self) -> Path:
+        return self.data / "state.json"
+
+    @property
+    def lock(self) -> Path:
+        return self.data / "lock"
+
+    def release_tree(self, release: str) -> Path:
+        return self.releases / release / "podman"
+
+    def unit_directories(self) -> tuple[Path, ...]:
+        return tuple(self.config / directory for directory in sorted(INSTALL_DIRECTORIES))
+
+    def private_directories(self) -> tuple[Path, ...]:
+        """The installer's own directories, each after its parent."""
+        ordered = (self.config_directory, self.data, self.secrets, self.releases)
+        return tuple(dict.fromkeys(ordered))
+
+    def removable_roots(self) -> tuple[Path, ...]:
+        """Where a recorded file may be: nothing outside these is ever removed."""
+        return (*self.unit_directories(), self.config_directory, self.secrets, self.releases)
+
+
+# Field types of the record; a record that does not match is refused, not half-read.
+_STATE_TYPES: dict[str, type | tuple[type, ...]] = {
+    "phase": str, "release": str, "registry": str, "prefix": str, "names": list,
+    "https_port": int, "host_gid": int, "backend_subnet": str, "reader_type": str,
+    "install_token": str, "images": dict, "created": (str, type(None)),
+    "pending": (dict, type(None)), "desired": str, "install_sections": bool,
+    "firewall_zones": list, "installed": bool, "history": list, "files": dict,
+    "secrets": dict, "releases": dict, "units": dict, "volumes": list, "networks": list,
+    "extractions": list, "version": int,
+}
+_INVENTORY_TYPES: dict[str, type] = {
+    "files": list, "socket": str, "services": list, "oneshots": list, "generated": list,
+    "containers": dict, "health_checked": list, "images": dict,
+}
+
+
+@dataclass
+class State:
+    """The record (``state.json``): what the installer configured, wrote and owns.
+
+    ``files`` maps every file it wrote (units, configuration, release trees) to its sha256.
+    ``secrets`` maps each secret file to its device and inode: once handed to the container
+    user, the operator can no longer read it. ``volumes`` and ``networks`` are the names its
+    units define; each object Quadlet creates carries ``install_token`` as a label, and only
+    an object that does is ever removed. ``pending`` is an upgrade whose units may already be
+    written but which is not yet committed. ``desired`` is the run state the operator last
+    asked for. ``history`` lists, in order, every release that became current.
+    """
+
+    phase: str
+    release: str
+    registry: str
+    prefix: str
+    names: list[str]
+    https_port: int
+    host_gid: int
+    backend_subnet: str
+    reader_type: str
+    install_token: str
+    images: dict[str, str] = field(default_factory=dict)
+    created: str | None = None
+    pending: dict[str, Any] | None = None
+    desired: str = "stopped"
+    install_sections: bool = True
+    firewall_zones: list[str] = field(default_factory=list)
+    installed: bool = False
+    history: list[dict[str, Any]] = field(default_factory=list)
+    files: dict[str, dict[str, Any]] = field(default_factory=dict)
+    secrets: dict[str, dict[str, Any]] = field(default_factory=dict)
+    releases: dict[str, dict[str, str]] = field(default_factory=dict)
+    units: dict[str, Any] = field(default_factory=dict)
+    volumes: list[str] = field(default_factory=list)
+    networks: list[str] = field(default_factory=list)
+    extractions: list[str] = field(default_factory=list)
+    version: int = STATE_VERSION
+
+    @classmethod
+    def from_json(cls, data: object) -> State:
+        problem = _record_problem(data)
+        if problem is not None:
+            raise InstallError(f"the aegis-podman record is not usable ({problem}); it was "
+                               "not changed")
+        assert isinstance(data, dict)
+        return cls(**data)
+
+
+def _record_problem(data: object) -> str | None:
+    """What makes ``data`` an unusable record, or None."""
+    if not isinstance(data, dict):
+        return "not an object"
+    if set(data) != set(_STATE_TYPES):
+        return "unknown fields"
+    for name, expected in _STATE_TYPES.items():
+        value = data[name]
+        if isinstance(value, bool) and expected is int:
+            return f"{name} has the wrong type"
+        if not isinstance(value, expected):
+            return f"{name} has the wrong type"
+    if data["version"] != STATE_VERSION or data["phase"] not in PHASES:
+        return "unknown version or phase"
+    if data["desired"] not in DESIRED:
+        return "unknown run state"
+    if INSTALL_TOKEN.fullmatch(data["install_token"]) is None:
+        return "malformed install token"
+    if not all(isinstance(record, dict) and isinstance(record.get("sha256"), str)
+               and isinstance(record.get("kind"), str) for record in data["files"].values()):
+        return "malformed file entries"
+    if not all(isinstance(record, dict) for record in data["secrets"].values()):
+        return "malformed secret entries"
+    pending = data["pending"]
+    if pending is not None and not (
+        isinstance(pending.get("release"), str) and isinstance(pending.get("images"), dict)
+        and isinstance(pending.get("restart_queued", False), bool)
+    ):
+        return "malformed pending upgrade"
+    if data["install_sections"] and data["prefix"] != PRODUCTION_PREFIX:
+        return f"a stack with the prefix {data['prefix']} must never have [Install] sections"
+    if data["installed"] and not all(
+        isinstance(data["units"].get(key), expected) for key, expected in _INVENTORY_TYPES.items()
+    ):
+        return "installed without a unit inventory"
+    return None
+
+
+@dataclass(frozen=True)
+class RenderedUnit:
+    name: str
+    path: Path
+    text: str
+
+
+# -- running programs --------------------------------------------------------------------------
+
+
+def _say(host: Host, text: str = "") -> None:
+    print(text, file=host.out)
+
+
+def _detail(text: str | None) -> str:
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    return f": {lines[-1][:300]}" if lines else ""
+
+
+def _run(
+    host: Host, arguments: Sequence[str], *, timeout: float,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        return host.run(list(arguments), timeout=timeout)
+    except FileNotFoundError:
+        raise InstallError(f"{arguments[0]} is not installed") from None
+    except subprocess.TimeoutExpired:
+        command = " ".join(arguments[:4])
+        raise InstallError(f"{command} did not finish within {timeout:g}s") from None
+
+
+def _check(
+    host: Host, arguments: Sequence[str], what: str, *, timeout: float,
+) -> subprocess.CompletedProcess[str]:
+    result = _run(host, arguments, timeout=timeout)
+    if result.returncode != 0:
+        raise InstallError(f"{what} failed (exit {result.returncode}){_detail(result.stderr)}")
+    return result
+
+
+def _json_output(host: Host, arguments: Sequence[str], what: str, *, timeout: float = 120) -> Any:
+    result = _check(host, arguments, what, timeout=timeout)
+    try:
+        return json.loads(result.stdout or "null")
+    except json.JSONDecodeError:
+        raise InstallError(f"{what} did not print JSON") from None
+
+
+def _entries(value: object) -> list[dict[str, Any]]:
+    """The objects in a JSON listing; Podman prints null for an empty one."""
+    return [entry for entry in value if isinstance(entry, dict)] if isinstance(value, list) else []
+
+
+def _single(value: object, key: str, name: str, what: str) -> dict[str, Any]:
+    entries = _entries(value)
+    if len(entries) != 1 or entries[0].get(key) != name:
+        raise InstallError(f"{what} did not describe exactly {name}")
+    return entries[0]
+
+
+# -- files -------------------------------------------------------------------------------------
+
+
+def _read_regular(path: Path) -> bytes:
+    """A regular file's bytes, never through a symbolic link."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise InstallError(f"{path} is a symbolic link; refusing to use it") from None
+        raise
+    with os.fdopen(descriptor, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise InstallError(f"{path} is not a regular file; refusing to use it")
+        return handle.read()
+
+
+def _file_digest(path: Path) -> str | None:
+    """The sha256 of a regular file, or None when nothing is there; anything else is refused."""
+    try:
+        content = _read_regular(path)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise InstallError(f"cannot read {path}: {error.strerror}") from None
+    return hashlib.sha256(content).hexdigest()
+
+
+def _sync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _write_new(path: Path, content: bytes, mode: int) -> None:
+    """Create ``path`` (O_EXCL, never through a link) with ``mode``, write it and sync it."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+    descriptor = os.open(path, flags, mode)
+    try:
+        try:
+            os.fchmod(descriptor, mode)
+            view = memoryview(content)
+            while view:
+                view = view[os.write(descriptor, view):]
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(path)
+        raise
+
+
+def _write_atomic(path: Path, content: bytes, mode: int) -> None:
+    """Replace ``path``: an O_EXCL temporary in the same directory, fsync, then rename."""
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    _write_new(temporary, content, mode)
+    try:
+        os.rename(temporary, path)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary)
+        raise
+    _sync_directory(path.parent)
+
+
+def save_state(paths: Paths, state: State) -> None:
+    text = json.dumps(dataclasses.asdict(state), indent=2, sort_keys=True) + "\n"
+    _write_atomic(paths.state, text.encode("utf-8"), 0o600)
+
+
+def load_state(paths: Paths, uid: int) -> State | None:
+    try:
+        info = paths.state.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        raise InstallError(f"{paths.state} is not a regular file; refusing to read it")
+    if info.st_uid != uid or stat.S_IMODE(info.st_mode) & 0o077:
+        raise InstallError(f"{paths.state} must be yours with mode 0600; refusing to read it")
+    try:
+        data = json.loads(_read_regular(paths.state))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise InstallError(f"{paths.state} is not a readable record; it was not changed") from None
+    return State.from_json(data)
+
+
+def _check_directories(paths: Paths, uid: int, *, create: bool) -> None:
+    """The installer's own directories must be real, the operator's, and mode 0700.
+
+    Missing ones are created only with ``create``. A symbolic link is always refused, so
+    nothing the installer writes can land anywhere else.
+    """
+    for directory in paths.private_directories():
+        try:
+            info = directory.lstat()
+        except FileNotFoundError:
+            if not create:
+                continue
+            directory.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            directory.mkdir(mode=0o700)
+            directory.chmod(0o700)
+            info = directory.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            raise InstallError(f"{directory} is a symbolic link; refusing to use it")
+        if not stat.S_ISDIR(info.st_mode):
+            raise InstallError(f"{directory} is not a directory")
+        if info.st_uid != uid:
+            raise InstallError(f"{directory} is not owned by you")
+        if stat.S_IMODE(info.st_mode) != 0o700:
+            raise InstallError(f"{directory} must have mode 0700")
+
+
+@contextlib.contextmanager
+def _locked(paths: Paths, *, shared: bool = False) -> Iterator[None]:
+    """Hold the installer's lock: exclusive for changes, shared for reading the record."""
+    if not paths.data.is_dir():
+        raise InstallError("nothing is initialized yet; run aegis-podman init first")
+    try:
+        descriptor = os.open(
+            paths.lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
+        )
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise InstallError(f"{paths.lock} is a symbolic link; refusing to use it") from None
+        raise
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise InstallError(f"{paths.lock} is not a regular file")
+        try:
+            fcntl.flock(descriptor, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise LockBusy(
+                "another aegis-podman command is running; try again once it has finished"
+            ) from None
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def _accepted(record: Mapping[str, Any] | None) -> set[str]:
+    """The hashes a recorded file may have: its own, and while a write settles, the old one."""
+    if record is None:
+        return set()
+    return {value for value in (record.get("sha256"), record.get("previous")) if value}
+
+
+def _confined(paths: Paths, path: Path) -> bool:
+    """Whether ``path`` lies strictly inside one of the installer's own directories."""
+    text = os.path.normpath(str(path))
+    for root in paths.removable_roots():
+        prefix = os.path.normpath(str(root))
+        if text != prefix and os.path.commonpath([text, prefix]) == prefix:
+            return True
+    return False
+
+
+def _check_replaceable(state: State, path: Path) -> None:
+    """Refuse to overwrite a file the installer did not write, or one changed since."""
+    current = _file_digest(path)
+    if current is None:
+        return
+    record = state.files.get(str(path))
+    if record is None:
+        raise InstallError(
+            f"{path} exists but aegis-podman did not write it; move it away first "
+            "(it is never overwritten)"
+        )
+    if current not in _accepted(record):
+        raise InstallError(
+            f"{path} was changed since aegis-podman wrote it; restore it or move it away first"
+        )
+
+
+def _check_removable(paths: Paths, state: State, path: Path, *, force: bool) -> None:
+    if not _confined(paths, path):
+        raise InstallError(f"the record names {path}, outside aegis-podman's own directories")
+    current = _file_digest(path)
+    if current is None or force:
+        return
+    if current not in _accepted(state.files.get(str(path))):
+        raise InstallError(
+            f"{path} was changed since aegis-podman wrote it; restore it, or rerun with "
+            "--force-recorded to remove it anyway"
+        )
+
+
+def _publish(paths: Paths, state: State, path: Path, content: bytes, kind: str, mode: int) -> bool:
+    """Write one recorded file; True when its content changed.
+
+    Until ``_settle`` runs, the record accepts both the old and the new hash, so an
+    interruption at any point leaves a file that the record still covers.
+    """
+    current = _file_digest(path)
+    new = hashlib.sha256(content).hexdigest()
+    if current == new and stat.S_IMODE(path.lstat().st_mode) == mode:
+        state.files[str(path)] = {"kind": kind, "sha256": new}
+        return False
+    entry: dict[str, Any] = {"kind": kind, "sha256": new}
+    if current is not None:
+        entry["previous"] = current
+    state.files[str(path)] = entry
+    save_state(paths, state)
+    _write_atomic(path, content, mode)
+    return current != new
+
+
+def _settle(paths: Paths, state: State) -> None:
+    for record in state.files.values():
+        record.pop("previous", None)
+    save_state(paths, state)
+
+
+def _remove_recorded(paths: Paths, state: State, path: Path) -> None:
+    if not _confined(paths, path):
+        raise InstallError(f"the record names {path}, outside aegis-podman's own directories")
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(path)
+    del state.files[str(path)]
+    save_state(paths, state)
+
+
+def _remove_tree(root: Path) -> None:
+    """Remove a tree the installer created itself, read-only directories included."""
+    try:
+        info = root.lstat()
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(info.st_mode):
+        root.unlink()
+        return
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        os.chmod(directory, 0o700)
+        with os.scandir(directory) as entries:
+            pending.extend(
+                Path(entry.path) for entry in entries if entry.is_dir(follow_symlinks=False)
+            )
+    shutil.rmtree(root)
+
+
+def _remove_empty_directories(root: Path) -> None:
+    """Remove ``root`` and the directories below it that are empty; keep anything else."""
+    if not root.is_dir() or root.is_symlink():
+        return
+    for directory, _, _ in os.walk(root, topdown=False):
+        with contextlib.suppress(OSError):
+            os.rmdir(directory)
+
+
+def _leftovers(paths: Paths, prefix: str) -> list[Path]:
+    """Temporary files an interrupted run left in the installer's own directories, and its
+    unit-file temporaries in the unit directories."""
+    found = []
+    for directory, start in (
+        *((path, ".") for path in paths.private_directories()),
+        *((path, f".{prefix}") for path in paths.unit_directories()),
+    ):
+        with contextlib.suppress(FileNotFoundError, NotADirectoryError):
+            found += [
+                Path(entry.path) for entry in os.scandir(directory)
+                if entry.name.startswith(start) and entry.name.endswith(TEMPORARY_SUFFIXES)
+            ]
+    return sorted(found)
+
+
+# -- validation and preflight ------------------------------------------------------------------
+
+
+def _release_argument(value: str) -> str:
+    if RELEASE.fullmatch(value) is None:
+        raise InstallError(f"release {value!r} is not sha-<40 hex>, the tag CI publishes")
+    return value
+
+
+def _registry_argument(value: str) -> str:
+    domain = value.partition("/")[0]
+    if REGISTRY.fullmatch(value) is None or not (
+        "." in domain or ":" in domain or domain == "localhost"
+    ):
+        raise InstallError(
+            f"registry {value!r} must be a lowercase registry host and path, such as "
+            f"{DEFAULT_REGISTRY}"
+        )
+    return value
+
+
+def _prefix_argument(value: str | None) -> str:
+    prefix = PRODUCTION_PREFIX if value is None else value
+    if PREFIX.fullmatch(prefix) is None:
+        raise InstallError(f"--prefix {prefix!r} must match {PREFIX.pattern}")
+    return prefix
+
+
+def _port_argument(port: int) -> int:
+    if not MINIMUM_PORT <= port <= 65535:
+        raise InstallError(
+            f"--https-port must be between {MINIMUM_PORT} and 65535: no privileged ports"
+        )
+    return port
+
+
+def _names_argument(names: Sequence[str], addresses: Sequence[str]) -> list[str]:
+    for address in addresses:
+        try:
+            ipaddress.ip_address(address)
+        except ValueError:
+            raise InstallError(f"--address {address!r} is not an IP address") from None
+    chosen = [*names, *addresses]
+    try:
+        hosts = [_host(name) for name in chosen]
+    except RenderError as error:
+        raise InstallError(str(error)) from None
+    if len(set(hosts)) != len(hosts):
+        raise InstallError("--name and --address values must not repeat")
+    return chosen
+
+
+def _subnet_argument(value: str | None) -> str | None:
+    if value is None:
+        return None
+    try:
+        return str(_backend_subnet(value))
+    except RenderError as error:
+        raise InstallError(f"--backend-subnet: {error}") from None
+
+
+def _preflight(host: Host, paths: Paths) -> None:
+    """Rootless Podman with SELinux enforcing, systemd 254 or newer, Quadlet, linger, and a
+    user manager that reads units from the configuration home the installer writes to."""
+    info = _json_output(host, [*PODMAN, "info", "--format", "json"], "podman info")
+    security = info.get("host", {}).get("security", {}) if isinstance(info, dict) else {}
+    if not isinstance(security, dict) or security.get("rootless") is not True:
+        raise InstallError("Podman is not running rootless; run aegis-podman as the operator")
+    if security.get("selinuxEnabled") is not True:
+        raise InstallError("SELinux is not enabled; this deployment needs it enforcing")
+    try:
+        enforcing = host.selinux_enforce.read_text(encoding="ascii").strip() == "1"
+    except OSError:
+        enforcing = False
+    if not enforcing:
+        raise InstallError("SELinux is not enforcing; this deployment needs it enforcing")
+    version = _check(host, ["systemctl", "--version"], "systemctl --version", timeout=60).stdout
+    match = re.match(r"systemd (\d+)\b", version)
+    if match is None:
+        raise InstallError("cannot read the systemd version from systemctl --version")
+    if int(match.group(1)) < MINIMUM_SYSTEMD:
+        raise InstallError(
+            f"systemd {match.group(1)} is too old; the units need {MINIMUM_SYSTEMD} or newer"
+        )
+    if not (host.quadlet.is_file() and os.access(host.quadlet, os.X_OK)):
+        raise InstallError(f"Podman's Quadlet generator {host.quadlet} is missing")
+    linger = _check(
+        host, ["loginctl", "show-user", str(host.uid), "--property=Linger", "--value"],
+        "loginctl show-user", timeout=60,
+    ).stdout.strip()
+    if linger != "yes":
+        raise InstallError(
+            "linger is off for your account, so the units would stop when you log out and "
+            "would not start at boot. Turn it on as yourself (for your own account it needs "
+            "no sudo): loginctl enable-linger; then rerun this command"
+        )
+    environment = _check(
+        host, [*SYSTEMCTL, "show-environment"], "systemctl --user show-environment", timeout=60,
+    ).stdout
+    manager = dict(line.partition("=")[::2] for line in environment.splitlines() if "=" in line)
+    value = manager.get("XDG_CONFIG_HOME", "")
+    reads = Path(os.path.normpath(value)) if os.path.isabs(value) else host.home / ".config"
+    if reads != paths.config:
+        raise InstallError(
+            f"your systemd user manager reads units under {reads}, but aegis-podman would "
+            f"write them under {paths.config}; run it with the same XDG_CONFIG_HOME"
+        )
+
+
+def _containers(host: Host) -> list[dict[str, Any]]:
+    return _entries(_json_output(host, [*PODMAN, "ps", "-a", "--format", "json"], "podman ps"))
+
+
+def _check_port(host: Host, port: int, containers: Iterable[Mapping[str, Any]]) -> None:
+    """The socket's port must have no listener and no container port mapping (spec D7)."""
+    if host.port_in_use(port):
+        raise InstallError(f"port {port} already has a listener; choose a free port")
+    for container in containers:
+        name = ", ".join(container.get("Names") or []) or str(container.get("Id", "?"))[:12]
+        for mapping in container.get("Ports") or []:
+            try:
+                first = int(mapping["host_port"])
+                count = max(int(mapping.get("range") or 1), 1)
+            except (KeyError, TypeError, ValueError):
+                continue
+            if first <= port < first + count:
+                raise InstallError(f"port {port} is mapped by container {name}; choose another")
+
+
+# -- the backend subnet ------------------------------------------------------------------------
+
+
+def _network(value: object) -> Network | None:
+    """A routed network, or None for anything unreadable or default-like.
+
+    Prefixes of length 0 and 1 are default routes, including the split pair (0.0.0.0/1 and
+    128.0.0.0/1) a full-tunnel VPN installs; they do not make a private subnet unusable.
+    """
+    if not isinstance(value, str) or value == "default":
+        return None
+    try:
+        network = ipaddress.ip_network(value, strict=False)
+    except ValueError:
+        return None
+    return network if network.prefixlen > 1 else None
+
+
+def _taken_networks(host: Host) -> list[tuple[Network, str]]:
+    """Every subnet of every Podman network and every host route in any routing table."""
+    taken: list[tuple[Network, str]] = []
+    listed = _entries(
+        _json_output(host, [*PODMAN, "network", "ls", "--format", "json"], "podman network ls")
+    )
+    names = [str(entry.get("name") or entry.get("Name")) for entry in listed]
+    if names:
+        inspected = _json_output(
+            host, [*PODMAN, "network", "inspect", *names], "podman network inspect",
+        )
+        for entry in _entries(inspected):
+            for subnet in _entries(entry.get("subnets")):
+                if (network := _network(subnet.get("subnet"))) is not None:
+                    taken.append((network, f"Podman network {entry.get('name')}"))
+    for family in ("-4", "-6"):
+        arguments = ["ip", "-j", family, "route", "show", "table", "all"]
+        result = _run(host, arguments, timeout=60)
+        if result.returncode != 0:
+            if family == "-6":
+                continue  # a host without IPv6 has no IPv6 routes to collide with
+            raise InstallError(f"ip -4 route failed{_detail(result.stderr)}")
+        try:
+            routes = _entries(json.loads(result.stdout or "null"))
+        except json.JSONDecodeError:
+            raise InstallError("ip route did not print JSON") from None
+        for route in routes:
+            if (network := _network(route.get("dst"))) is not None:
+                where = f"dev {route.get('dev', '?')}, table {route.get('table', 'main')}"
+                taken.append((network, f"route {network} ({where})"))
+    return taken
+
+
+def _collides(candidate: ipaddress.IPv4Network, other: Network) -> bool:
+    if isinstance(other, ipaddress.IPv6Network):
+        mapped = other.network_address.ipv4_mapped
+        if mapped is None or other.prefixlen < 96:
+            return False
+        other = ipaddress.IPv4Network(f"{mapped}/{other.prefixlen - 96}", strict=False)
+    return candidate.overlaps(other)
+
+
+def _choose_subnet(host: Host, requested: str | None) -> str:
+    taken = _taken_networks(host)
+    if requested is not None:
+        candidate = ipaddress.IPv4Network(requested)
+        clashes = [source for network, source in taken if _collides(candidate, network)]
+        if clashes:
+            raise InstallError(f"--backend-subnet {requested} overlaps {', '.join(clashes)}")
+        return requested
+    for candidate in SUBNET_CANDIDATES:
+        if not any(_collides(candidate, network) for network, _ in taken):
+            return str(candidate)
+    clashes = sorted({
+        source for network, source in taken
+        if any(_collides(candidate, network) for candidate in SUBNET_CANDIDATES)
+    })
+    raise InstallError(
+        f"no free private /24 for the backend network between {SUBNET_CANDIDATES[0]} and "
+        f"{SUBNET_CANDIDATES[-1]}; they overlap {', '.join(clashes)}. Choose a free private "
+        "/24 with --backend-subnet"
+    )
+
+
+def _check_backend_network(host: Host, state: State) -> None:
+    """Refuse an existing backend network whose subnet is not the recorded one.
+
+    Quadlet creates networks with ``--ignore``, so it would keep the stale network, and web's
+    and the gateway's fixed addresses would not fit it.
+    """
+    name = f"{state.prefix}backend"
+    exists = _run(host, [*PODMAN, "network", "exists", name], timeout=60)
+    if exists.returncode == 1:
+        return
+    if exists.returncode != 0:
+        raise InstallError(f"podman network exists {name} failed{_detail(exists.stderr)}")
+    entry = _single(
+        _json_output(host, [*PODMAN, "network", "inspect", name], "podman network inspect"),
+        "name", name, "podman network inspect",
+    )
+    subnets = sorted(str(subnet.get("subnet")) for subnet in _entries(entry.get("subnets")))
+    if subnets != [state.backend_subnet]:
+        raise InstallError(
+            f"the network {name} exists with subnet {', '.join(subnets) or 'none'}, but the "
+            f"record says {state.backend_subnet}. Quadlet keeps an existing network as it is, "
+            "so the fixed web and gateway addresses would not fit; if that network is Aegis's "
+            f"own, stop Aegis and remove it with: podman network rm {name}"
+        )
+
+
+# -- images and release trees ------------------------------------------------------------------
+
+
+def _created_time(value: object) -> datetime.datetime | None:
+    """An RFC 3339 timestamp with a zone, or None when it is missing or unreadable."""
+    if not isinstance(value, str) or (match := RFC3339.fullmatch(value)) is None:
+        return None
+    year, month, day, hour, minute, second, fraction, utc, sign, zone_h, zone_m = match.groups()
+    try:
+        if utc:
+            zone = datetime.UTC
+        else:
+            offset = datetime.timedelta(hours=int(zone_h), minutes=int(zone_m))
+            zone = datetime.timezone(-offset if sign == "-" else offset)
+        return datetime.datetime(
+            int(year), int(month), int(day), int(hour), int(minute), int(second),
+            int((fraction or "0")[:6].ljust(6, "0")), tzinfo=zone,
+        )
+    except ValueError:
+        return None
+
+
+def _pull(host: Host, registry: str, release: str) -> tuple[dict[str, str], str | None]:
+    """Pull the four images by tag and pin each to its registry digest.
+
+    Also returns the backend image's creation label, which orders releases.
+    """
+    images = {}
+    created: str | None = None
+    for role in ROLES:
+        repository = f"{registry}/aegis-{role}"
+        tag = f"{repository}:{release}"
+        _check(host, [*PODMAN, "pull", "--quiet", tag], f"pulling {tag}", timeout=1800)
+        inspected = _entries(
+            _json_output(host, [*PODMAN, "image", "inspect", tag], f"podman image inspect {tag}")
+        )
+        entry = inspected[0] if len(inspected) == 1 else {}
+        digest = entry.get("Digest")
+        reference = f"{repository}@{digest}"
+        if not (
+            isinstance(digest, str) and DIGEST.fullmatch(digest)
+            and reference in (entry.get("RepoDigests") or []) and IMAGE.fullmatch(reference)
+        ):
+            raise InstallError(f"{tag} has no registry digest for {repository}; refusing it")
+        images[role] = reference
+        if role == "backend":
+            labels = entry.get("Labels") or (entry.get("Config") or {}).get("Labels") or {}
+            value = labels.get(CREATED_LABEL) if isinstance(labels, dict) else None
+            created = value if isinstance(value, str) else None
+    return images, created
+
+
+def _check_order(state: State, release: str, created: str | None, allow: bool) -> None:
+    """Refuse a release older than the current one, or one that cannot be ordered."""
+    if allow:
+        return
+    new, current = _created_time(created), _created_time(state.created)
+    hint = ("A downgrade does not reverse migrations: restore a matching database backup "
+            "first, then rerun with --allow-downgrade")
+    if new is None:
+        raise InstallError(
+            f"release {release} has no readable {CREATED_LABEL} label, so it cannot be "
+            f"ordered against {state.release}. {hint}"
+        )
+    if current is None:
+        raise InstallError(
+            f"the current release {state.release} has no readable {CREATED_LABEL} label, so "
+            f"{release} cannot be ordered against it. {hint}"
+        )
+    if new < current:
+        raise InstallError(
+            f"release {release} ({created}) is older than {state.release} ({state.created}), "
+            f"so this is a downgrade. {hint}"
+        )
+
+
+def _container_id(cidfile: Path) -> str | None:
+    with contextlib.suppress(OSError, InstallError, UnicodeDecodeError):
+        text = _read_regular(cidfile).decode("ascii").strip()
+        if CONTAINER_ID.fullmatch(text):
+            return text
+    return None
+
+
+def _remove_extractions(host: Host, paths: Paths, state: State) -> None:
+    """Remove the extraction containers that interrupted runs recorded by their ID files."""
+    for recorded in list(state.extractions):
+        cidfile = Path(recorded)
+        container = _container_id(cidfile) if cidfile.parent == paths.data else None
+        if container is not None:
+            removed = _run(host, [*PODMAN, "rm", container], timeout=120)
+            if removed.returncode not in (0, 1):  # 1: no such container
+                raise InstallError(
+                    f"could not remove the extraction container{_detail(removed.stderr)}; "
+                    f"remove it with: podman rm {container}"
+                )
+        if cidfile.parent == paths.data:
+            with contextlib.suppress(FileNotFoundError):
+                cidfile.unlink()
+        state.extractions.remove(recorded)
+        save_state(paths, state)
+
+
+def _copy_out(host: Host, paths: Paths, state: State, image: str, destination: Path) -> None:
+    """Copy the release tree out of ``image`` through a created, never started container.
+
+    Podman writes the new container's ID to a file the record names before the container
+    exists, so even an interrupted run leaves an exact ID to remove. That container, and
+    only it, is removed on every path.
+    """
+    _remove_extractions(host, paths, state)
+    cidfile = paths.data / f".extract.{secrets.token_hex(8)}.cid"
+    state.extractions.append(str(cidfile))
+    save_state(paths, state)
+    created = _run(
+        host,
+        [*PODMAN, "create", "--pull=never", "--network=none", f"--cidfile={cidfile}", image,
+         "python3"],
+        timeout=300,
+    )
+    printed = created.stdout.strip()
+    container = _container_id(cidfile) or (printed if CONTAINER_ID.fullmatch(printed) else None)
+    if container is None:
+        detail = _detail(created.stderr) if created.returncode else f": {printed[:200]!r}"
+        raise InstallError(f"podman create gave no container ID{detail}")
+    try:
+        copied = (
+            _run(host, [*PODMAN, "cp", f"{container}:{RELEASE_SOURCE}", str(destination)],
+                 timeout=300)
+            if created.returncode == 0 else created
+        )
+    finally:
+        removed = _run(host, [*PODMAN, "rm", container], timeout=120)
+        if removed.returncode == 0:
+            with contextlib.suppress(FileNotFoundError):
+                cidfile.unlink()
+            state.extractions.remove(str(cidfile))
+            save_state(paths, state)
+        else:
+            print(
+                "aegis-podman: warning: could not remove the extraction container"
+                f"{_detail(removed.stderr)}; remove it with: podman rm {container}",
+                file=host.err,
+            )
+    if created.returncode != 0:
+        raise InstallError(
+            f"podman create from {image} failed (exit {created.returncode})"
+            f"{_detail(created.stderr)}"
+        )
+    if copied.returncode != 0:
+        raise InstallError(
+            f"copying the release tree out of {image} failed (exit {copied.returncode})"
+            f"{_detail(copied.stderr)}"
+        )
+    if removed.returncode != 0:
+        raise InstallError(f"could not remove the extraction container: podman rm {container}")
+
+
+def _scan_tree(root: Path, *, normalize: bool) -> dict[str, bytes]:
+    """Every regular file under a release tree, by relative path.
+
+    Symbolic links and special files are refused. With ``normalize`` (a fresh copy, which
+    the image ships read-only), directories become 0700 and files 0600: a private tree the
+    operator can later remove.
+    """
+    try:
+        info = root.lstat()
+    except FileNotFoundError:
+        raise InstallError(f"the release tree {root} is missing") from None
+    if not stat.S_ISDIR(info.st_mode):
+        raise InstallError(f"the release tree {root} is not a directory")
+    contents: dict[str, bytes] = {}
+    pending = [(root, "")]
+    while pending:
+        directory, prefix = pending.pop()
+        if normalize:
+            os.chmod(directory, 0o700)
+        with os.scandir(directory) as entries:
+            for entry in sorted(entries, key=lambda item: item.name):
+                relative = f"{prefix}{entry.name}"
+                if entry.is_symlink():
+                    raise InstallError(
+                        f"the release tree holds a symbolic link, {relative}; refusing it"
+                    )
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append((Path(entry.path), f"{relative}/"))
+                elif entry.is_file(follow_symlinks=False):
+                    if normalize:
+                        os.chmod(entry.path, 0o600)
+                    contents[relative] = _read_regular(Path(entry.path))
+                else:
+                    raise InstallError(
+                        f"the release tree holds a special file, {relative}; refusing it"
+                    )
+    if RELEASE_INSTALLER not in contents or not any(
+        name.startswith(f"{RELEASE_TEMPLATES}/") for name in contents
+    ):
+        raise InstallError(
+            f"the release tree lacks {RELEASE_INSTALLER} or its {RELEASE_TEMPLATES}/ templates"
+        )
+    return contents
+
+
+def _forget_release(state: State, release: str) -> None:
+    state.releases.pop(release, None)
+    for path in [
+        path for path, record in state.files.items()
+        if record.get("kind") == "release" and record.get("release") == release
+    ]:
+        del state.files[path]
+
+
+def _extract_release(
+    host: Host, paths: Paths, state: State, release: str, backend_image: str,
+) -> None:
+    """Make ``releases/<release>/podman`` hold that release's installer and templates.
+
+    The tree comes from the release's backend image by digest. It is recorded file by file
+    before it appears under its final name, and a recorded tree is verified, not copied again.
+    """
+    directory = paths.releases / release
+    recorded = state.releases.get(release)
+    if recorded is not None:
+        if recorded.get("backend_image") != backend_image:
+            raise InstallError(
+                f"release {release} was recorded from {recorded.get('backend_image')}, but its "
+                f"tag now resolves to {backend_image}; a published release tag must not move"
+            )
+        if os.path.lexists(directory):
+            _verified_tree(paths, state, release)
+            return
+        _forget_release(state, release)  # lost or never published: copy it out again
+    elif os.path.lexists(directory):
+        raise InstallError(f"{directory} exists but is not recorded by aegis-podman; move it")
+    staging = paths.releases / f".{release}.{secrets.token_hex(8)}.partial"
+    staging.mkdir(mode=0o700)
+    try:
+        _copy_out(host, paths, state, backend_image, staging / "podman")
+        contents = _scan_tree(staging / "podman", normalize=True)
+        final = directory / "podman"
+        state.releases[release] = {"backend_image": backend_image}
+        for relative, content in contents.items():
+            state.files[str(final / relative)] = {
+                "kind": "release", "release": release,
+                "sha256": hashlib.sha256(content).hexdigest(),
+            }
+        save_state(paths, state)
+        os.rename(staging, directory)
+    except BaseException:
+        _remove_tree(staging)
+        raise
+    _sync_directory(paths.releases)
+
+
+def _verified_tree(paths: Paths, state: State, release: str) -> dict[str, bytes]:
+    tree = paths.release_tree(release)
+    with contextlib.suppress(FileNotFoundError):
+        if not stat.S_ISDIR((paths.releases / release).lstat().st_mode):
+            raise InstallError(f"{paths.releases / release} is not a directory; refusing it")
+    expected = {}
+    for path, record in state.files.items():
+        if record.get("kind") == "release" and record.get("release") == release:
+            expected[posixpath.relpath(path, str(tree))] = record.get("sha256")
+    contents = _scan_tree(tree, normalize=False)
+    actual = {name: hashlib.sha256(content).hexdigest() for name, content in contents.items()}
+    if not expected or actual != expected:
+        raise InstallError(f"the release tree {tree} differs from its record; refusing to use it")
+    return contents
+
+
+def _release_renderer(
+    paths: Paths, state: State, release: str,
+) -> tuple[types.ModuleType, dict[str, str]]:
+    """The release's own renderer and templates, from the bytes just verified."""
+    contents = _verified_tree(paths, state, release)
+    tree = paths.release_tree(release)
+    name = f"aegis_podman_release_{release.replace('-', '_')}"
+    module = types.ModuleType(name)
+    module.__file__ = str(tree / RELEASE_INSTALLER)
+    # Dataclasses resolve string annotations through sys.modules while the classes are built.
+    sys.modules[name] = module
+    try:
+        exec(compile(contents[RELEASE_INSTALLER], module.__file__, "exec"), module.__dict__)
+    except Exception as error:
+        raise InstallError(f"cannot load the renderer of release {release}: {error}") from None
+    finally:
+        del sys.modules[name]
+    if getattr(module, "RENDER_API", None) != RENDER_API:
+        raise InstallError(
+            f"release {release} has a renderer this installer does not understand; "
+            "run that release's own aegis-podman"
+        )
+    templates = {}
+    try:
+        for relative, content in contents.items():
+            directory, _, file_name = relative.partition("/")
+            if directory == RELEASE_TEMPLATES and "/" not in file_name:
+                templates[file_name] = content.decode("utf-8")
+    except UnicodeDecodeError:
+        raise InstallError(f"a template of release {release} is not UTF-8") from None
+    return module, templates
+
+
+def _render(
+    module: types.ModuleType, templates: Mapping[str, str], state: State, paths: Paths,
+) -> dict[str, RenderedUnit]:
+    """Render with the release's renderer and templates; place each unit where it belongs."""
+    try:
+        config = module.UnitConfig(
+            prefix=state.prefix, release=state.release, https_port=state.https_port,
+            names=tuple(state.names), host_gid=state.host_gid, reader_type=state.reader_type,
+            image_backend=state.images["backend"], image_gateway=state.images["gateway"],
+            image_postgres=state.images["postgres"], image_caddy=state.images["caddy"],
+            secrets_dir=str(paths.secrets), backend_subnet=state.backend_subnet,
+            install_token=state.install_token, install_sections=state.install_sections,
+        )
+        texts = module.render_units(config, templates)
+        units = {}
+        for name, text in texts.items():
+            directory = module.unit_directory(name)
+            if (
+                directory not in INSTALL_DIRECTORIES or "/" in name
+                or not name.startswith(state.prefix) or not isinstance(text, str)
+            ):
+                raise InstallError(f"the release renderer produced an unexpected unit {name!r}")
+            units[name] = RenderedUnit(name, paths.config / directory / name, text)
+    except (KeyError, TypeError, ValueError) as error:
+        raise InstallError(f"the release's renderer refused this configuration: {error}") from None
+    return units
+
+
+# -- units ---------------------------------------------------------------------------------
+
+
+def _unit_sections(text: str) -> dict[str, list[tuple[str, str]]]:
+    sections: dict[str, list[tuple[str, str]]] = {}
+    current: list[tuple[str, str]] | None = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", ";")):
+            continue
+        if stripped.startswith("[") and stripped.endswith("]"):
+            current = sections.setdefault(stripped[1:-1], [])
+            continue
+        key, separator, value = stripped.partition("=")
+        if current is None or not separator:
+            raise InstallError(f"cannot read the unit line {stripped[:80]!r}")
+        current.append((key.strip(), value.strip()))
+    return sections
+
+
+def _values(sections: Mapping[str, list[tuple[str, str]]], section: str, key: str) -> list[str]:
+    return [value for name, value in sections.get(section, []) if name == key]
+
+
+def _one(sections: Mapping[str, list[tuple[str, str]]], section: str, key: str, unit: str) -> str:
+    values = _values(sections, section, key)
+    if len(values) != 1:
+        raise InstallError(f"{unit} must set [{section}] {key} exactly once")
+    return values[0]
+
+
+def _systemd_unit(file_name: str) -> str:
+    """The systemd unit a unit file becomes (Quadlet's naming for its own unit types)."""
+    stem, _, suffix = file_name.rpartition(".")
+    return {"container": f"{stem}.service", "network": f"{stem}-network.service",
+            "volume": f"{stem}-volume.service"}.get(suffix, file_name)
+
+
+def _inventory(
+    units: Mapping[str, RenderedUnit],
+) -> tuple[dict[str, Any], list[str], list[str]]:
+    """The systemd units, containers, images, volumes and networks a rendering defines."""
+    record: dict[str, Any] = {
+        "files": sorted(units), "socket": None, "services": [], "oneshots": [],
+        "generated": [], "containers": {}, "health_checked": [], "images": {},
+    }
+    volumes: list[str] = []
+    networks: list[str] = []
+    for name, unit in sorted(units.items()):
+        sections = _unit_sections(unit.text)
+        service = _systemd_unit(name)
+        if name.endswith(".socket"):
+            if record["socket"] is not None:
+                raise InstallError("the release renders more than one socket")
+            record["socket"] = name
+        elif name.endswith(".container"):
+            record["containers"][service] = _one(sections, "Container", "ContainerName", name)
+            record["images"][service] = _one(sections, "Container", "Image", name)
+            oneshot = _values(sections, "Service", "Type") == ["oneshot"]
+            record["oneshots" if oneshot else "services"].append(service)
+            if _values(sections, "Container", "HealthCmd"):
+                record["health_checked"].append(service)
+        elif name.endswith(".volume"):
+            volumes.append(_one(sections, "Volume", "VolumeName", name))
+            record["generated"].append(service)
+        elif name.endswith(".network"):
+            networks.append(_one(sections, "Network", "NetworkName", name))
+            record["generated"].append(service)
+    if record["socket"] is None:
+        raise InstallError("the release renders no socket")
+    return record, volumes, networks
+
+
+def _record_inventory(
+    state: State, inventory: dict[str, Any], volumes: Sequence[str], networks: Sequence[str],
+) -> None:
+    state.units = inventory
+    # Objects a release no longer renders stay recorded, so --purge-data still finds them.
+    state.volumes = list(dict.fromkeys([*state.volumes, *volumes]))
+    state.networks = list(dict.fromkeys([*state.networks, *networks]))
+
+
+def _stale_units(state: State, units: Mapping[str, RenderedUnit]) -> list[Path]:
+    rendered = {str(unit.path) for unit in units.values()}
+    return [
+        Path(path) for path, record in state.files.items()
+        if record.get("kind") == "unit" and path not in rendered
+    ]
+
+
+def _check_units(
+    paths: Paths, state: State, units: Mapping[str, RenderedUnit], stale: Sequence[Path],
+) -> None:
+    for unit in units.values():
+        _check_replaceable(state, unit.path)
+    for path in stale:
+        _check_removable(paths, state, path, force=False)
+
+
+def _write_units(
+    host: Host, paths: Paths, state: State, units: Mapping[str, RenderedUnit],
+    stale: Sequence[Path], timeout: float,
+) -> set[str]:
+    """Write the rendered units. Units the release dropped are stopped, then removed."""
+    if stale:
+        dropped = [_systemd_unit(path.name) for path in stale]
+        # A unit systemd never loaded cannot be stopped; polling then sees it inactive.
+        _run(host, [*SYSTEMCTL, "--no-block", "stop", *dropped], timeout=120)
+        if not _await_stopped(host, dropped, timeout):
+            raise InstallError(f"{', '.join(dropped)} did not stop; their files were kept")
+    for directory in sorted({unit.path.parent for unit in units.values()}):
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if not directory.is_dir():
+            raise InstallError(f"{directory} is not a directory")
+    changed = set()
+    for name, unit in sorted(units.items()):
+        if _publish(paths, state, unit.path, unit.text.encode("utf-8"), "unit", 0o644):
+            changed.add(name)
+    for path in stale:
+        _remove_recorded(paths, state, path)
+    return changed
+
+
+def _service_units(state: State) -> list[str]:
+    return [state.units["socket"], *state.units["services"], *state.units["oneshots"]]
+
+
+def _watched_units(state: State) -> list[str]:
+    """Everything a start depends on: the socket, the services, and Quadlet's network and
+    volume services, whose failure leaves the services that need them inactive."""
+    return [*_service_units(state), *state.units["generated"]]
+
+
+def _unit_states(host: Host, units: Sequence[str]) -> dict[str, dict[str, str]]:
+    result = _check(
+        host, [*SYSTEMCTL, "show", "--property=" + ",".join(UNIT_PROPERTIES), *units],
+        "systemctl --user show", timeout=60,
+    )
+    found: dict[str, dict[str, str]] = {}
+    for block in result.stdout.split("\n\n"):
+        values = {}
+        for line in block.splitlines():
+            key, separator, value = line.partition("=")
+            if separator:
+                values[key] = value
+        if "Id" in values:
+            # systemctl leaves out a property that is empty, such as Job with no job queued.
+            found[values["Id"]] = {"Job": ""} | values
+    missing = {"LoadState": "not-found", "ActiveState": "inactive", "SubState": "dead",
+               "Result": "success", "NRestarts": "0", "Job": ""}
+    return {unit: found.get(unit, {"Id": unit, **missing}) for unit in units}
+
+
+def _observe(host: Host, state: State) -> dict[str, dict[str, str]]:
+    """Each long-running service's container: its health and the image it runs."""
+    observed = {}
+    for service in state.units["services"]:
+        container = state.units["containers"][service]
+        result = _run(host, [*PODMAN, "container", "inspect", container], timeout=60)
+        entries: list[dict[str, Any]] = []
+        if result.returncode == 0:
+            with contextlib.suppress(json.JSONDecodeError):
+                entries = _entries(json.loads(result.stdout or "null"))
+        if not entries:
+            observed[service] = {"health": "absent", "image": ""}
+            continue
+        details = entries[0].get("State") or {}
+        health = details.get("Health") or details.get("Healthcheck") or {}
+        status = str(health.get("Status") or "unknown")
+        observed[service] = {
+            "health": status if service in state.units["health_checked"] else "-",
+            "image": str(entries[0].get("ImageName", "")),
+        }
+    return observed
+
+
+def _readiness(
+    state: State, states: Mapping[str, Mapping[str, str]],
+    observed: Mapping[str, Mapping[str, str]], *, expect_running: bool,
+) -> tuple[list[str], list[str]]:
+    """The units still coming up, and the units that failed or were never started.
+
+    With ``expect_running`` (a start was queued, or the operator wants Aegis running), a unit
+    that is inactive with no job left has had its start job finish without starting it:
+    something it needs failed. systemd reports that as nothing more than inactive.
+    """
+    pending, failed = [], []
+    for unit, info in states.items():
+        active = info.get("ActiveState")
+        if info.get("LoadState") != "loaded" or active == "failed":
+            failed.append(unit)
+            continue
+        if info.get("Job"):
+            pending.append(unit)
+            continue
+        if active == "inactive":
+            (failed if expect_running else pending).append(unit)
+            continue
+        ready = active == "active" and (
+            info.get("SubState") == "running" if unit in state.units["services"] else True
+        )
+        seen = observed.get(unit)
+        if ready and seen is not None:
+            healthy = unit not in state.units["health_checked"] or seen["health"] == "healthy"
+            ready = healthy and seen["image"] == state.units["images"].get(unit)
+        if not ready:
+            pending.append(unit)
+    return pending, failed
+
+
+def _print_units(
+    host: Host, state: State, states: Mapping[str, Mapping[str, str]],
+    observed: Mapping[str, Mapping[str, str]],
+) -> None:
+    """One line per unit: what systemd and Podman report now."""
+    width = max(len(unit) for unit in states)
+    for unit, info in states.items():
+        seen = observed.get(unit, {})
+        image = seen.get("image")
+        if image is None or not image:
+            running = "-"
+        elif image == state.units["images"].get(unit):
+            running = "current"
+        else:
+            running = f"stale ({image})"
+        _say(
+            host,
+            f"{unit:<{width}}  {info.get('ActiveState', '?')}/{info.get('SubState', '?')}"
+            f"  result={info.get('Result', '?')}  restarts={info.get('NRestarts', '?')}"
+            f"  job={info.get('Job') or '-'}  health={seen.get('health', '-')}  image={running}",
+        )
+
+
+def _print_status(
+    host: Host, state: State, states: Mapping[str, Mapping[str, str]],
+    observed: Mapping[str, Mapping[str, str]], failed: Sequence[str],
+) -> None:
+    _say(host, f"release {state.release} ({state.desired})")
+    for role in ROLES:
+        _say(host, f"  {role:<9} {state.images.get(role, '-')}")
+    if state.pending is not None:
+        release = state.pending["release"]
+        _say(host, f"upgrade to {release} is pending; finish it with: aegis-podman upgrade "
+                   f"--release {release}, or go back with: aegis-podman upgrade --abandon")
+    _print_units(host, state, states, observed)
+    broken = [
+        unit for unit, info in states.items()
+        if info.get("ActiveState") == "failed" or info.get("Result", "success") != "success"
+        or info.get("LoadState") != "loaded"
+    ]
+    blocked = [unit for unit in failed if unit not in broken]
+    if broken:
+        _say(host, f"Failed: {', '.join(broken)}")
+    if blocked:
+        _say(host, f"Not started, because a unit they need failed: {', '.join(blocked)}")
+    if broken or blocked:
+        _say(host, "Recovery: read the logs, fix the cause, then clear and start again:")
+        for unit in broken or blocked:
+            _say(host, f"  journalctl --user -u {unit} --no-pager -n 200")
+        _say(host, f"  systemctl --user reset-failed {' '.join([*broken, *blocked])}")
+        _say(host, "  aegis-podman start")
+
+
+def _await_ready(host: Host, state: State, timeout: float) -> bool:
+    """Poll until every watched unit is active, healthy and on its recorded image, or fail at
+    once when one failed or was never started."""
+    deadline = host.monotonic() + timeout
+    while True:
+        states = _unit_states(host, _watched_units(state))
+        observed = _observe(host, state)
+        pending, failed = _readiness(state, states, observed, expect_running=True)
+        if failed:
+            print(f"aegis-podman: did not start: {', '.join(failed)}", file=host.err)
+            _print_status(host, state, states, observed, failed)
+            return False
+        if not pending:
+            return True
+        if host.monotonic() >= deadline:
+            print(
+                f"aegis-podman: not ready within {timeout:g}s: {', '.join(pending)}",
+                file=host.err,
+            )
+            _print_status(host, state, states, observed, failed)
+            return False
+        host.sleep(POLL_SECONDS)
+
+
+def _await_stopped(host: Host, units: Sequence[str], timeout: float) -> bool:
+    deadline = host.monotonic() + timeout
+    while True:
+        states = _unit_states(host, units)
+        busy = [
+            unit for unit, info in states.items()
+            if info.get("Job") or info.get("ActiveState") not in ("inactive", "failed")
+        ]
+        if not busy:
+            return True
+        if host.monotonic() >= deadline:
+            print(
+                f"aegis-podman: not stopped within {timeout:g}s: {', '.join(busy)}",
+                file=host.err,
+            )
+            return False
+        host.sleep(POLL_SECONDS)
+
+
+# -- objects -----------------------------------------------------------------------------------
+
+
+def _object_labels(host: Host, kind: str, name: str) -> dict[str, Any] | None:
+    """The labels of the volume or network ``name``, or None when it does not exist."""
+    exists = _run(host, [*PODMAN, kind, "exists", name], timeout=60)
+    if exists.returncode == 1:
+        return None
+    if exists.returncode != 0:
+        raise InstallError(f"podman {kind} exists {name} failed{_detail(exists.stderr)}")
+    inspected = _json_output(host, [*PODMAN, kind, "inspect", name], f"podman {kind} inspect")
+    entry = _single(inspected, "Name" if kind == "volume" else "name", name, f"{kind} inspect")
+    labels = entry.get("Labels") or entry.get("labels") or {}
+    return labels if isinstance(labels, dict) else {}
+
+
+def _refuse_existing_objects(
+    host: Host, containers: Iterable[Mapping[str, Any]], inventory: Mapping[str, Any],
+    volumes: Sequence[str], networks: Sequence[str],
+) -> None:
+    """Before anything exists, no container, volume or network may carry one of its names.
+
+    Quadlet creates volumes and networks with ``--ignore``: it would adopt such an object.
+    """
+    existing = {name for entry in containers for name in entry.get("Names") or []}
+    listed = _json_output(host, [*PODMAN, "volume", "ls", "--format", "json"], "podman volume ls")
+    existing |= {str(entry.get("Name")) for entry in _entries(listed)}
+    listed = _json_output(
+        host, [*PODMAN, "network", "ls", "--format", "json"], "podman network ls",
+    )
+    existing |= {str(entry.get("name") or entry.get("Name")) for entry in _entries(listed)}
+    clashes = sorted(
+        name for name in [*inventory["containers"].values(), *volumes, *networks]
+        if name in existing
+    )
+    if clashes:
+        raise InstallError(
+            "these Podman objects already exist and aegis-podman did not create them: "
+            f"{', '.join(clashes)}; it never reuses or removes them"
+        )
+
+
+# -- secrets (spec D9) -------------------------------------------------------------------------
+
+
+def _same_file(info: os.stat_result, record: Mapping[str, Any]) -> bool:
+    return stat.S_ISREG(info.st_mode) and (info.st_dev, info.st_ino) == (
+        record.get("device"), record.get("inode"),
+    )
+
+
+def _lstat(path: Path) -> os.stat_result | None:
+    try:
+        return path.lstat()
+    except FileNotFoundError:
+        return None
+
+
+def _secret_ready(paths: Paths, state: State, name: str) -> bool:
+    """Whether ``name`` holds the installer's prepared secret; refuse anything else there.
+
+    A recorded secret that is gone is created again: init runs before anything used the
+    database secrets, and a lost bootstrap password is replaced and shown once more.
+    """
+    path = paths.secrets / name
+    record = state.secrets.get(name)
+    if record is not None and "pending" in record:
+        final = _lstat(path)
+        if final is not None and "device" in record and _same_file(final, record):
+            # Renamed into place just before an interruption: it is complete.
+            state.secrets[name] = {"device": record["device"], "inode": record["inode"]}
+            return True
+        # Otherwise the creation never reached its name: drop exactly its own temporary.
+        temporary = Path(record["pending"])
+        info = _lstat(temporary) if temporary.parent == paths.secrets else None
+        if info is not None and ("device" not in record or _same_file(info, record)):
+            temporary.unlink()
+        del state.secrets[name]
+        record = None
+    info = _lstat(path)
+    if info is None:
+        state.secrets.pop(name, None)
+        return False
+    if record is None or not _same_file(info, record):
+        raise InstallError(
+            f"{path} exists but aegis-podman did not create it; move it away first "
+            "(secrets are never overwritten)"
+        )
+    return True
+
+
+def _new_secret(host: Host, paths: Paths, state: State, name: str) -> str:
+    """Create one secret file and return its value, which goes nowhere else.
+
+    The value is 32 random bytes, hex-encoded. The temporary name is recorded before the
+    file exists. The file is prepared under it (O_EXCL, O_NOFOLLOW, mode 0600, labeled
+    container_file_t, then owned by the container user, neither tool following a link) and
+    renamed into place last, so a secret under its name is always complete.
+    """
+    path = paths.secrets / name
+    temporary = path.with_name(f".{name}.{secrets.token_hex(8)}.tmp")
+    state.secrets[name] = {"pending": str(temporary)}
+    save_state(paths, state)
+    value = secrets.token_hex(32)
+    _write_new(temporary, f"{value}\n".encode("ascii"), 0o600)
+    info = temporary.lstat()
+    identity = {"device": info.st_dev, "inode": info.st_ino}
+    state.secrets[name] = {"pending": str(temporary), **identity}
+    save_state(paths, state)
+    _check(
+        host, ["chcon", "-h", "-t", CONTAINER_FILE_TYPE, str(temporary)],
+        f"labelling the secret {name}", timeout=60,
+    )
+    _check(
+        host, [*PODMAN, "unshare", "chown", "-h", SECRET_OWNER, str(temporary)],
+        f"handing the secret {name} to the container user", timeout=60,
+    )
+    if os.path.lexists(path):
+        raise InstallError(f"{path} appeared while it was being created; refusing to replace it")
+    os.rename(temporary, path)
+    _sync_directory(paths.secrets)
+    if not _same_file(path.lstat(), identity):
+        raise InstallError(f"{path} changed while it was being created; refusing it")
+    state.secrets[name] = identity
+    save_state(paths, state)
+    return value
+
+
+def prepare_for_mapped_containers(host: Host, path: Path) -> None:
+    """Make ``path`` a file the group-mapped containers read as 10001:10001 with mode 0600.
+
+    It sets mode 0600, labels the file container_file_t, then hands it to container uid 10001
+    and the operator's group (``podman unshare chown 10001:0``), which those containers map to
+    gid 10001. Secrets differ only in their group: they are 10001:10001 in the default mapping.
+    Neither tool follows a symbolic link, and a link or special file is refused.
+    """
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise InstallError(f"{path} is a symbolic link; refusing it") from None
+        raise
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise InstallError(f"{path} is not a regular file; refusing it")
+        os.fchmod(descriptor, 0o600)
+    finally:
+        os.close(descriptor)
+    _check(host, ["chcon", "-h", "-t", CONTAINER_FILE_TYPE, str(path)], f"labelling {path}",
+           timeout=60)
+    _check(host, [*PODMAN, "unshare", "chown", "-h", MAPPED_OWNER, str(path)],
+           f"handing {path} to the mapped container user", timeout=60)
+
+
+def _config_text(paths: Paths, state: State) -> str:
+    values = {
+        "AEGIS_PODMAN_RELEASE": state.release,
+        "AEGIS_PODMAN_REGISTRY": state.registry,
+        "AEGIS_PODMAN_PREFIX": state.prefix,
+        "AEGIS_PODMAN_HTTPS_PORT": str(state.https_port),
+        "AEGIS_PODMAN_NAMES": ",".join(state.names),
+        "AEGIS_PODMAN_BACKEND_SUBNET": state.backend_subnet,
+        "AEGIS_PODMAN_HOST_GID": str(state.host_gid),
+        "AEGIS_PODMAN_READER_TYPE": state.reader_type,
+        "AEGIS_PODMAN_SECRETS_DIR": str(paths.secrets),
+        **{f"AEGIS_PODMAN_IMAGE_{role.upper()}": state.images[role] for role in ROLES},
+    }
+    lines = [
+        "# Aegis on rootless Podman: non-secret configuration, written by aegis-podman.",
+        "# Its record (state.json in the data directory) is authoritative; change the",
+        "# deployment through aegis-podman, not by editing this file.",
+        *(f"{key}={value}" for key, value in values.items()),
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _write_config(paths: Paths, state: State) -> None:
+    _publish(paths, state, paths.env_file, _config_text(paths, state).encode(), "config", 0o600)
+
+
+def _record_history(state: State, release: str) -> None:
+    if state.history and state.history[-1].get("release") == release:
+        return
+    sequence = int(state.history[-1].get("sequence", 0)) + 1 if state.history else 1
+    state.history.append({"sequence": sequence, "release": release})
+
+
+# -- commands ----------------------------------------------------------------------------------
+
+
+def _ready_state(paths: Paths, uid: int, args: argparse.Namespace) -> State:
+    state = load_state(paths, uid)
+    if state is None:
+        raise InstallError("nothing is initialized yet; run aegis-podman init first")
+    if state.phase != "ready":
+        raise InstallError("initialization did not finish; rerun aegis-podman init")
+    if args.prefix is not None and args.prefix != state.prefix:
+        raise InstallError(f"this install's prefix is {state.prefix}, not {args.prefix}")
+    return state
+
+
+def _installed_state(paths: Paths, uid: int, args: argparse.Namespace) -> State:
+    state = _ready_state(paths, uid, args)
+    if not state.installed:
+        raise InstallError("the units are not installed; run aegis-podman install first")
+    return state
+
+
+def _refuse_pending(state: State) -> None:
+    if state.pending is not None:
+        release = state.pending["release"]
+        raise InstallError(
+            f"the upgrade to {release} did not finish; finish it with: aegis-podman upgrade "
+            f"--release {release}, or go back with: aegis-podman upgrade --abandon"
+        )
+
+
+def command_init(host: Host, paths: Paths, args: argparse.Namespace) -> int:
+    release = _release_argument(args.release)
+    registry = _registry_argument(args.registry)
+    prefix = _prefix_argument(args.prefix)
+    port = _port_argument(args.https_port)
+    names = _names_argument(args.name, args.address)
+    requested_subnet = _subnet_argument(args.backend_subnet)
+    _check_directories(paths, host.uid, create=False)
+    previous = load_state(paths, host.uid)
+    if previous is not None and previous.phase != "initializing":
+        raise InstallError(
+            "aegis-podman is already initialized; use upgrade --release to change the "
+            "release, or install to (re)install the units"
+        )
+    _preflight(host, paths)
+    _check_directories(paths, host.uid, create=True)
+    with _locked(paths):
+        previous = load_state(paths, host.uid)
+        if previous is not None and previous.phase != "initializing":
+            raise InstallError("aegis-podman is already initialized")
+        return _initialize(host, paths, previous, release, registry, prefix, port, names,
+                           requested_subnet)
+
+
+def _initialize(
+    host: Host, paths: Paths, previous: State | None, release: str, registry: str, prefix: str,
+    port: int, names: list[str], requested_subnet: str | None,
+) -> int:
+    state = State(
+        phase="initializing", release=release, registry=registry, prefix=prefix, names=names,
+        https_port=port, host_gid=host.gid, backend_subnet="",
+        reader_type=PRODUCTION_READER_TYPE, install_token=secrets.token_hex(16),
+        # Only the production prefix may start at boot; a test stack never does.
+        install_sections=prefix == PRODUCTION_PREFIX,
+    )
+    if previous is not None:  # resume an interrupted init with what it recorded
+        state.files, state.secrets, state.releases, state.extractions = (
+            previous.files, previous.secrets, previous.releases, previous.extractions,
+        )
+        state.install_token = previous.install_token
+    for name in SECRET_NAMES:
+        _secret_ready(paths, state, name)
+    _check_replaceable(state, paths.env_file)
+    containers = _containers(host)
+    _check_port(host, port, containers)
+    state.backend_subnet = _choose_subnet(host, requested_subnet)
+    save_state(paths, state)
+    state.images, state.created = _pull(host, registry, release)
+    save_state(paths, state)
+    _extract_release(host, paths, state, release, state.images["backend"])
+    module, templates = _release_renderer(paths, state, release)
+    units = _render(module, templates, state, paths)
+    inventory, volumes, networks = _inventory(units)
+    _refuse_existing_objects(host, containers, inventory, volumes, networks)
+    for unit in units.values():
+        _check_replaceable(state, unit.path)
+    missing = [name for name in SECRET_NAMES if not _secret_ready(paths, state, name)]
+    for name in missing:
+        _new_secret(host, paths, state, name)
+    _write_config(paths, state)
+    _record_history(state, release)
+    state.phase = "ready"
+    _settle(paths, state)
+    _say(host, f"aegis-podman: initialized release {release} (prefix {state.prefix})")
+    _say(host, f"  HTTPS port {port} for: {', '.join(names)}")
+    _say(host, f"  backend subnet {state.backend_subnet}")
+    _say(host, "  images, pinned by digest:")
+    for role in ROLES:
+        _say(host, f"    {role:<9} {state.images[role]}")
+    _say(host, f"  {len(SECRET_NAMES)} secret files in {paths.secrets} (values are never shown)")
+    _say(host, "Next: the host setup (SELinux module and firewall rules), then "
+               "aegis-podman install and aegis-podman start.")
+    return 0
+
+
+def command_install(host: Host, paths: Paths, args: argparse.Namespace) -> int:
+    _check_directories(paths, host.uid, create=False)
+    with _locked(paths):
+        state = _ready_state(paths, host.uid, args)
+        _refuse_pending(state)
+        if args.install_sections and state.prefix != PRODUCTION_PREFIX:
+            raise InstallError(
+                f"only the {PRODUCTION_PREFIX} prefix may have [Install] sections; a stack "
+                f"with the prefix {state.prefix} must never start at boot"
+            )
+        _preflight(host, paths)
+        was_enabled = state.installed and state.install_sections
+        # The recorded choice holds until a flag changes it explicitly.
+        if args.install_sections is not None:
+            state.install_sections = args.install_sections
+        # A lost release tree comes back from the pinned, already local backend image.
+        _extract_release(host, paths, state, state.release, state.images["backend"])
+        module, templates = _release_renderer(paths, state, state.release)
+        units = _render(module, templates, state, paths)
+        inventory, volumes, networks = _inventory(units)
+        _check_backend_network(host, state)
+        if not state.installed:
+            _check_port(host, state.https_port, _containers(host))
+        stale = _stale_units(state, units)
+        _check_units(paths, state, units, stale)
+        changed = _write_units(host, paths, state, units, stale, DEFAULT_DEADLINE)
+        _record_inventory(state, inventory, volumes, networks)
+        state.installed = True
+        _settle(paths, state)
+        _check(host, [*SYSTEMCTL, "daemon-reload"], "systemctl --user daemon-reload", timeout=120)
+        socket_unit = inventory["socket"]
+        if state.install_sections:
+            _check(host, [*SYSTEMCTL, "enable", socket_unit], f"enabling {socket_unit}",
+                   timeout=120)
+        elif was_enabled:
+            _check(host, [*SYSTEMCTL, "disable", socket_unit], f"disabling {socket_unit}",
+                   timeout=120)
+        states = _unit_states(host, _watched_units(state))
+        unloaded = [unit for unit, info in states.items() if info.get("LoadState") != "loaded"]
+        if unloaded:
+            raise InstallError(
+                f"systemd did not load {', '.join(unloaded)}; see what Quadlet generates "
+                f"with: {host.quadlet} -dryrun -user"
+            )
+    _say(host, f"aegis-podman: installed {len(units)} unit files ({len(changed)} changed)")
+    for directory in sorted({str(unit.path.parent) for unit in units.values()}):
+        _say(host, f"  {directory}")
+    if state.install_sections:
+        _say(host, f"  {socket_unit} is enabled. The Quadlet services start at boot through "
+                   "their [Install] sections, which systemd applies when it generates them.")
+    else:
+        _say(host, "  no unit has an [Install] section, so nothing starts at boot")
+    _say(host, "Next: aegis-podman start" if state.desired == "stopped" else
+               "Aegis is running; aegis-podman stop and start apply changed units")
+    return 0
+
+
+def command_start(host: Host, paths: Paths, args: argparse.Namespace) -> int:
+    _check_directories(paths, host.uid, create=False)
+    with _locked(paths):
+        state = _installed_state(paths, host.uid, args)
+        _refuse_pending(state)
+        state.desired = "running"
+        save_state(paths, state)
+        # Quadlet's network and volume services first, so their failures surface early.
+        if state.units["generated"]:
+            _check(host, [*SYSTEMCTL, "--no-block", "start", *state.units["generated"]],
+                   "systemctl --user start", timeout=120)
+        _check(
+            host,
+            [*SYSTEMCTL, "--no-block", "start", state.units["socket"], *state.units["services"]],
+            "systemctl --user start", timeout=120,
+        )
+    # The wait changes nothing, so other commands may read the record meanwhile.
+    if not _await_ready(host, state, args.timeout):
+        return 1
+    _say(host, "aegis-podman: every unit is active, healthy and on its recorded image")
+    return 0
+
+
+def command_stop(host: Host, paths: Paths, args: argparse.Namespace) -> int:
+    _check_directories(paths, host.uid, create=False)
+    with _locked(paths):
+        state = _installed_state(paths, host.uid, args)
+        state.desired = "stopped"
+        save_state(paths, state)
+        _check(
+            host, [*SYSTEMCTL, "--no-block", "stop", *_service_units(state)],
+            "systemctl --user stop", timeout=120,
+        )
+    if not _await_stopped(host, _service_units(state), args.timeout):
+        return 1
+    _say(host, "aegis-podman: stopped")
+    return 0
+
+
+def command_status(host: Host, paths: Paths, args: argparse.Namespace) -> int:
+    _check_directories(paths, host.uid, create=False)
+    try:
+        with _locked(paths, shared=True):
+            state = _ready_state(paths, host.uid, args)
+    except LockBusy:
+        _say(host, "an aegis-podman command is in progress, so this is the live state only, "
+                   "without the record's run state, pending upgrade or recovery advice")
+        # The record is replaced by atomic renames, so reading it now sees a whole one.
+        current = load_state(paths, host.uid)
+        if current is None or not current.installed or not current.units:
+            return 3
+        states = _unit_states(host, _watched_units(current))
+        _print_units(host, current, states, _observe(host, current))
+        return 3
+    leftovers = _leftovers(paths, state.prefix)
+    if leftovers:
+        _say(host, "Temporary files left by an interrupted run (remove them while no "
+                   f"aegis-podman runs): {', '.join(map(str, leftovers))}")
+    if not state.installed:
+        _say(host, f"release {state.release}: initialized; run aegis-podman install")
+        return 3
+    states = _unit_states(host, _watched_units(state))
+    observed = _observe(host, state)
+    pending, failed = _readiness(
+        state, states, observed, expect_running=state.desired == "running",
+    )
+    _print_status(host, state, states, observed, failed)
+    if state.pending is not None or pending or failed:
+        return 3
+    return 0
+
+
+def command_upgrade(host: Host, paths: Paths, args: argparse.Namespace) -> int:
+    release = None if args.abandon else _release_argument(args.release)
+    _check_directories(paths, host.uid, create=False)
+    with _locked(paths):
+        state = _ready_state(paths, host.uid, args)
+        if args.abandon:
+            if state.pending is None:
+                raise InstallError("no upgrade is pending, so there is nothing to abandon")
+            wait = _abandon(host, paths, args, state)
+        elif state.pending is not None:
+            if release != state.pending["release"]:
+                _refuse_pending(state)
+            wait = _upgrade(host, paths, args, state, state.pending["release"], resume=True)
+        elif release == state.release:
+            _say(host, f"aegis-podman: release {release} is already current; nothing to do")
+            return 0
+        else:
+            assert release is not None
+            wait = _upgrade(host, paths, args, state, release, resume=False)
+    # The wait changes nothing, so other commands may read the record meanwhile.
+    if not wait:
+        return 0
+    if not _await_ready(host, state, args.timeout):
+        return 1
+    _say(host, "aegis-podman: every unit is active, healthy and on its recorded image")
+    return 0
+
+
+def _queue_restart(host: Host, inventory: Mapping[str, Any], changed: set[str]) -> None:
+    """Start Quadlet's network and volume services and restart the services, in order.
+
+    An unchanged socket keeps listening, so the kernel queues connections meanwhile.
+    Restarting PostgreSQL restarts migrate through Requires=; its dependents wait for it.
+    """
+    socket_unit = inventory["socket"]
+    starts = list(inventory["generated"])
+    restart = list(inventory["services"])
+    if socket_unit in changed:
+        restart.insert(0, socket_unit)
+    else:
+        starts.append(socket_unit)
+    _check(host, [*SYSTEMCTL, "--no-block", "start", *starts], "systemctl --user start",
+           timeout=120)
+    _check(host, [*SYSTEMCTL, "--no-block", "restart", *restart], "systemctl --user restart",
+           timeout=120)
+
+
+def _abandon(host: Host, paths: Paths, args: argparse.Namespace, state: State) -> bool:
+    """Go back from a pending upgrade to the current release; True when a wait follows.
+
+    The current release's units are rendered and installed again, and units only the
+    pending release had are stopped and removed. After ``daemon-reload`` the pending record
+    is cleared. The run state stays: a running stack is restarted on the current release's
+    images, and a stopped one stays stopped.
+    """
+    assert state.pending is not None
+    abandoned = state.pending["release"]
+    if state.pending.get("restart_queued"):
+        backup = (f"the restart into {abandoned} was already queued, so its migrations may have "
+                  f"changed the database schema, and {state.release} may not run on it. "
+                  "Restore a database backup from before the upgrade first")
+        if not args.allow_downgrade:
+            raise InstallError(f"{backup}, then rerun with --allow-downgrade")
+        print(f"aegis-podman: warning: {backup}.", file=host.err)
+    next_step = (f"; the upgrade to {abandoned} is still pending: go back again with "
+                 f"aegis-podman upgrade --abandon, or finish it with aegis-podman upgrade "
+                 f"--release {abandoned}")
+    try:
+        running, inventory, volumes, networks = _abandon_units(host, paths, args, state)
+    except InstallError as error:
+        raise InstallError(f"{error}{next_step}") from None
+    except BaseException:
+        print(f"aegis-podman: stopped part-way{next_step}", file=host.err)
+        raise
+    state.pending = None
+    _record_inventory(state, inventory, volumes, networks)
+    _write_config(paths, state)
+    _settle(paths, state)
+    _say(host, f"aegis-podman: abandoned the upgrade to {abandoned}; release {state.release}'s "
+               "units are installed again")
+    if not running:
+        _say(host, "Aegis is stopped, so nothing was restarted")
+    return running
+
+
+def _abandon_units(
+    host: Host, paths: Paths, args: argparse.Namespace, state: State,
+) -> tuple[bool, dict[str, Any], list[str], list[str]]:
+    """Install the current release's units again; restart them when Aegis should run."""
+    _preflight(host, paths)
+    _extract_release(host, paths, state, state.release, state.images["backend"])
+    module, templates = _release_renderer(paths, state, state.release)
+    units = _render(module, templates, state, paths)
+    inventory, volumes, networks = _inventory(units)
+    _check_backend_network(host, state)
+    stale = _stale_units(state, units)
+    _check_units(paths, state, units, stale)
+    _check_replaceable(state, paths.env_file)
+    running = state.desired == "running"
+    changed = _write_units(host, paths, state, units, stale, args.timeout)
+    _check(host, [*SYSTEMCTL, "daemon-reload"], "systemctl --user daemon-reload", timeout=120)
+    if running:
+        _queue_restart(host, inventory, changed)
+    return running, inventory, volumes, networks
+
+
+def _upgrade(
+    host: Host, paths: Paths, args: argparse.Namespace, state: State, release: str, *,
+    resume: bool,
+) -> bool:
+    """Move to ``release`` in two phases; True when a wait for readiness follows.
+
+    Phase one records the release as pending and writes its units; phase two, after
+    ``daemon-reload`` succeeded and any restart is queued, makes it current. A run that
+    stops in between leaves the pending record: the same command finishes it, and
+    ``upgrade --abandon`` goes back.
+    """
+    _preflight(host, paths)
+    if resume:
+        assert state.pending is not None
+        images, created = dict(state.pending["images"]), state.pending.get("created")
+        for reference in images.values():
+            if _run(host, [*PODMAN, "image", "exists", reference], timeout=60).returncode:
+                raise InstallError(f"{reference} is not local; fetch it with: podman pull "
+                                   f"{reference}")
+    else:
+        images, created = _pull(host, state.registry, release)
+        _check_order(state, release, created, args.allow_downgrade)
+    _extract_release(host, paths, state, release, images["backend"])
+    candidate = dataclasses.replace(state, release=release, images=images)
+    module, templates = _release_renderer(paths, state, release)
+    units = _render(module, templates, candidate, paths)
+    inventory, volumes, networks = _inventory(units)
+    _check_backend_network(host, state)
+    if not state.installed:
+        state.release, state.images, state.created = release, images, created
+        state.pending = None
+        _record_history(state, release)
+        _check_replaceable(state, paths.env_file)
+        _write_config(paths, state)
+        _settle(paths, state)
+        _say(host, f"aegis-podman: release {release} is current; the units are not installed")
+        return False
+    stale = _stale_units(state, units)
+    _check_units(paths, state, units, stale)
+    _check_replaceable(state, paths.env_file)
+    state.pending = {"release": release, "images": images, "created": created}
+    # Objects the new units may create are recorded now, so a purge finds them either way.
+    state.volumes = list(dict.fromkeys([*state.volumes, *volumes]))
+    state.networks = list(dict.fromkeys([*state.networks, *networks]))
+    save_state(paths, state)
+    finish = (f"; the upgrade is pending: finish it with aegis-podman upgrade --release "
+              f"{release}, or go back with aegis-podman upgrade --abandon")
+    running = state.desired == "running"
+    try:
+        changed = _write_units(host, paths, state, units, stale, args.timeout)
+        _check(host, [*SYSTEMCTL, "daemon-reload"], "systemctl --user daemon-reload", timeout=120)
+        if running:
+            # From here on the new release's migrate may run, so going back is a downgrade.
+            state.pending["restart_queued"] = True
+            save_state(paths, state)
+            _queue_restart(host, inventory, changed)
+    except InstallError as error:
+        raise InstallError(f"{error}{finish}") from None
+    except BaseException:
+        print(f"aegis-podman: stopped part-way{finish}", file=host.err)
+        raise
+    state.release, state.images, state.created = release, images, created
+    state.pending = None
+    _record_history(state, release)
+    _record_inventory(state, inventory, volumes, networks)
+    _write_config(paths, state)
+    _settle(paths, state)
+    _say(host, f"aegis-podman: release {release} is current; the previous release tree stays")
+    if not running:
+        _say(host, "Aegis is stopped, so nothing was restarted; start it with: "
+                   "aegis-podman start")
+    return running
+
+
+def _der_sequence(der: bytes) -> bool:
+    """Whether ``der`` is exactly one DER SEQUENCE, as an X.509 certificate is."""
+    if len(der) < 2 or der[0] != 0x30:
+        return False
+    length, offset = der[1], 2
+    if length & 0x80:
+        count = length & 0x7F
+        if not 1 <= count <= 4 or len(der) < 2 + count:
+            return False
+        length, offset = int.from_bytes(der[2:2 + count], "big"), 2 + count
+    return offset + length == len(der)
+
+
+def _single_certificate(text: str) -> str:
+    match = PEM_CERTIFICATE.fullmatch(text)
+    if match is None:
+        raise InstallError("Caddy's root certificate file is not exactly one PEM certificate")
+    try:
+        der = base64.b64decode("".join(match.group(1).split()), validate=True)
+    except binascii.Error:
+        raise InstallError("Caddy's root certificate is not valid base64") from None
+    if not _der_sequence(der):
+        raise InstallError("Caddy's root certificate is not a DER certificate")
+    return f"-----BEGIN CERTIFICATE-----\n{match.group(1)}-----END CERTIFICATE-----\n"
+
+
+def command_ca_cert(host: Host, paths: Paths, args: argparse.Namespace) -> int:
+    _check_directories(paths, host.uid, create=False)
+    try:
+        with _locked(paths, shared=True):
+            state = _installed_state(paths, host.uid, args)
+    except LockBusy:
+        print("aegis-podman: another command is in progress; reading the record without it",
+              file=host.err)
+        # The record is replaced by atomic renames, so reading it now sees a whole one.
+        state = _installed_state(paths, host.uid, args)
+    container = state.units["containers"].get(f"{state.prefix}caddy.service")
+    if container is None:
+        raise InstallError("the Caddy unit is not recorded; rerun aegis-podman install")
+    result = _check(
+        host, [*PODMAN, "exec", container, "cat", CA_CERTIFICATE],
+        "reading Caddy's local root certificate", timeout=60,
+    )
+    host.out.write(_single_certificate(result.stdout))
+    return 0
+
+
+def _bootstrap_options(text: str, state: State, paths: Paths) -> list[str]:
+    """``podman run`` options with the web unit's user, environment, secrets and confinement."""
+    container = _unit_sections(text).get("Container", [])
+    unknown = sorted({key for key, _ in container} - BOOTSTRAP_COPIED - BOOTSTRAP_IGNORED)
+    if unknown:
+        raise InstallError(
+            f"the web unit sets {', '.join(unknown)}, which this aegis-podman cannot copy to "
+            "the one-off container; run the installed release's own aegis-podman"
+        )
+    if [value for key, value in container if key == "Image"] != [state.images["backend"]]:
+        raise InstallError("the installed web unit does not run the recorded backend image")
+    users = [value for key, value in container if key == "User"]
+    groups = [value for key, value in container if key == "Group"]
+    options = [f"--user={users[0]}" + (f":{groups[0]}" if groups else "")] if users else []
+    secret_binds = f"{paths.secrets}/"
+    for key, value in container:
+        if key == "Environment":
+            words = shlex.split(value)
+            if len(words) != 1 or "=" not in words[0]:
+                raise InstallError(f"cannot read the web unit's Environment={value}")
+            options.append(f"--env={words[0]}")
+        elif key == "Volume" and value.startswith(secret_binds):
+            options.append(f"--volume={value}")
+        elif key == "ReadOnly" and value == "true":
+            options.append("--read-only")
+        elif key == "Tmpfs":
+            options.append(f"--tmpfs={value}")
+        elif key == "DropCapability":
+            options.extend(f"--cap-drop={capability.lower()}" for capability in value.split())
+        elif key == "AddCapability":
+            options.extend(f"--cap-add={capability.lower()}" for capability in value.split())
+        elif key == "NoNewPrivileges" and value == "true":
+            options.append("--security-opt=no-new-privileges")
+        elif key == "Unmask":
+            options.append(f"--security-opt=unmask={value}")
+        elif key == "GIDMap":
+            options.append(f"--gidmap={value}")
+        elif key == "SecurityLabelType":
+            options.append(f"--security-opt=label=type:{value}")
+        elif key == "RunInit" and value == "true":
+            options.append("--init")
+    return options
+
+
+def command_bootstrap_password(host: Host, paths: Paths, args: argparse.Namespace) -> int:
+    if USERNAME.fullmatch(args.username) is None:
+        raise InstallError("--username must be 1 to 150 letters, digits or @.+_-, "
+                           "starting with a letter or digit")
+    if EMAIL.fullmatch(args.email) is None:
+        raise InstallError("--email must be a plain address such as admin@example.org")
+    _check_directories(paths, host.uid, create=False)
+    with _locked(paths):
+        state = _installed_state(paths, host.uid, args)
+        _refuse_pending(state)
+        web = next(
+            (Path(path) for path, record in state.files.items()
+             if record.get("kind") == "unit"
+             and Path(path).name == f"{state.prefix}web.container"),
+            None,
+        )
+        if web is None:
+            raise InstallError("the web unit is not recorded; rerun aegis-podman install")
+        content = _read_regular(web)
+        if hashlib.sha256(content).hexdigest() not in _accepted(state.files[str(web)]):
+            raise InstallError(f"{web} was changed since aegis-podman wrote it")
+        try:
+            options = _bootstrap_options(content.decode("utf-8"), state, paths)
+        except UnicodeDecodeError:
+            raise InstallError(f"{web} is not UTF-8") from None
+        password_file = paths.secrets / BOOTSTRAP_PASSWORD
+        if not _secret_ready(paths, state, BOOTSTRAP_PASSWORD):
+            password = _new_secret(host, paths, state, BOOTSTRAP_PASSWORD)
+            _say(host, "A new administrator password was generated. This is the only time it "
+                       f"is shown; it is stored only in {password_file} (mode 0600, readable "
+                       "by the container user). Save it in a password manager now:")
+            _say(host, f"  {password}")
+        result = _run(
+            host,
+            [*PODMAN, "run", "--rm", "--pull=never", f"--network={state.prefix}backend",
+             *options, f"--volume={password_file}:{BOOTSTRAP_TARGET}:ro",
+             state.images["backend"], "python", "manage.py", "bootstrap_admin",
+             "--username", args.username, "--email", args.email,
+             "--password-file", BOOTSTRAP_TARGET],
+            timeout=600,
+        )
+    if result.returncode != 0:
+        raise InstallError(
+            f"administrator bootstrap failed (exit {result.returncode}){_detail(result.stderr)}"
+        )
+    host.out.write(result.stdout)
+    return 0
+
+
+def _uninstall_units(
+    host: Host, paths: Paths, state: State, *, force: bool, timeout: float,
+) -> None:
+    units = [Path(path) for path, record in state.files.items() if record.get("kind") == "unit"]
+    for path in units:
+        _check_removable(paths, state, path, force=force)
+    # The recorded inventory, and every unit a recorded file defines, including units only a
+    # pending upgrade wrote.
+    everything = list(dict.fromkeys([
+        *_watched_units(state), *(_systemd_unit(path.name) for path in units),
+    ]))
+    # Units that systemd never loaded cannot be stopped; polling then sees them inactive.
+    _run(host, [*SYSTEMCTL, "--no-block", "stop", *everything], timeout=120)
+    if not _await_stopped(host, everything, timeout):
+        raise InstallError("the units did not stop; nothing was removed")
+    state.desired = "stopped"
+    socket_unit = state.units["socket"]
+    socket_file = next((path for path in units if path.name == socket_unit), None)
+    if state.install_sections and socket_file is not None and os.path.lexists(socket_file):
+        _check(host, [*SYSTEMCTL, "disable", socket_unit], f"disabling {socket_unit}", timeout=120)
+    elif socket_file is not None:
+        # The file is gone, so systemctl cannot disable it: remove exactly the link
+        # enable created, when it still points at the recorded file.
+        wants = paths.config / "systemd" / "user" / "sockets.target.wants" / socket_unit
+        if wants.is_symlink() and os.readlink(wants) == str(socket_file):
+            wants.unlink()
+    for path in units:
+        _remove_recorded(paths, state, path)
+    state.installed = False
+    state.units = {}
+    state.pending = None  # its units are gone with the others
+    save_state(paths, state)
+    try:
+        _check(host, [*SYSTEMCTL, "daemon-reload"], "systemctl --user daemon-reload", timeout=120)
+    except InstallError as error:
+        raise InstallError(f"{error}; the unit files are removed, so run "
+                           "systemctl --user daemon-reload yourself") from None
+
+
+def _purge(host: Host, paths: Paths, state: State, *, force: bool) -> list[Path]:
+    """Remove the recorded objects, secrets and files, then the record itself.
+
+    Everything is verified first; one mismatch and nothing is removed. A volume or network
+    is removed by exact name, and only when it carries this install's label. Returns the
+    temporary files of interrupted runs, which are left in place.
+    """
+    problems: list[str] = []
+    removable: dict[str, list[str]] = {"volume": [], "network": []}
+    for kind, names in (("volume", state.volumes), ("network", state.networks)):
+        for name in names:
+            labels = _object_labels(host, kind, name)
+            if labels is None:
+                continue
+            if labels.get(INSTALL_LABEL) == state.install_token:
+                removable[kind].append(name)
+            else:
+                problems.append(
+                    f"{kind} {name} does not carry this install's label, so it is left in "
+                    f"place (podman {kind} rm {name} removes it, if you know it is Aegis's)"
+                )
+    secret_files: list[Path] = []
+    for name, record in state.secrets.items():
+        path = Path(record["pending"]) if "pending" in record else paths.secrets / name
+        info = _lstat(path)
+        if info is None:
+            continue
+        if path.parent != paths.secrets:
+            problems.append(f"the record names {path} as a secret outside {paths.secrets}")
+        elif force or _same_file(info, record) or ("pending" in record and "device" not in record):
+            secret_files.append(path)
+        else:
+            problems.append(
+                f"{path} is not the secret aegis-podman created; rerun with --force-recorded "
+                "to remove it anyway"
+            )
+    files = [Path(path) for path in state.files]
+    for path in files:
+        try:
+            _check_removable(paths, state, path, force=force)
+        except InstallError as error:
+            problems.append(str(error))
+    if problems:
+        raise InstallError("nothing was purged:\n  " + "\n  ".join(problems))
+    _remove_extractions(host, paths, state)
+    for kind, names in removable.items():
+        for name in names:
+            _check(host, [*PODMAN, kind, "rm", name], f"removing the {kind} {name}", timeout=120)
+    for path in [*secret_files, *files]:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(path)
+    for release in state.releases:
+        _remove_empty_directories(paths.releases / release)
+    leftovers = _leftovers(paths, state.prefix)
+    os.unlink(paths.state)
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(paths.lock)
+    for directory in (paths.secrets, paths.releases, paths.config_directory, paths.data):
+        with contextlib.suppress(OSError):
+            directory.rmdir()
+    return leftovers
+
+
+def command_uninstall(host: Host, paths: Paths, args: argparse.Namespace) -> int:
+    _check_directories(paths, host.uid, create=False)
+    if not paths.data.is_dir():
+        raise InstallError("nothing is recorded, so there is nothing to uninstall")
+    with _locked(paths):
+        state = load_state(paths, host.uid)
+        if state is None:
+            raise InstallError("nothing is recorded, so there is nothing to uninstall")
+        if args.prefix is not None and args.prefix != state.prefix:
+            raise InstallError(f"this install's prefix is {state.prefix}, not {args.prefix}")
+        if state.installed:
+            _uninstall_units(host, paths, state, force=args.force_recorded, timeout=args.timeout)
+            _say(host, "aegis-podman: removed the recorded unit files")
+        if not args.purge_data:
+            _say(host, "Volumes, secrets and the record are kept; --purge-data removes them.")
+            return 0
+        leftovers = _purge(host, paths, state, force=args.force_recorded)
+    _say(host, "aegis-podman: removed the recorded volumes, networks, secrets and records; "
+               "pulled images are kept")
+    if leftovers:
+        _say(host, f"Left in place, from an interrupted run: {', '.join(map(str, leftovers))}")
+    return 0
+
+
+COMMANDS: dict[str, Callable[[Host, Paths, argparse.Namespace], int]] = {
+    "init": command_init,
+    "install": command_install,
+    "start": command_start,
+    "stop": command_stop,
+    "status": command_status,
+    "upgrade": command_upgrade,
+    "ca-cert": command_ca_cert,
+    "bootstrap-password": command_bootstrap_password,
+    "uninstall": command_uninstall,
+}
+
+
+def _seconds(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number of seconds") from None
+    if not 0 < value <= 86400:
+        raise argparse.ArgumentTypeError("the deadline must be between 0 and 86400 seconds")
+    return value
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="aegis-podman", allow_abbrev=False,
+        description="Install and run Aegis as rootless Podman Quadlet units.",
+    )
+    common = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    common.add_argument(
+        "--prefix", help=f"unit and object name prefix (default {PRODUCTION_PREFIX}); after "
+                         "init it must match the recorded one",
+    )
+    common.add_argument(
+        "--state-home", metavar="DIRECTORY",
+        help="keep the record, secrets, release trees and configuration here instead of the "
+             "XDG data and configuration directories (unit files still go where systemd "
+             "reads them)",
+    )
+    commands = parser.add_subparsers(dest="command", required=True, metavar="command")
+
+    def command(name: str, summary: str) -> argparse.ArgumentParser:
+        return commands.add_parser(
+            name, help=summary, description=summary, allow_abbrev=False, parents=[common],
+        )
+
+    def deadline(subparser: argparse.ArgumentParser) -> None:
+        subparser.add_argument(
+            "--timeout", type=_seconds, default=DEFAULT_DEADLINE, metavar="SECONDS",
+            help=f"how long to wait for systemd (default {DEFAULT_DEADLINE:g})",
+        )
+
+    init = command("init", "pull a release, choose a subnet, create the secrets and records")
+    init.add_argument("--release", required=True, help="the published tag, sha-<commit>")
+    init.add_argument("--https-port", required=True, type=int, help="1024 or higher")
+    init.add_argument("--name", required=True, action="append",
+                      help="a hostname clients use; repeat for more; the first is canonical")
+    init.add_argument("--address", action="append", default=[],
+                      help="an IP address clients use; repeat for more")
+    init.add_argument("--registry", default=DEFAULT_REGISTRY)
+    init.add_argument("--backend-subnet", help="a free private /24 instead of the first free "
+                                               "candidate")
+    install = command("install", "render the release's units and install them for systemd")
+    sections = install.add_mutually_exclusive_group()
+    sections.add_argument(
+        "--install-sections", dest="install_sections", action="store_const", const=True,
+        help=f"render [Install] sections, so Aegis starts at boot (the {PRODUCTION_PREFIX} "
+             "prefix only)",
+    )
+    sections.add_argument(
+        "--no-install-sections", dest="install_sections", action="store_const", const=False,
+        help="render no [Install] sections, so nothing starts at boot. The choice is "
+             "recorded and kept until one of these flags changes it",
+    )
+    deadline(command("start", "start the socket and services and wait until healthy"))
+    deadline(command("stop", "stop the socket and services"))
+    command("status", "show each unit, its health and the pinned images")
+    upgrade = command("upgrade", "move to another release; restart in order when running")
+    target = upgrade.add_mutually_exclusive_group(required=True)
+    target.add_argument("--release", help="the release to move to, or to finish moving to")
+    target.add_argument("--abandon", action="store_true",
+                        help="go back from a pending upgrade to the current release")
+    upgrade.add_argument("--allow-downgrade", action="store_true",
+                         help="allow an older release, one that cannot be ordered, or "
+                              "--abandon after the restart into the new release was queued")
+    deadline(upgrade)
+    command("ca-cert", "print Caddy's local root certificate for client devices")
+    bootstrap = command("bootstrap-password", "create the first administrator")
+    bootstrap.add_argument("--username", required=True)
+    bootstrap.add_argument("--email", required=True)
+    uninstall = command("uninstall", "stop and remove the recorded units")
+    uninstall.add_argument("--purge-data", action="store_true",
+                           help="also remove the recorded volumes, networks, secrets and records")
+    uninstall.add_argument("--force-recorded", action="store_true",
+                           help="remove recorded files even when they changed")
+    deadline(uninstall)
+    return parser
+
+
+def main(argv: Sequence[str] | None = None, host: Host | None = None) -> int:
+    args = _parser().parse_args(argv)
+    host = Host(home=Path.home()) if host is None else host
+    try:
+        if host.uid == 0:
+            raise InstallError("run aegis-podman as the operator account, never as root")
+        paths = Paths.resolve(host.home, host.environ, args.state_home)
+        return COMMANDS[args.command](host, paths, args)
+    except (InstallError, RenderError) as error:
+        print(f"aegis-podman: error: {error}", file=host.err)
+    except OSError as error:
+        where = f" ({error.filename})" if error.filename else ""
+        print(f"aegis-podman: error: {error.strerror or error}{where}", file=host.err)
+    except (KeyError, TypeError, ValueError) as error:
+        print(f"aegis-podman: error: unexpected {type(error).__name__} ({error}); the command "
+              "stopped part-way, so check aegis-podman status", file=host.err)
+    return 1
 
 
 if __name__ == "__main__":

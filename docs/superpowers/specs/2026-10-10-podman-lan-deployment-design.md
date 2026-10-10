@@ -111,7 +111,11 @@ Rejected alternatives:
 
 Files that are not readable by the owning group stay unreadable. The indexer reports them as permission errors, which fail closed per entry.
 
-A service that shares a named volume with an originals reader gets the same group mapping, even without original mounts. Today that adds web, which shares `staging` with operations. This keeps group ownership consistent on shared volumes. PostgreSQL, migrate and Caddy keep the default mapping.
+Every service that runs the backend image (migrate, web, operations, indexer and media) gets the same group mapping, as does the gateway. That covers two needs:
+- shared named volumes keep consistent group ownership;
+- the root manifest, which must be mode 0600 and owned by the container user and group, looks the same in every role that reads it.
+
+The installer prepares such files with `podman unshare chown 10001:0`, which gives the container user's subordinate UID and the operator's group. PostgreSQL and Caddy keep the default mapping.
 
 ### D6. SELinux: a dedicated, read-only process type
 

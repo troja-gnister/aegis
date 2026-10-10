@@ -17,6 +17,7 @@ from tests.support.podman_deploy import (
     SAMPLE_BACKEND_SUBNET,
     SAMPLE_HOST_GID,
     SAMPLE_IMAGES,
+    SAMPLE_INSTALL_TOKEN,
     SAMPLE_PREFIX,
     SAMPLE_READER_TYPE,
     SAMPLE_SECRETS_DIR,
@@ -44,8 +45,12 @@ PRODUCTION_VALUE = "<production value>"
 ALL = frozenset(CONTAINERS)
 CADDY = frozenset({"caddy"})
 HEALTH_GATED = frozenset({"postgres", "web", "operations", "indexer", "media"})
-GROUP_MAPPED = frozenset({"gateway", "operations", "indexer", "media", "web"})
+GROUP_MAPPED = frozenset({"gateway", "migrate", "operations", "indexer", "media", "web"})
 READER_LABELED = frozenset({"gateway", "operations", "indexer", "media"})
+NETWORK_UNITS = frozenset({"backend", "edge", "tls-hop"})
+VOLUME_UNITS = frozenset({
+    "postgres-data", "indexer-coordination", "staging", "derivatives", "quarantine", "caddy-data",
+})
 
 # Every way the units may differ from compose: the exact services it applies to, and why.
 # Nothing else may differ, and every listed difference must occur (see the exactness test).
@@ -65,7 +70,10 @@ ALLOWED_DIFFERENCES: dict[str, tuple[frozenset[str], str]] = {
     "ContainerName": (ALL, "Podman object names carry the install prefix"),
     "Pull": (ALL, "the installer pulls the release images; a boot never reaches a registry"),
     "Notify": (HEALTH_GATED, "systemd orders startup by container health (D1)"),
-    "GIDMap": (GROUP_MAPPED, "group-only access to originals and the volumes they share (D5)"),
+    "GIDMap": (
+        GROUP_MAPPED,
+        "group-only access to originals, the volumes they share and the mount manifest (D5)",
+    ),
     "SecurityLabelType": (READER_LABELED, "originals readers run as the reader type (D6)"),
     "Unmask": (ALL, "the powercap unmask compose.podman.yaml adds under Podman"),
     "production-environment-values": (
@@ -85,6 +93,9 @@ ALLOWED_DIFFERENCES: dict[str, tuple[frozenset[str], str]] = {
         CADDY,
         "Podman refuses uid/gid tmpfs options; U,notmpcopyup gives the same owner "
         "(compose.podman.yaml)",
+    ),
+    "install-label": (
+        NETWORK_UNITS | VOLUME_UNITS, "install identity for exact-identity removal",
     ),
 }
 # Differences that only one engine's compose rendering contains.
@@ -318,6 +329,19 @@ def test_each_unit_matches_its_compose_service(
     assert unit_view(name, container(units, name), Allowances()) == expected
 
 
+def object_view(name: str, unit: Unit, allowances: Allowances) -> tuple[str, str, set[str]]:
+    """A network or volume unit: its short name, kind and keys beyond the install label."""
+    short, _, kind = name.removeprefix(SAMPLE_PREFIX).rpartition(".")
+    section = kind.capitalize()
+    assert set(unit.sections) == {section}, name
+    labels = unit.values(section, "Label")
+    if labels == [f"io.aegis.install={SAMPLE_INSTALL_TOKEN}"]:
+        assert allowances.take(short, "install-label"), name
+    else:
+        assert not labels, name
+    return short, kind, unit.keys(section) - {"Label"}
+
+
 def test_each_allowance_covers_exactly_the_differences_this_engine_renders(
     compose: dict[str, Any], units: dict[str, Unit],
 ) -> None:
@@ -325,6 +349,9 @@ def test_each_allowance_covers_exactly_the_differences_this_engine_renders(
     for name in CONTAINERS:
         compose_view(name, compose["services"][name], allowances)
         unit_view(name, container(units, name), allowances)
+    for name, unit in units.items():
+        if name.endswith((".network", ".volume")):
+            object_view(name, unit, allowances)
     other_engine = "docker" if selected_engine() == "podman" else "podman"
     declared = {
         (field, service)
@@ -341,18 +368,21 @@ def test_networks_and_volumes_match_compose_exactly(
 ) -> None:
     networks = {}
     volumes = set()
+    allowances = Allowances()
     for name, unit in units.items():
-        short = name.removeprefix(SAMPLE_PREFIX).rpartition(".")[0]
-        if name.endswith(".network"):
-            assert set(unit.sections) == {"Network"}, name
+        if not name.endswith((".network", ".volume")):
+            continue
+        short, kind, keys = object_view(name, unit, allowances)
+        if kind == "network":
             fixed = {"Subnet", "IPRange"} if short == "backend" else set()
-            assert unit.keys("Network") - {"Internal"} == {"NetworkName"} | fixed, name
+            assert keys - {"Internal"} == {"NetworkName"} | fixed, name
             assert not fixed or "static-backend-addresses" in ALLOWED_DIFFERENCES
             networks[short] = unit.value("Network", "Internal") == "true"
-        elif name.endswith(".volume"):
-            assert set(unit.sections) == {"Volume"}, name
-            assert unit.sections["Volume"] == [("VolumeName", f"{SAMPLE_PREFIX}{short}")], name
+        else:
+            assert keys == {"VolumeName"}, name
+            assert unit.value("Volume", "VolumeName") == f"{SAMPLE_PREFIX}{short}", name
             volumes.add(short)
+    assert {service for _, service in allowances.used} == NETWORK_UNITS | VOLUME_UNITS
     # Compose renders an empty ipam for a network that sets none.
     for name, network in compose["networks"].items():
         assert set(network) <= {"name", "internal", "ipam"} and not network.get("ipam"), name
@@ -379,7 +409,7 @@ if selected_engine() == "podman":
         tmp_path: Path,
     ) -> None:
         group_mapped = {"gateway": 101, "operations": 10001, "indexer": 10001, "media": 10001,
-                        "web": 10001}
+                        "web": 10001, "migrate": 10001}
         static_hosts = {"web": 10, "gateway": 11}
         secret_binds = {"postgres": 6, "migrate": 2, "web": 3, "operations": 2, "indexer": 2,
                         "media": 2, "gateway": 0, "caddy": 0}

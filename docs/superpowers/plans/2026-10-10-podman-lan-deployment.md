@@ -327,7 +327,7 @@ A rerun first cleans up an interrupted run's record.
 - Steps:
   1. Check out the repository (pinned action SHA).
   2. Log in to GHCR with `docker login ghcr.io -u ${{ github.actor }} --password-stdin <<< "$GITHUB_TOKEN"`, or the official login action pinned by SHA.
-  3. Build the four images with `docker build` from the tracked Dockerfiles and default build arguments, with labels `org.opencontainers.image.source=https://github.com/${{ github.repository }}` and `org.opencontainers.image.revision=${{ github.sha }}`.
+  3. Build the four images with `docker build` from the tracked Dockerfiles and default build arguments, with labels `org.opencontainers.image.source=https://github.com/${{ github.repository }}`, `org.opencontainers.image.revision=${{ github.sha }}` and `org.opencontainers.image.created=<commit time, RFC 3339, from git log -1 --format=%cI>`. The installer orders releases by `created` to refuse downgrades (Task 4 fix round 1).
   4. Tag each `ghcr.io/<owner>/aegis-<role>:sha-${{ github.sha }}`, push, and print each pushed digest.
 - No `latest` tag. No secrets in logs.
 

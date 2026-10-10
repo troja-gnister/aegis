@@ -35,6 +35,8 @@ Tmpfs=/tmp:size=64m,noexec,nosuid,nodev
 DropCapability=ALL
 NoNewPrivileges=true
 Unmask=/sys/devices/virtual/powercap
+# D5: the mount manifest must look owned by 10001:10001 in every backend-image service.
+GIDMap=+g10001:@@@HOST_GID@@:1
 # Compose's file secrets are read-only binds. The installer owns these files: mode 0600,
 # owned by container 10001:10001, labeled container_file_t.
 Volume=@@SECRETS_DIR@@/django-secret-key:/run/secrets/django_secret_key:ro

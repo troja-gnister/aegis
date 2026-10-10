@@ -17,6 +17,7 @@ from tests.support.podman_deploy import (
     SAMPLE_BACKEND_SUBNET,
     SAMPLE_HOST_GID,
     SAMPLE_IMAGES,
+    SAMPLE_INSTALL_TOKEN,
     SAMPLE_PORT,
     SAMPLE_PREFIX,
     SAMPLE_READER_TYPE,
@@ -48,9 +49,11 @@ BACKEND = ("migrate", "web", "operations", "indexer", "media")
 LONG_RUNNING = ("postgres", "web", "operations", "indexer", "media", "gateway", "caddy")
 # Units whose systemd start completes only once the container's health check passes.
 HEALTH_GATED = ("postgres", "web", "operations", "indexer", "media")
-# D5: the containers that mount originals, plus web, which shares staging with operations.
+# D5: the containers that mount originals, plus every other backend-image service: web
+# shares staging with operations, and all of them read the mount manifest, which must look
+# owned by 10001:10001 inside each.
 GROUP_MAPPED = {"gateway": 101, "operations": 10001, "indexer": 10001, "media": 10001,
-                "web": 10001}
+                "web": 10001, "migrate": 10001}
 # D6: the containers that mount originals run as the dedicated reader type.
 READER_LABELED = {"gateway", "operations", "indexer", "media"}
 IMAGE_ROLE = {"postgres": "postgres", "gateway": "gateway", "caddy": "caddy"} | dict.fromkeys(
@@ -240,6 +243,8 @@ INVALID_VALUES = [
     ("backend_subnet", "100.64.0.0/24"), ("backend_subnet", "172.32.0.0/24"),
     ("backend_subnet", "192.169.0.0/24"), ("backend_subnet", "fd00:1::/64"),
     ("backend_subnet", "010.123.45.0/24"), ("backend_subnet", 24),
+    ("install_token", ""), ("install_token", "0" * 31), ("install_token", "0" * 33),
+    ("install_token", "A" * 32), ("install_token", "g" * 32), ("install_token", 7),
 ]
 
 
@@ -253,7 +258,7 @@ def test_each_invalid_value_class_is_refused(field: str, value: object) -> None:
 
 @pytest.mark.parametrize("field", [
     "prefix", "release", "reader_type", "image_backend", "image_gateway", "image_postgres",
-    "image_caddy", "names", "secrets_dir", "backend_subnet",
+    "image_caddy", "names", "secrets_dir", "backend_subnet", "install_token",
 ])
 @pytest.mark.parametrize("hazard", ["\n", "\r", "\0", "@@"])
 def test_values_with_line_breaks_nul_or_token_markers_are_refused(
@@ -373,6 +378,21 @@ def test_networks_and_volumes_carry_prefixed_names_and_internal_flags() -> None:
     for name in VOLUMES:
         volume = rendered_units[f"{SAMPLE_PREFIX}{name}.volume"]
         assert volume.value("Volume", "VolumeName") == f"{SAMPLE_PREFIX}{name}"
+
+
+def test_networks_and_volumes_carry_the_install_token_and_nothing_else_does() -> None:
+    # --purge-data removes a volume or network only when it carries this install's token.
+    label = f"io.aegis.install={SAMPLE_INSTALL_TOKEN}"
+    for name, unit in units().items():
+        section = {".network": "Network", ".volume": "Volume"}.get(Path(name).suffix)
+        if section is None:
+            assert all("Label" not in unit.keys(part) for part in unit.sections), name
+        else:
+            assert unit.values(section, "Label") == [label], name
+    volume = units()[f"{SAMPLE_PREFIX}staging.volume"]
+    assert volume.sections == {"Volume": [
+        ("VolumeName", f"{SAMPLE_PREFIX}staging"), ("Label", label),
+    ]}
 
 
 def test_every_container_is_named_for_its_service_and_runs_its_release_image() -> None:

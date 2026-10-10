@@ -2,3 +2,5 @@
 [Network]
 NetworkName=@@PREFIX@@tls-hop
 Internal=true
+# The install's token: aegis-podman removes only objects that carry it.
+Label=io.aegis.install=@@INSTALL_TOKEN@@

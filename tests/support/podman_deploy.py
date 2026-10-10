@@ -1,11 +1,16 @@
 """Load the standalone Podman installer and read the Quadlet units it renders."""
 from __future__ import annotations
 
+import base64
+import hashlib
 import importlib.util
+import json
 import os
+import shutil
 import subprocess
 import sys
-from collections.abc import Mapping
+import textwrap
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
@@ -26,6 +31,7 @@ SAMPLE_HOST_GID = 4321
 SAMPLE_READER_TYPE = "aegis_reader.process"
 SAMPLE_SECRETS_DIR = "/home/aegis-operator/.local/share/aegis/secrets"
 SAMPLE_BACKEND_SUBNET = "10.123.45.0/24"
+SAMPLE_INSTALL_TOKEN = "5a17" * 8
 SAMPLE_IMAGES = {
     role: f"registry.example.test/aegis-{role}@sha256:{digit * 64}"
     for role, digit in (("backend", "a"), ("gateway", "b"), ("postgres", "c"), ("caddy", "d"))
@@ -63,6 +69,7 @@ def sample_config(**overrides: Any) -> Any:
         "reader_type": SAMPLE_READER_TYPE,
         "secrets_dir": SAMPLE_SECRETS_DIR,
         "backend_subnet": SAMPLE_BACKEND_SUBNET,
+        "install_token": SAMPLE_INSTALL_TOKEN,
         **{f"image_{role}": image for role, image in SAMPLE_IMAGES.items()},
     }
     return installer.UnitConfig(**(fields | overrides))
@@ -220,3 +227,364 @@ def exec_start_arguments(service: Unit) -> list[str]:
         else:
             arguments.append(word)
     return arguments
+
+
+# The installer's host side, faked: every program it runs answers from in-memory state here.
+SAMPLE_REGISTRY = "registry.example.test/aegis"
+SAMPLE_OTHER_RELEASE = "sha-" + "fedcba9876543210" * 2 + "fedcba98"
+SAMPLE_THIRD_RELEASE = "sha-" + "0f1e2d3c4b5a6978" * 2 + "0f1e2d3c"
+# Commit times, in release order: SAMPLE, then OTHER, then THIRD.
+SAMPLE_CREATED = {
+    SAMPLE_RELEASE: "2026-10-01T09:00:00Z",
+    SAMPLE_OTHER_RELEASE: "2026-10-05T12:30:00+02:00",
+    SAMPLE_THIRD_RELEASE: "2026-10-08T08:15:42.123456789Z",
+}
+RELEASE_SOURCE_TREE = REPOSITORY / "deploy" / "podman"
+PODMAN = ("podman", "--remote=false")
+SYSTEMCTL = ("systemctl", "--user")
+# A structurally valid stand-in for Caddy's root certificate: one DER SEQUENCE, PEM-armored.
+SAMPLE_CERTIFICATE_DER = bytes([0x30, 0x82, 0x01, 0x00]) + bytes(range(256))
+
+
+def sample_certificate() -> str:
+    body = base64.b64encode(SAMPLE_CERTIFICATE_DER).decode("ascii")
+    lines = "\n".join(textwrap.wrap(body, 64))
+    return f"-----BEGIN CERTIFICATE-----\n{lines}\n-----END CERTIFICATE-----\n"
+
+
+def image_digest(role: str, release: str) -> str:
+    return "sha256:" + hashlib.sha256(f"{role}:{release}".encode()).hexdigest()
+
+
+class FakeClock:
+    """Monotonic time that moves only when the installer sleeps."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+        self.slept: list[float] = []
+        self.hook: Callable[[], None] | None = None
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
+        if self.hook is not None:
+            self.hook()
+
+
+class FakeSystem:
+    """Podman, systemd, loginctl, chcon and ip for the installer, as in-memory state.
+
+    It records every argument vector and refuses any program it does not know. It reports
+    only states real systemd reports: a unit whose start fails on a dependency is left
+    inactive with Result=success and no job, and an empty Job property is left out. Starting
+    units reads the installed unit files the way Quadlet does: volumes and networks appear
+    with their labels, and a container runs the image its unit file names when it is
+    (re)created. It writes nothing but the ``podman cp`` destination and ``--cidfile`` files.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, ...]] = []
+        self.prefix = SAMPLE_PREFIX
+        # Answers a call itself when it returns (exit code, stdout, stderr), else passes it
+        # on. It may also raise, as the runner does on a timeout.
+        self.intercept: Callable[[tuple[str, ...]], tuple[int, str, str] | None] | None = None
+        self.rootless = True
+        self.selinux_enabled = True
+        self.systemd_version = "systemd 256 (256-test)"
+        self.linger = "yes"
+        self.manager_environment: dict[str, str] = {}
+        self.listeners: set[int] = set()
+        self.containers: list[dict[str, Any]] = []
+        self.networks: dict[str, dict[str, Any]] = {
+            "podman": {"name": "podman", "id": "9" * 64, "labels": {},
+                       "subnets": [{"subnet": "10.88.0.0/16", "gateway": "10.88.0.1"}]},
+        }
+        self.volumes: dict[str, dict[str, Any]] = {}
+        self.routes4: list[dict[str, Any]] = [
+            {"dst": "default", "gateway": "192.0.2.1", "dev": "test0"},
+            {"dst": "192.0.2.0/24", "dev": "test0"},
+        ]
+        self.routes6: list[dict[str, Any]] = [{"dst": "fe80::/64", "dev": "test0"}]
+        self.published: set[str] = {SAMPLE_RELEASE, SAMPLE_OTHER_RELEASE, SAMPLE_THIRD_RELEASE}
+        # The backend image's org.opencontainers.image.created label, per release.
+        self.created_labels: dict[str, str | None] = dict(SAMPLE_CREATED)
+        self.missing_images: set[str] = set()
+        self.release_tree = RELEASE_SOURCE_TREE
+        self.tree_hook: Any = None
+        self.release_hooks: dict[str, Callable[[Path], None]] = {}
+        self.unit_directory: Path | None = None
+        self.units: dict[str, dict[str, str]] = {}
+        self.running_images: dict[str, str] = {}
+        self.after_start: dict[str, dict[str, str]] = {}
+        self.unhealthy: set[str] = set()
+        self.created: list[str] = []
+        self.created_from: dict[str, str] = {}
+        self.removed: list[str] = []
+        self.failures: dict[tuple[str, ...], tuple[int, str, str]] = {}
+        self.create_output: str | None = None
+        self.write_cidfile = True
+        self.ca_output = sample_certificate()
+        self.run_output = "user_id=1 created=true\n"
+        self.counter = 0
+
+    # -- plumbing --------------------------------------------------------------------------
+    def __call__(
+        self, arguments: Sequence[str], *, timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        assert timeout > 0
+        command = tuple(arguments)
+        assert all(isinstance(word, str) for word in command), command
+        self.calls.append(command)
+        if self.intercept is not None and (answer := self.intercept(command)) is not None:
+            return subprocess.CompletedProcess(list(command), *answer)
+        for prefix, (code, stdout, stderr) in self.failures.items():
+            if command[: len(prefix)] == prefix:
+                return subprocess.CompletedProcess(list(command), code, stdout, stderr)
+        if command[:2] == PODMAN:
+            code, stdout = self.podman(command[2:])
+        elif command[:2] == SYSTEMCTL:
+            code, stdout = self.systemctl(command[2:])
+        elif command == ("systemctl", "--version"):
+            code, stdout = 0, f"{self.systemd_version}\n+PAM +AUDIT +SELINUX\n"
+        elif command[:2] == ("loginctl", "show-user"):
+            assert command[3:] == ("--property=Linger", "--value"), command
+            code, stdout = 0, f"{self.linger}\n"
+        elif command[:4] == ("chcon", "-h", "-t", "container_file_t") and len(command) == 5:
+            assert Path(command[4]).is_file() and not Path(command[4]).is_symlink(), command
+            code, stdout = 0, ""
+        elif command[:2] == ("ip", "-j"):
+            code, stdout = self.routes(command[2:])
+        else:
+            raise AssertionError(f"unexpected command {command}")
+        return subprocess.CompletedProcess(list(command), code, stdout, "")
+
+    def commands(self, *prefix: str) -> list[tuple[str, ...]]:
+        return [call for call in self.calls if call[: len(prefix)] == prefix]
+
+    def new_id(self) -> str:
+        self.counter += 1
+        return f"{self.counter:064x}"
+
+    def release_of(self, image: str) -> str:
+        for release in self.published:
+            if image.endswith(image_digest("backend", release)):
+                return release
+        raise AssertionError(f"no published release has the image {image}")
+
+    # -- programs --------------------------------------------------------------------------
+    def routes(self, words: tuple[str, ...]) -> tuple[int, str]:
+        family, rest = words[0], words[1:]
+        assert rest == ("route", "show", "table", "all"), words
+        return 0, json.dumps(self.routes4 if family == "-4" else self.routes6)
+
+    def podman(self, words: tuple[str, ...]) -> tuple[int, str]:
+        match words:
+            case ("info", "--format", "json"):
+                return 0, json.dumps({"host": {"security": {
+                    "rootless": self.rootless, "selinuxEnabled": self.selinux_enabled,
+                }}})
+            case ("ps", "-a", "--format", "json"):
+                return 0, json.dumps(self.containers)
+            case ("network", "ls", "--format", "json"):
+                return 0, json.dumps(list(self.networks.values()))
+            case ("network", "inspect", *names):
+                if any(name not in self.networks for name in names):
+                    return 125, ""
+                return 0, json.dumps([self.networks[name] for name in names])
+            case ("network", "exists", name):
+                return (0 if name in self.networks else 1), ""
+            case ("network", "rm", name):
+                assert name in self.networks, name
+                del self.networks[name]
+                return 0, name
+            case ("volume", "ls", "--format", "json"):
+                return 0, json.dumps([{"Name": name} for name in self.volumes] or None)
+            case ("volume", "exists", name):
+                return (0 if name in self.volumes else 1), ""
+            case ("volume", "inspect", name):
+                if name not in self.volumes:
+                    return 125, ""
+                return 0, json.dumps([self.volumes[name]])
+            case ("volume", "rm", name):
+                assert name in self.volumes, name
+                del self.volumes[name]
+                return 0, name
+            case ("pull", "--quiet", reference):
+                repository, _, release = reference.rpartition(":")
+                if release not in self.published:
+                    return 125, ""
+                return 0, image_digest(repository, release)[7:] + "\n"
+            case ("image", "inspect", reference):
+                repository, _, release = reference.rpartition(":")
+                role = repository.rpartition("/aegis-")[2]
+                digest = image_digest(role, release)
+                created = self.created_labels.get(release)
+                labels = {} if created is None else {"org.opencontainers.image.created": created}
+                return 0, json.dumps([{
+                    "Id": "e" * 64, "Digest": digest, "Labels": labels,
+                    "RepoDigests": [f"{repository}@{digest}"],
+                }])
+            case ("image", "exists", reference):
+                return (1 if reference in self.missing_images else 0), ""
+            case ("create", "--pull=never", "--network=none", cidfile, image, "python3"):
+                assert "@sha256:" in image and cidfile.startswith("--cidfile="), words
+                identifier = self.new_id()
+                self.created.append(identifier)
+                self.created_from[identifier] = image
+                path = Path(cidfile.removeprefix("--cidfile="))
+                if self.write_cidfile:
+                    assert not path.exists(), path
+                    path.write_text(identifier, encoding="ascii")
+                if self.create_output is not None:
+                    return 0, self.create_output
+                return 0, identifier + "\n"
+            case ("cp", source, destination):
+                identifier, _, path = source.partition(":")
+                assert identifier in self.created and identifier not in self.removed, source
+                assert path == "/usr/share/aegis/podman", source
+                self.copy_release_tree(Path(destination), self.created_from[identifier])
+                return 0, ""
+            case ("rm", identifier):
+                assert identifier in self.created, f"removal of a foreign container {identifier}"
+                if identifier in self.removed:
+                    return 1, ""
+                self.removed.append(identifier)
+                return 0, identifier + "\n"
+            case ("unshare", "chown", "-h", "10001:10001" | "10001:0", path):
+                assert Path(path).is_file() and not Path(path).is_symlink(), path
+                return 0, ""
+            case ("container", "inspect", name):
+                service = f"{name}.service"
+                if self.units.get(service, {}).get("ActiveState") != "active":
+                    return 125, ""
+                status = "starting" if name in self.unhealthy else "healthy"
+                return 0, json.dumps([{
+                    "Name": name, "ImageName": self.running_images.get(name, ""),
+                    "State": {"Health": {"Status": status}},
+                }])
+            case ("exec", _container, "cat", "/data/caddy/pki/authorities/local/root.crt"):
+                return 0, self.ca_output
+            case ("run", "--rm", *_rest):
+                return 0, self.run_output
+        raise AssertionError(f"unexpected podman call {words}")
+
+    def copy_release_tree(self, destination: Path, image: str) -> None:
+        """Copy a release tree the way the image ships it: read-only files and directories."""
+        assert not destination.exists(), destination
+        shutil.copytree(
+            self.release_tree, destination, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
+        if self.tree_hook is not None:
+            self.tree_hook(destination)
+        hook = self.release_hooks.get(self.release_of(image))
+        if hook is not None:
+            hook(destination)
+        for directory, subdirectories, files in os.walk(destination, topdown=False):
+            for name in files:
+                path = Path(directory) / name
+                if not path.is_symlink():
+                    path.chmod(0o555 if name == "aegis-podman" else 0o444)
+            for name in subdirectories:
+                if not (Path(directory) / name).is_symlink():
+                    (Path(directory) / name).chmod(0o555)
+        destination.chmod(0o555)
+
+    def systemctl(self, words: tuple[str, ...]) -> tuple[int, str]:
+        match words:
+            case ("daemon-reload",):
+                return 0, ""
+            case ("show-environment",):
+                return 0, "".join(f"{key}={value}\n"
+                                  for key, value in self.manager_environment.items())
+            case ("enable" | "disable", _unit):
+                return 0, ""
+            case ("--no-block", "start" | "restart" as verb, *units):
+                for unit in units:
+                    self.activate(unit, restart=verb == "restart")
+                self.quadlet_start(restart=verb == "restart")
+                for unit, values in self.after_start.items():
+                    self.units[unit] = self.unit(unit) | values
+                return 0, ""
+            case ("--no-block", "stop", *units):
+                for unit in units:
+                    self.units[unit] = self.unit(unit) | {
+                        "ActiveState": "inactive", "SubState": "dead",
+                    }
+                return 0, ""
+            case ("show", properties, *units) if properties.startswith("--property="):
+                blocks = []
+                for unit in units:
+                    values = {key: value for key, value in self.unit(unit).items() if value}
+                    blocks.append("\n".join(f"{key}={value}" for key, value in values.items()))
+                return 0, "\n\n".join(blocks) + "\n"
+        raise AssertionError(f"unexpected systemctl call {words}")
+
+    def unit(self, name: str) -> dict[str, str]:
+        default = {"Id": name, "LoadState": "loaded" if self.has_source(name) else "not-found",
+                   "ActiveState": "inactive", "SubState": "dead", "Result": "success",
+                   "NRestarts": "0", "Job": ""}
+        return default | self.units.get(name, {})
+
+    def has_source(self, name: str) -> bool:
+        """Whether a unit file defines ``name``; systemd reports any other unit not-found."""
+        if self.unit_directory is None:
+            return True
+        if name.endswith(".socket"):
+            return (self.unit_directory.parent.parent / "systemd" / "user" / name).is_file()
+        stem = name.removesuffix(".service")
+        for marker, suffix in (("-network", ".network"), ("-volume", ".volume")):
+            if stem.endswith(marker) and (
+                self.unit_directory / f"{stem.removesuffix(marker)}{suffix}"
+            ).is_file():
+                return True
+        return (self.unit_directory / f"{stem}.container").is_file()
+
+    def unit_file(self, name: str) -> str | None:
+        if self.unit_directory is None or not (self.unit_directory / name).is_file():
+            return None
+        return (self.unit_directory / name).read_text(encoding="utf-8")
+
+    def activate(self, unit: str, *, restart: bool = False) -> None:
+        was_active = self.unit(unit)["ActiveState"] == "active"
+        if unit.endswith(".socket"):
+            sub = "listening"
+        elif unit.endswith(("migrate.service", "-network.service", "-volume.service")):
+            sub = "exited"
+        else:
+            sub = "running"
+        self.units[unit] = self.unit(unit) | {"ActiveState": "active", "SubState": sub}
+        stem = unit.removesuffix(".service")
+        text = self.unit_file(f"{stem}.container")
+        if text is not None and (restart or not was_active):
+            # Quadlet creates the container afresh, from the image its unit names.
+            self.running_images[stem] = parse_unit(text).value("Container", "Image") or ""
+
+    def quadlet_start(self, *, restart: bool) -> None:
+        """What a start pulls in: Quadlet's volume and network services, and migrate."""
+        if self.unit_directory is None or not self.unit_directory.is_dir():
+            return
+        for path in sorted(self.unit_directory.iterdir()):
+            if not path.name.startswith(self.prefix):
+                continue
+            unit = parse_unit(path.read_text(encoding="utf-8"))
+            if path.suffix == ".volume":
+                name = unit.value("Volume", "VolumeName") or ""
+                self.volumes.setdefault(name, {"Name": name, "Labels": labels(unit, "Volume")})
+                self.activate(f"{path.stem}-volume.service")
+            elif path.suffix == ".network":
+                name = unit.value("Network", "NetworkName") or ""
+                subnet = unit.value("Network", "Subnet")
+                self.networks.setdefault(name, {
+                    "name": name, "id": self.new_id(), "labels": labels(unit, "Network"),
+                    "subnets": [{"subnet": subnet}] if subnet else [],
+                })
+                self.activate(f"{path.stem}-network.service")
+            elif path.name == f"{self.prefix}migrate.container":
+                self.activate(f"{self.prefix}migrate.service", restart=restart)
+
+
+def labels(unit: Unit, section: str) -> dict[str, str]:
+    return dict(value.partition("=")[::2] for value in unit.values(section, "Label"))
