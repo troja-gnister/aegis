@@ -39,8 +39,14 @@ test("Alice isolation, refresh, phone accessibility, and revoked restoration", a
   expect(duration).toBeLessThanOrEqual(0.00001);
   await expect(page.locator("html")).toHaveCSS("color-scheme", "dark");
 
-  // Keep the real authorized response shape while exercising long display names.
+  // Keep the real authorized response shape while exercising long display names. Afterwards the
+  // route passes requests through untouched rather than being torn down.
+  let longNames = true;
   await page.route("**/api/v1/roots", async (route) => {
+    if (!longNames) {
+      await route.continue();
+      return;
+    }
     const response = await route.fetch();
     const payload = await response.json();
     payload.roots[0].displayName = "Archive " + "long-unbroken-name".repeat(8);
@@ -52,7 +58,7 @@ test("Alice isolation, refresh, phone accessibility, and revoked restoration", a
   expect(await page.evaluate(() =>
     document.documentElement.scrollWidth <= window.innerWidth,
   )).toBe(true);
-  await page.unroute("**/api/v1/roots");
+  longNames = false;
 
   // Revoke via the same browser cookie jar, then simulate a restored document.
   const csrf = await (await page.request.get("/api/v1/auth/csrf")).json();

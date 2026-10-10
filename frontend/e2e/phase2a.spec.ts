@@ -356,7 +356,13 @@ test("stale cursor is refused by the server and Start from the beginning restart
   expect((await refused.json()).type).toBe("cursor_restart_required");
 
   // The browser's next real request carries a stale (altered) cursor; the real 409 is shown.
+  // Afterwards the route passes requests through unchanged rather than being torn down.
+  let staleCursors = true;
   await page.route((url) => isEntries(url) && url.searchParams.has("cursor"), async (route) => {
+    if (!staleCursors) {
+      await route.continue();
+      return;
+    }
     const stale = new URL(route.request().url());
     stale.searchParams.set("cursor", `${stale.searchParams.get("cursor")}A`);
     await route.continue({url: stale.toString()});
@@ -370,7 +376,7 @@ test("stale cursor is refused by the server and Start from the beginning restart
   );
   // The dead retry is gone: the stale cursor cannot be resent.
   await expect(more).toBeDisabled();
-  await page.unrouteAll({behavior: "wait"});
+  staleCursors = false;
 
   // The real recovery path: one uncursored page-one request, then paging resumes.
   const restarted = entriesResponse(page);
@@ -415,9 +421,11 @@ test("late responses after logout, account switch and grant revocation stay priv
   await heldPage;
   await page.getByRole("button", {name: "Sign out"}).click();
   await expect(page.getByRole("heading", {name: "Sign in"})).toBeVisible();
+  // The released route passes requests through and ends with the page. Never tear routes down while
+  // the app is active: on Chromium any route intercepts every request, and the teardown can strand
+  // one already in flight (here, sign-out's logout POST).
   release();
   await Promise.all(settled);
-  await page.unrouteAll({behavior: "wait"});
   await expect(page.getByRole("button", {name: "Sign in"})).toBeEnabled();
   await expect(page.getByRole("heading", {name: "Sign in"})).toBeVisible();
   await expect(page.getByText(/alice-only\.txt|bulk-0|Alice files/)).toHaveCount(0);

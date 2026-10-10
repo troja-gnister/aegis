@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import runpy
 import stat
 import subprocess
@@ -727,3 +728,21 @@ def test_e2e_forwards_only_validated_playwright_arguments() -> None:
     forward = 'npm --prefix frontend run test:e2e -- "${playwright_args[@]}"'
     assert script.rstrip().endswith(forward)
     assert script.index("playwright_args=()") < script.index("container_engine=(")
+
+
+UNROUTE_CALL = re.compile(r"\.\s*unroute(?:All)?\s*\(")
+
+
+def test_e2e_specs_never_tear_playwright_routes_down() -> None:
+    specs = sorted((Path(__file__).resolve().parents[2] / "frontend/e2e").glob("*.spec.ts"))
+    assert specs, "no e2e specs found"
+    offenders = []
+    for spec in specs:
+        text = spec.read_text(encoding="utf-8")
+        for call in UNROUTE_CALL.finditer(text):
+            offenders.append(f"{spec.name}:{text.count(chr(10), 0, call.start()) + 1}")
+    assert offenders == [], (
+        "E2E specs must make a finished route pass-through instead of calling unroute or "
+        "unrouteAll, because on Chromium any route intercepts every request and tearing it down "
+        "mid-test can strand a request the app has in flight."
+    )
