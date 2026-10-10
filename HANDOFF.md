@@ -1,10 +1,24 @@
-# Aegis continuation handoff — October 7, 2026
+# Aegis continuation handoff — October 10, 2026
 
 Resume on **`main`** on the **Fedora 44 Server development host**, which runs native rootless Podman and no Docker Engine; see [Setting up the new computer](#setting-up-the-new-computer). Docker is the supported, primary runtime. Podman is a secondary, optional runtime; its remaining gap, O11, belongs to part 2. See [the Linux/Podman report](docs/verification/linux-podman-prerequisite.md).
 
 **Part 1 (Podman development environment) is complete:** commits `db233c2` (spec) through `0840049`, then part 1's documentation commits starting with `ee41c2d`, all made on this host. Final fresh-shell gates under rootless Podman (October 4): `make verify` exit 0 (backend 1,892 and frontend 229 tests passed; 202 s); `make verify-compose` 1,258 passed, 0 failed, 0 skipped, plus exactly the nine O11 errors (25 min 13 s); `make test-e2e` 22/22 (164 s); `git diff --check` clean; `stop` exited 0 with no pre-existing Podman object removed or changed. Full Podman compatibility is not claimed while O11 is open. Part 1 was **pushed to `origin/main` on October 7** (`6bfaa01..dc4a880`, with the user's approval). Docker CI [run 37615719291](https://github.com/troja-gnister/aegis/actions/runs/37615719291): attempt 1 failed e2e only (`phase2a.spec.ts:391`, `failed_line=421`, mobile Chromium; the masked screenshot shows sign-out still at "Signing out…"), and attempt 2 passed all four jobs, which also confirms the Docker branches of the changed deployment tests. Details: the [Fedora Server verification section](docs/verification/linux-podman-prerequisite.md#fedora-server-development-host-october-2026) and the [part 1 design](docs/superpowers/specs/2026-10-04-podman-dev-environment-design.md).
 
 **Test stacks never restart at boot (October 7–10).** A host reboot while an e2e test stack was running showed that test containers inheriting `restart: unless-stopped` from `compose.yaml`, with their state in temporary directories, can disrupt other services' boot-time start on a shared host. Every test-created container now gets `restart: "no"`, and the e2e, benchmark, PostgreSQL-boundary and TLS test stacks refuse any other policy before starting (`792c92b`, `cec623e`); production keeps `unless-stopped`. Verified locally: `make test-e2e` 22/22; `make verify-compose` 1,316 passed with one O11 readiness failure (`test_local_caddy_preserves_ca_and_certificate_across_recreation`). Never leave a test stack running unattended.
+
+**The intermittent CI e2e Chromium failures are fixed (October 10, `14d8298`).**
+- **Root cause:** in Playwright 1.63 on Chromium, any `page.route` intercepts every request, and `page.unroute`/`unrouteAll` switches interception off asynchronously. A request the app issues during that switch can be stranded, never continued and never failed.
+- **Instrumented evidence:**
+  - In `phase2a.spec.ts:391`, sign-out's logout POST was issued 3–7 ms after `unrouteAll` and never completed in 3 of 99 runs, leaving "Signing out…" on screen.
+  - With the released route kept installed, 0 of 99 hung, and the POST returned 204 with the session revoked.
+  - `:339` used the same teardown-then-click pattern.
+- **Server side:** server-side pool and lock hypotheses were measured and refuted (no stalls, no long transactions or lock waits). The app was not at fault.
+- **Fix:** e2e specs never tear routes down mid-test. A finished route passes requests through, and `tests/deployment/test_e2e_harness.py` forbids `unroute`/`unrouteAll` in specs.
+- **Verified under rootless Podman:**
+  - `:339` 99/99 in mobile Chromium;
+  - `:391` 15/15 runs not affected by the rate limit;
+  - two full `make test-e2e` runs at 22/22.
+- **Repeated `:391` runs:** back-to-back repeats time out deterministically every fourth run. The test makes three user and two admin logins against the gateway's 10-logins-per-minute limit. That is a repetition artifact, not a failure mode.
 
 **Phase 2A.1 has 18 tasks: 15 accepted, 3 remaining (16, 17, 18).** Task 15, the streamed 1M-entry authenticated catalog benchmark, was accepted at `e8ea863`; [CI run 36959823576](https://github.com/troja-gnister/aegis/actions/runs/36959823576) passed all four jobs.
 
@@ -14,21 +28,16 @@ The public docs still say "14 accepted, Task 15 next" and **are not yet synced**
 
 ## Next actions, in order
 
-Before new work, run `git status --short --branch` and `git fetch`. If part 1 is still unpushed, ask the user before pushing. Confirm that `main` matches `origin/main` and that Docker CI for the pushed head passed all four jobs: backend, frontend, deployment and e2e. If a job fails, diagnose it first (`gh` is installed on this host). Never reset, force-push, auto-stash or discard work.
+Before new work, run `git status --short --branch` and `git fetch`. Confirm that `main` matches `origin/main` and that Docker CI for the pushed head passed all four jobs: backend, frontend, deployment and e2e. If a job fails, diagnose it first (`gh` is installed on this host). Never reset, force-push, auto-stash or discard work.
 
-1. **Investigate the intermittent CI e2e Chromium timing failures (decided by the user on October 7: next, before part 2).** Both appeared only in Docker CI's mobile Chromium project after the web performance slice `f6db82e` (four uvicorn workers and pooled web database connections), and both passed on rerun:
-   - run 37123170741 attempt 1: `phase2a.spec.ts:339` (stale-cursor restart);
-   - run 37615719291 attempt 1: `phase2a.spec.ts:391`, line 421 — after sign-out with released late requests, the page stayed at "Signing out…" with Sign in disabled past the assertion timeout. Privacy held (access stayed closed); liveness did not.
-
-   Findings so far (October 7): repeating `:391` in mobile Chromium reproduced the "Signing out…" hang locally once in about 115 runs (back-to-back repeats also time out every fourth run on the gateway's login rate limit — an artifact of repetition, not this bug). A CSRF-endpoint latency poll showed no server stalls, and PostgreSQL sampling showed no long transactions or lock waits, so the server-side pool and lock hypotheses lack support. The leading hypothesis is client-side: both failing tests intercept with `page.route(<function predicate>)`, which routes every request (including the CSRF GET and the logout POST) through Playwright, and then call `page.unrouteAll({behavior: "wait"})`; a request paused in that window may never be continued in Chromium. Next: an instrumented throwaway copy of the test that records every API request's start and finish and the route-predicate calls relative to `unrouteAll`, repeated until the hang recurs. A test-only per-service CPU quota (the cgroup `cpu` controller is delegated here; `cpuset` is not) and `AEGIS_WEB_WORKERS=4` versus `1` remain available for CI-like comparisons. Find the root cause before changing the app or the tests.
-2. **Brainstorm part 2: persistent private-network deployment on this host.** It gets its own specification, plan and review. Agreed requirements:
-   - free ports, because default ports may already be taken on a shared host, and a firewall rule that admits only private-network sources;
-   - local-CA HTTPS;
-   - fixing O11, so real client addresses reach Caddy and the gateway;
-   - SELinux and UID mapping for read-only originals, without relabeling or ownership changes;
-   - the user's chosen test root as the first root;
-   - pull-and-run published images, with no checkout or local build on the server;
-   - existing services are left untouched until the user approves replacing anything.
+1. **Part 2, persistent private-network deployment on this host: in progress (started October 10).** [Design](docs/superpowers/specs/2026-10-10-podman-lan-deployment-design.md) and [plan](docs/superpowers/plans/2026-10-10-podman-lan-deployment.md); the ignored ledger is `.superpowers/sdd/2026-10-10-podman-lan-deployment/`, and host-specific values are kept in ignored local notes.
+   - **Units and edge:** Quadlet user units mirror `compose.yaml`, enforced by a parity test. A socket-activated Caddy keeps real client addresses, which fixes O11 for the deployment.
+   - **Images:** GHCR-published images carry the `aegis-podman` installer and templates, so the server needs no checkout.
+   - **Originals:** read through group-only ID mapping and a dedicated read-only SELinux type. Nothing is relabeled or re-owned.
+   - **Access:** a firewall that admits only private sources, and local-CA HTTPS.
+   - **User step:** the user runs the generated host-setup script with `sudo` (SELinux module and firewall rules).
+   - **Existing services:** nothing replaces them.
+2. **Part 4, media viewing, comes next after part 2** (decided October 10, because the user wants to view their media soon): authorized downloads and ranges, thumbnails, and photo and video viewers. It needs its own design.
 3. **Follow-ups from the part 1 final review.** All are minor and none blocks the push. Do (c) before part 2 configures a real root on Podman; agree the order of the rest with the user. Part 1's ledger, kept in the ignored local notes on this host, holds the details.
    - (a) Privacy: write the credential-diagnostic probe under an `/e2e/` path so it exercises the new stack branch, anchor `SPEC_FRAME` to `at` frames, and guard `typeof error.stack` (`frontend/e2e/verify-diagnostics.mjs`, `safe-location.ts`, `safe-test.ts`).
    - (b) Helper: when the recorded API PID was reused (a different start time proves the API process is gone), `stop` should still never signal it but should continue the identity-checked socket and directory removal; today it refuses there.
@@ -39,7 +48,9 @@ Before new work, run `git status --short --branch` and `git fetch`. If part 1 is
    - (g) Before Task 16 on this host: the benchmark (`scripts/benchmarks/resources.py`) applies neither `compose.podman.yaml` nor the guarded Podman launcher, so on rootless Podman PostgreSQL refuses secret staging at first start ("database secret staging refused"); it has only ever run on Docker.
    - (h) A test-only `depends_on: web: condition: service_healthy` for the gateway in `compose.test.yaml`: the gateway's startup check (at most 40 attempts, then exit) races web readiness, which a restart policy used to mask.
    - (i) O11 also affects `test_local_caddy_preserves_ca_and_certificate_across_recreation` (readiness HTTP 400).
-4. **Part 3, after part 2 is running: sync the public docs** for Task 15 acceptance (15/18) and the web performance slice:
+   - (j) Run the compose-based TLS test module's Caddy socket-activated under Podman, so its nine O11 tests see real client addresses.
+   - (k) Evaluate Podman 6's experimental pasta port forwarder, which keeps source addresses, once the host moves to Podman 6.
+4. **Part 3, after parts 2 and 4: sync the public docs** for Task 15 acceptance (15/18) and the web performance slice:
    - README;
    - the plan ledger and Task 15 evidence row;
    - `docs/development.md`;
@@ -47,7 +58,7 @@ Before new work, run `git status --short --branch` and `git fetch`. If part 1 is
    - the delivery spec status;
    - the operator-runbook note on `AEGIS_WEB_WORKERS` and the 65 s window (review item m8) in `docs/operations/`.
 
-   Keep them consistent with each other and with this file. Ask before pushing.
+   Keep them consistent with each other and with this file.
 5. **Part 3, before Task 16:** check the machine's free disk; see the setup section. Ask the user for the disk or path to use and for explicit opt-in.
 6. **Part 3, then** run **Task 16** (real 1M physical scan, recovery and loaded browse at p95 ≤ 500 ms under scan load), **Task 17** (a 30-minute mobile session) and **Task 18** (upgrade from Phase 1 and the acceptance handoff), in order, from the [plan](docs/superpowers/plans/2026-09-14-phase-2a-indexed-browser.md). Read each task's full requirements; this file does not replace them.
 
@@ -92,7 +103,7 @@ Do not restart Tasks 1–15, the web performance slice or part 1. The old machin
   - O11, client source IPs not preserved by rootless published ports: part 2. The nine `test_tls_gateway.py` tests fail under Podman until then; they are not skipped.
   - Fixed in part 1: the core-services NNP assertion (`c97b7da`) and the `test_rendered_mounts.py` refusals (`51d6397`, `0b682e8`, `787e570`). `test_database_roles.py:414` passes under Podman unchanged.
   - Recorded and left in place: the guard's per-launch `/tmp/aegis-mask-check-*` folders (529, about 35 MiB, after the final run), observer diagnostics `/tmp/aegis-mount-preflight-*`, and one synthetic `/tmp/aegis-verify-*` folder per `make verify` run from `backend/tests/unit/common/test_verify_targets.py:656`, which should use `tmp_path`.
-- **CI flake:** `phase2a.spec.ts:339` passed 50/50 locally in mobile Chromium, but the server stack was not limited to four CPUs, so CI-like contention was not reproduced. Keep watching CI.
+- **CI flake:** resolved by `14d8298`; see the summary at the top. Keep watching CI.
 
 ## Setting up the new computer
 
@@ -132,7 +143,11 @@ On Podman, use the helper (`python3 -m scripts.podman_dev tools`, then `uv run -
   - Follow each implementation with an independent spec and quality review, then fix rounds with scoped re-review, at most 5.
   - Record each step in `progress.md`.
   - Implementers must not commit or spawn agents.
-- **Commit and push:** the root session commits. **Ask the user before every push to the shared `main`**, and watch CI after it.
+- **Commit and push:** the root session commits. On October 10 the user delegated routine decisions ("you are the driver"). Designs, commits and pushes to `main` after local verification proceed without asking, and CI is watched after every push. Still ask before:
+  - `sudo` or host-level changes;
+  - anything touching the user's existing containers, data or disks;
+  - replacing an existing service;
+  - history rewrites or force-pushes.
 - **Docker first:** keep Aegis as universal as possible. Podman-specific configuration belongs in the README's optional Podman section. The user plans to use Aegis as a Nextcloud replacement, so HTTPS and real client IPs matter.
 - **Security:** do not weaken CSRF, and never trust a `"null"` origin. Keep no secrets in git or public CI annotations; annotations carry only the test id and exception type.
 
@@ -181,6 +196,9 @@ Phase 2A.1 completion still leaves the broader 2A search, events and downloads, 
 
 | Revision | Meaning |
 | --- | --- |
+| `05744d2` | Part 2 design and plan (rootless Podman private-network deployment). |
+| `14d8298` | Fix for the intermittent CI e2e Chromium failures: specs never tear Playwright routes down mid-test, enforced by a guard test. |
+| `792c92b`, `cec623e`, `4c0e83a` | Test stacks never restart at boot; pushed October 10, CI run 38055028268 green. |
 | `db233c2`–`0840049`, then part 1's documentation commits from `ee41c2d` | **Part 1, Podman development environment.** Pushed only with the user's approval; after the push, check that Docker CI passed all four jobs. Spec and plan, helper (`7438509`–`3a09caa`), helper fixes (`9fbe83b`, `1723b60`), core-services NNP expectation (`c97b7da`), guard fixes (`51d6397`, `0b682e8`, `787e570`), e2e fixes (`9c0b6c9`, `280cf07`) and flake tooling (`0840049`). |
 | `805fce4` and `6bfaa01` | Handoffs; pushed October 3. CI run 37123170741 for `6bfaa01`: attempt 1 failed e2e only, attempt 2 passed all four jobs. |
 | `f6db82e` | **Pushed October 3** at the user's request; covered by CI run 37123170741 on `6bfaa01`. Web performance slice: multi-worker web, pooled web-role connections, cheaper status. Reviewed and approved. |
