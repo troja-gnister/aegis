@@ -12,6 +12,16 @@ COPY backend/aegis_apps ./backend/aegis_apps
 COPY backend/aegisctl ./backend/aegisctl
 RUN uv sync --locked --no-dev --no-editable
 
+# The rootless Podman installer and its templates, for operators to copy out of the image.
+# Root-owned and read-only; the final stage takes them in one layer with these modes.
+FROM docker.io/library/python:3.13.15-slim-trixie@sha256:881d80734ee05dca6f7f42dcb080975652a53c7eda9ba1f03bb8da31aa6a6ec2 AS podman-files
+
+COPY deploy/podman /usr/share/aegis/podman
+RUN find /usr/share/aegis/podman -type f -exec chmod 0444 {} + \
+    && find /usr/share/aegis/podman -type d -exec chmod 0555 {} + \
+    && chmod 0555 /usr/share/aegis/podman/aegis-podman \
+    && test -z "$(find /usr/share/aegis/podman ! -type f ! -type d -o -name __pycache__ -o -name '*.pyc')"
+
 FROM docker.io/library/python:3.13.15-slim-trixie@sha256:881d80734ee05dca6f7f42dcb080975652a53c7eda9ba1f03bb8da31aa6a6ec2
 
 ENV PATH="/app/.venv/bin:$PATH" \
@@ -25,6 +35,7 @@ RUN groupadd --gid 10001 aegis \
 WORKDIR /app/backend
 COPY --from=build /app/.venv /app/.venv
 COPY --from=build /app/backend /app/backend
+COPY --from=podman-files /usr/share/aegis /usr/share/aegis
 USER 10001:10001
 
 CMD ["uvicorn", "aegis.asgi:application", "--host", "0.0.0.0", "--port", "8000", "--log-config", "/app/backend/aegis/uvicorn_logging.json"]

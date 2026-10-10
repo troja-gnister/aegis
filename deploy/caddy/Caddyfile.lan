@@ -1,0 +1,15 @@
+{
+	admin off
+	auto_https disable_redirects
+	skip_install_trust
+}
+{$AEGIS_LAN_SITES} {
+	bind fd/3 {
+		protocols h1 h2
+	}
+	tls internal
+	reverse_proxy tls-gateway:8081 {
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto https
+	}
+}

@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import urllib.request
 import uuid
+from collections.abc import Mapping
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -185,18 +186,33 @@ def test_invalid_tls_probe_propagates_cleanup_query_failure_without_broad_down(
     assert all("down" not in command for command in commands)
 
 
-def adapted_caddyfile(path: Path, *, tls_host: str | None = None) -> dict[str, Any]:
-    with tempfile.TemporaryDirectory(prefix="aegis-caddy-bind-", dir="/tmp") as temporary:
-        copied = copy_bind_inputs(Path(temporary), {"Caddyfile": path})["Caddyfile"]
-        arguments = [
-            *CONTAINER_COMMAND, "run", "--rm", "--volume",
-            f"{copied}:/etc/caddy/Caddyfile:ro",
-        ]
-        if tls_host is not None:
-            arguments.extend(["--env", f"AEGIS_TLS_HOST={tls_host}"])
+def adapted_caddyfile(
+    path: Path | None, *, tls_host: str | None = None,
+    environment: Mapping[str, str] | None = None,
+    image: str = CADDY_IMAGE, config: str = "/etc/caddy/Caddyfile",
+) -> dict[str, Any]:
+    """Adapt a Caddyfile to JSON in a throwaway container of ``image``.
+
+    ``path`` is bind-mounted read-only at ``config``. With ``path`` None, the image must
+    already carry ``config``, as the Aegis Caddy image carries Caddyfile.lan.
+    """
+    variables = dict(environment or {})
+    if tls_host is not None:
+        variables["AEGIS_TLS_HOST"] = tls_host
+    binding = (
+        nullcontext(None) if path is None
+        else tempfile.TemporaryDirectory(prefix="aegis-caddy-bind-", dir="/tmp")
+    )
+    with binding as temporary:
+        arguments = [*CONTAINER_COMMAND, "run", "--rm"]
+        if path is not None and temporary is not None:
+            copied = copy_bind_inputs(Path(temporary), {"Caddyfile": path})["Caddyfile"]
+            arguments.extend(["--volume", f"{copied}:{config}:ro"])
+        for name, value in variables.items():
+            arguments.extend(["--env", f"{name}={value}"])
         result = run_container(
-            [*arguments, CADDY_IMAGE, "caddy", "adapt", "--config",
-             "/etc/caddy/Caddyfile", "--adapter", "caddyfile"],
+            [*arguments, image, "caddy", "adapt", "--config", config,
+             "--adapter", "caddyfile"],
             check=True, capture_output=True, text=True, timeout=30,
         )
     return cast(dict[str, Any], json.loads(result.stdout))
