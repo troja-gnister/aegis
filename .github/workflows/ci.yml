@@ -10,7 +10,7 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   UV_LOCKED: "1"
@@ -234,3 +234,54 @@ jobs:
             printf '%s\n' "Locks, migrations, or generated mount outputs are dirty:" "$dirty" >&2
             exit 1
           fi
+
+  # Releases are immutable: one sha-<commit> tag per role, never a moving tag.
+  publish:
+    needs: [backend, frontend, deployment, e2e]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Enforce immutable action references
+        uses: zgosalvez/github-actions-ensure-sha-pinned-actions@60e3a74c7b74a319e8e53e46bc455205f7173e1a # v5.0.8
+      - name: Log in to GitHub Container Registry
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      # Same Dockerfiles, repository-root context and default build arguments
+      # (UID/GID 10001) as the deployment gate's Compose build. Build all four
+      # before pushing any, so a failed build never leaves a partial release.
+      - name: Build, label, and push the runtime images for this commit
+        env:
+          REPOSITORY: ${{ github.repository }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          REVISION: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$REVISION" ]]
+          OWNER="${REPOSITORY_OWNER,,}"
+          CREATED="$(git log -1 --format=%cI)"
+          roles=(backend gateway postgres caddy)
+          for role in "${roles[@]}"; do
+            docker build --file "docker/$role.Dockerfile" \
+              --label "org.opencontainers.image.source=https://github.com/$REPOSITORY" \
+              --label "org.opencontainers.image.revision=$REVISION" \
+              --label "org.opencontainers.image.created=$CREATED" \
+              --tag "ghcr.io/$OWNER/aegis-$role:sha-$REVISION" .
+          done
+          for role in "${roles[@]}"; do
+            image="ghcr.io/$OWNER/aegis-$role:sha-$REVISION"
+            docker push "$image"
+            docker image inspect --format '{{index .RepoDigests 0}}' "$image"
+          done
+      - name: Log out of GitHub Container Registry
+        if: always()
+        run: docker logout ghcr.io

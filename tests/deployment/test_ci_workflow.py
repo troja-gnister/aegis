@@ -14,6 +14,39 @@ import pytest
 import yaml
 
 WORKFLOW = Path(__file__).resolve().parents[2] / ".github/workflows/ci.yml"
+GATES = ("backend", "frontend", "deployment", "e2e")
+ROLES = ("backend", "gateway", "postgres", "caddy")
+PUBLISH_IF = "github.event_name == 'push' && github.ref == 'refs/heads/main'"
+PUBLISH_PERMISSIONS = {"contents": "read", "packages": "write"}
+LOGIN = """printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin"""
+FIXTURE_SHA = "0123456789abcdef0123456789abcdef01234567"
+FIXTURE_CREATED = "2026-10-10T08:09:10+02:00"
+FIXTURE_TOKEN = "ghs_" + "Tk9zYw" * 6
+CONTEXT = {
+    "github.repository": "Example-Owner/aegis-fixture",
+    "github.repository_owner": "Example-Owner",
+    "github.sha": FIXTURE_SHA,
+    "secrets.GITHUB_TOKEN": FIXTURE_TOKEN,
+}
+# Record every docker argv (unit-separated) and its stdin for login; fail a build on demand.
+FAKE_DOCKER = r"""#!/usr/bin/env bash
+set -euo pipefail
+(IFS=$'\x1f'; printf '%s\n' "$*") >> "$FAKE_LOG"
+case "${1-}" in
+  login) cat > "$FAKE_STDIN" ;;
+  build) for argument in "$@"; do
+           [[ "$argument" != "docker/${FAKE_FAIL_ROLE:-none}.Dockerfile" ]] || exit 1
+         done ;;
+  image) image="${!#}"; printf '%s@sha256:%064d\n' "${image%:*}" 7 ;;
+esac
+"""
+FAKE_GIT = r"""#!/usr/bin/env bash
+case "$*" in
+  "log -1 --format=%cI") printf '%s\n' "$FAKE_CREATED" ;;
+  "rev-parse HEAD") printf '%s\n' "$FAKE_HEAD" ;;
+  *) exit 97 ;;
+esac
+"""
 
 
 @pytest.fixture
@@ -36,19 +69,41 @@ def commands(job: dict[str, Any]) -> list[list[str]]:
     ]
 
 
-def test_ci_is_unprivileged_and_has_exactly_four_bounded_jobs(workflow: dict[str, Any]) -> None:
+def test_ci_is_unprivileged_and_has_four_bounded_gates_and_one_publisher(
+    workflow: dict[str, Any],
+) -> None:
     assert set(workflow["on"]) == {"pull_request", "push"}
     assert workflow["on"]["push"]["branches"] == ["main"]
     assert workflow["permissions"] == {"contents": "read"}
-    assert workflow["concurrency"]["cancel-in-progress"] is True
-    assert set(workflow["jobs"]) == {"backend", "frontend", "deployment", "e2e"}
-    for job in workflow["jobs"].values():
+    # Superseded pull request runs are cancelled; a main run never is, so a publish cannot
+    # stop halfway through pushing a release.
+    assert workflow["concurrency"]["cancel-in-progress"] == "${{ github.ref != 'refs/heads/main' }}"
+    assert set(workflow["jobs"]) == {*GATES, "publish"}
+    for name, job in workflow["jobs"].items():
         assert job["runs-on"] == "ubuntu-24.04"
         assert 0 < job["timeout-minutes"] <= 30
-        assert "permissions" not in job
         assert "services" not in job  # scripts/verify.py owns a memory-only PostgreSQL 18.
         assert "container" not in job
-    assert "secrets." not in str(workflow)
+        if name in GATES:
+            assert "permissions" not in job
+            assert "secrets." not in str(job)
+
+
+def test_publish_runs_only_for_main_pushes_after_every_gate(workflow: dict[str, Any]) -> None:
+    publish = workflow["jobs"]["publish"]
+    assert publish["needs"] == list(GATES)
+    assert publish["if"] == PUBLISH_IF
+    assert publish["permissions"] == PUBLISH_PERMISSIONS
+    assert publish["runs-on"] == "ubuntu-24.04"
+    assert 0 < publish["timeout-minutes"] <= 30
+    assert not {"strategy", "environment", "continue-on-error"} & set(publish)
+
+
+def test_only_the_publisher_may_write_packages(workflow: dict[str, Any]) -> None:
+    assert workflow["permissions"] == {"contents": "read"}
+    grants = {name: job.get("permissions") for name, job in workflow["jobs"].items()}
+    assert grants == {**dict.fromkeys(GATES), "publish": PUBLISH_PERMISSIONS}
+    assert WORKFLOW.read_text(encoding="utf-8").count("packages: write") == 1
 
 
 def test_every_action_is_immutable_and_the_first_check_enforces_pins(
@@ -139,6 +194,124 @@ def test_failure_artifacts_are_only_masked_synthetic_screenshots(
     assert step["with"]["if-no-files-found"] == "ignore"
 
 
+def _publish_steps(workflow: dict[str, Any]) -> list[dict[str, Any]]:
+    steps: list[dict[str, Any]] = workflow["jobs"]["publish"]["steps"]
+    assert len(steps) == 5, "checkout, pin enforcement, login, build and push, logout"
+    return steps
+
+
+def _render(value: str) -> str:
+    rendered = re.sub(r"\$\{\{\s*([\w.]+)\s*\}\}", lambda match: CONTEXT[match.group(1)], value)
+    assert "${{" not in rendered
+    return rendered
+
+
+def _run_publish_script(
+    step: dict[str, Any], tmp_path: Path, **fake: str,
+) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
+    assert "${{" not in step["run"], "expressions reach the script only through env"
+    tools = tmp_path / "bin"
+    tools.mkdir(exist_ok=True)
+    for name, body in {"docker": FAKE_DOCKER, "git": FAKE_GIT}.items():
+        (tools / name).write_text(body, encoding="utf-8")
+        (tools / name).chmod(0o755)
+    log = tmp_path / "docker.log"
+    log.unlink(missing_ok=True)
+    env = {
+        "PATH": f"{tools}{os.pathsep}{os.environ['PATH']}",
+        "FAKE_LOG": str(log), "FAKE_STDIN": str(tmp_path / "docker.stdin"),
+        "FAKE_CREATED": FIXTURE_CREATED, "FAKE_HEAD": FIXTURE_SHA,
+        **fake,
+        **{key: _render(value) for key, value in step.get("env", {}).items()},
+    }
+    result = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", step["run"]],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=10,
+    )
+    calls = [line.split("\x1f") for line in log.read_text().splitlines()] if log.exists() else []
+    return result, calls
+
+
+def test_publisher_adds_no_action_and_always_logs_out(workflow: dict[str, Any]) -> None:
+    checkout, pins, _login, _build, logout = _publish_steps(workflow)
+    gate = workflow["jobs"]["backend"]["steps"]
+    assert checkout == gate[0]  # Same pinned SHA, no credentials; depth 1 holds HEAD.
+    assert pins == gate[1]
+    assert [step["uses"] for step in _publish_steps(workflow) if "uses" in step] == [
+        checkout["uses"], pins["uses"],
+    ]
+    assert logout["if"] == "always()"
+    assert shlex.split(logout["run"]) == ["docker", "logout", "ghcr.io"]
+    assert set(logout) == {"name", "if", "run"}
+
+
+def test_registry_token_reaches_docker_only_on_stdin_from_env(
+    workflow: dict[str, Any], tmp_path: Path,
+) -> None:
+    login = _publish_steps(workflow)[2]
+    assert login["env"] == {"GITHUB_TOKEN": "${{ secrets.GITHUB_TOKEN }}"}
+    assert [line.strip() for line in login["run"].splitlines() if line.strip()] == [
+        "set -euo pipefail", LOGIN,
+    ]
+    assert str(workflow).count("secrets.") == 1
+    for job in workflow["jobs"].values():
+        for step in job["steps"]:
+            if step is not login:
+                assert "GITHUB_TOKEN" not in str(step)
+                assert "github.token" not in str(step)
+    result, calls = _run_publish_script(login, tmp_path, GITHUB_ACTOR="example-actor")
+    assert result.returncode == 0, result.stderr
+    assert calls == [["login", "ghcr.io", "-u", "example-actor", "--password-stdin"]]
+    assert (tmp_path / "docker.stdin").read_text(encoding="utf-8") == FIXTURE_TOKEN
+    assert FIXTURE_TOKEN not in result.stdout + result.stderr
+
+
+def test_publisher_builds_labels_and_pushes_each_role_by_commit_only(
+    workflow: dict[str, Any], tmp_path: Path,
+) -> None:
+    build = _publish_steps(workflow)[3]
+    assert build["run"].lstrip().startswith("set -euo pipefail\n")
+    assert "GITHUB_TOKEN" not in str(build)
+    assert "latest" not in WORKFLOW.read_text(encoding="utf-8").lower()
+    result, calls = _run_publish_script(build, tmp_path)
+    assert result.returncode == 0, result.stderr
+    images = [f"ghcr.io/example-owner/aegis-{role}:sha-{FIXTURE_SHA}" for role in ROLES]
+    # Default build arguments and the repository-root context, as the deployment gate builds.
+    assert calls == [
+        *(
+            ["build", "--file", f"docker/{role}.Dockerfile",
+             "--label", "org.opencontainers.image.source="
+             "https://github.com/Example-Owner/aegis-fixture",
+             "--label", f"org.opencontainers.image.revision={FIXTURE_SHA}",
+             "--label", f"org.opencontainers.image.created={FIXTURE_CREATED}",
+             "--tag", image, "."]
+            for role, image in zip(ROLES, images, strict=True)
+        ),
+        *(
+            call
+            for image in images
+            for call in (["push", image],
+                         ["image", "inspect", "--format", "{{index .RepoDigests 0}}", image])
+        ),
+    ]
+    for role in ROLES:
+        digest = f"ghcr.io/example-owner/aegis-{role}@sha256:{7:064d}"
+        assert digest in result.stdout.splitlines()
+
+
+@pytest.mark.parametrize(("failure", "fake"), [
+    ("first build", {"FAKE_FAIL_ROLE": "backend"}),
+    ("last build", {"FAKE_FAIL_ROLE": "caddy"}),
+    ("checkout is not the labelled commit", {"FAKE_HEAD": "f" * 40}),
+])
+def test_publisher_pushes_nothing_unless_every_image_builds_from_the_commit(
+    workflow: dict[str, Any], tmp_path: Path, failure: str, fake: dict[str, str],
+) -> None:
+    result, calls = _run_publish_script(_publish_steps(workflow)[3], tmp_path, **fake)
+    assert result.returncode != 0, failure
+    assert not [call for call in calls if call[0] != "build"], failure
+
+
 @pytest.mark.parametrize(("dirty_path", "staged"), [
     (None, False),
     ("uv.lock", False),
@@ -158,8 +331,9 @@ def test_failure_artifacts_are_only_masked_synthetic_screenshots(
 def test_hygiene_gate_rejects_locks_migrations_ignored_outputs_and_whitespace(
     workflow: dict[str, Any], tmp_path: Path, dirty_path: str | None, staged: bool,
 ) -> None:
-    gates = [next(step for step in job["steps"] if step.get("id") == "hygiene")
-             for job in workflow["jobs"].values()]
+    # The publisher only builds and pushes; its tree is the tree the gates checked.
+    gates = [next(step for step in workflow["jobs"][name]["steps"] if step.get("id") == "hygiene")
+             for name in GATES]
     assert all(step.get("if") == "always()" for step in gates)
     assert len({step["run"] for step in gates}) == 1
     for path, value in {
