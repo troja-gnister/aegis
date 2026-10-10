@@ -332,3 +332,46 @@ def test_manifest_atomic_write_forces_invoking_group_in_inherited_group_director
     assert info.st_uid == os.geteuid()
     assert info.st_gid == os.getegid()
     assert info.st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("engine", [None, "docker", "podman"])
+def test_cli_validate_refuses_comma_sources_only_for_podman(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    engine: str | None,
+) -> None:
+    config = tmp_path / "mounts.toml"
+    config.write_text(
+        """
+version = 1
+[[slots]]
+slot_id = "photos"
+source = "/missing/illustrative/source,z"
+container_path = "/srv/aegis/roots/photos"
+mode = "read_only"
+expected_identity = "remote:nas01:/photos"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    if engine is None:
+        monkeypatch.delenv("AEGIS_CONTAINER_ENGINE", raising=False)
+    else:
+        monkeypatch.setenv("AEGIS_CONTAINER_ENGINE", engine)
+
+    status = main(["mounts", "validate", "--config", str(config)])
+
+    captured = capsys.readouterr()
+    if engine == "podman":
+        # Schema-only still: no provider, socket or source access is needed to refuse.
+        assert status == 2
+        assert json.loads(captured.err) == {
+            "status": "error",
+            "message": "mount slot photos: Podman cannot bind-mount an original root "
+            "whose path contains a comma",
+        }
+        assert captured.out == ""
+    else:
+        assert status == 0
+        assert captured.out == '{"status":"valid"}\n'

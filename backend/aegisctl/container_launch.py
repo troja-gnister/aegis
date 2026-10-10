@@ -134,6 +134,7 @@ _COMPOSE_VALUES = frozenset(
 )
 _COMPOSE_FLAGS = frozenset({"--compatibility", "--dry-run", "--all-resources"})
 _RUNTIME = frozenset({"up", "run", "create", "start", "restart"})
+_COMMA_SOURCE_REFUSAL = "Podman cannot bind-mount a source whose path contains a comma"
 
 
 def _native_inputs(
@@ -189,6 +190,10 @@ def _native_inputs(
                 raise PodmanMaskError("conflicting mask option")
         elif name in ("--volume", "-v"):
             source = value.split(":", 1)[0]
+            if compose and "," in source:
+                # Compose hands an extra run bind to Podman's Docker-compatible API, which
+                # splits its source at commas into mount options (",z", ",U").
+                raise PodmanMaskError(_COMMA_SOURCE_REFUSAL)
             if source.startswith(("/", ".")):
                 path = Path(source)
                 if not path.is_absolute():
@@ -198,6 +203,10 @@ def _native_inputs(
                     path = Path(os.path.abspath(directory / path))
                 roots.append(path)
         elif name == "--mount":
+            if '"' in value:
+                # Podman reads mount fields as CSV. Unquoted, this split is exactly Podman's;
+                # quoted, it could miss a bind's source or carry a comma into it.
+                raise PodmanMaskError("quoted mount fields are not admitted")
             fields = dict(part.split("=", 1) for part in value.split(",") if "=" in part)
             if fields.get("type") == "bind":
                 source = fields.get("source", fields.get("src", ""))
@@ -411,9 +420,7 @@ def _checked_compose_inputs(
                 # Podman's Docker-compatible API splits a bind source at commas into mount
                 # options (",z", ",U"); refuse before any probe or workload container runs.
                 if "," in source:
-                    raise PodmanMaskError(
-                        "Podman cannot bind-mount a source whose path contains a comma"
-                    )
+                    raise PodmanMaskError(_COMMA_SOURCE_REFUSAL)
                 roots.append(Path(source))
     return tuple(roots)
 

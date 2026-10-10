@@ -1435,6 +1435,104 @@ def test_compose_oneoff_bind_is_included_in_probe_output_boundary(
     assert boundaries == [(original,)]
 
 
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        # Podman's API would split these sources at the comma into ",z" / ",U" mount options.
+        (["--volume", "/roots/photos,z:/original:ro"], "contains a comma"),
+        (["-v", "/roots/photos,U:/original"], "contains a comma"),
+        (["--volume=/roots/a,b:/original:ro"], "contains a comma"),
+        (["-v=./relative,z:/original"], "contains a comma"),
+        # Podman reads --mount as CSV: only quoting could carry a comma inside a source.
+        (["--mount", 'type=bind,"source=/roots/a,b",target=/original'], "quoted"),
+        (["--mount", '"type=bind,src=/roots/a,b",target=/original'], "quoted"),
+        (["--mount=type=bind,src=\"/roots/a,b\",target=/original"], "quoted"),
+    ],
+)
+def test_compose_run_refuses_comma_in_extra_mount_sources_before_any_probe(
+    mask_engine: tuple[Any, MaskEngine],
+    monkeypatch: pytest.MonkeyPatch,
+    extra: list[str],
+    message: str,
+) -> None:
+    policy, fake = mask_engine
+    launch = launch_module()
+    base = Path(__file__).resolve().parents[4] / "compose.yaml"
+    monkeypatch.setattr(launch, "_checked_compose_inputs", lambda *a: ())
+    monkeypatch.setattr(
+        launch, "require_podman_mask_compatibility",
+        lambda *a, **k: pytest.fail("a probe container would run before the comma refusal"),
+    )
+    command = [
+        "podman", "--remote=false", "compose", "-f", str(base),
+        "run", "--rm", "--no-deps", *extra, "web", "python",
+    ]
+
+    with pytest.raises(policy.PodmanMaskError, match=message) as caught:
+        launch.controlled_container_argv(command, canonical_base=base)
+
+    if message == "contains a comma":
+        assert str(caught.value) == "Podman cannot bind-mount a source whose path contains a comma"
+    assert not fake.commands and not fake.created
+
+
+@pytest.mark.parametrize(
+    "mount",
+    [
+        '"type=bind",src=/roots/original,target=/original',
+        'type=bind,"src=/roots/a,b",target=/original',
+        "type=bind,src=\"/roots/original\",target=/original",
+    ],
+)
+def test_native_run_refuses_quoted_mount_fields_before_any_probe(
+    mask_engine: tuple[Any, MaskEngine],
+    monkeypatch: pytest.MonkeyPatch,
+    mount: str,
+) -> None:
+    # Podman reads --mount as CSV; the naive split would miss a quoted bind's source.
+    policy, fake = mask_engine
+    launch = launch_module()
+    monkeypatch.setattr(
+        launch, "require_podman_mask_compatibility",
+        lambda *a, **k: pytest.fail("a probe would run before the quoting refusal"),
+    )
+
+    with pytest.raises(policy.PodmanMaskError, match=r"^quoted mount fields are not admitted$"):
+        launch.controlled_container_argv(
+            ["podman", "--remote=false", "run", "--rm", "--mount", mount, "image"],
+        )
+
+    assert not fake.commands and not fake.created
+
+
+def test_compose_run_still_admits_punctuated_extra_sources_without_commas(
+    mask_engine: tuple[Any, MaskEngine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, fake = mask_engine
+    launch = launch_module()
+    base = Path(__file__).resolve().parents[4] / "compose.yaml"
+    boundaries: list[tuple[Path, ...]] = []
+    monkeypatch.setattr(launch, "_checked_compose_inputs", lambda *a: ())
+
+    def check(*args: Any, originals: tuple[Path, ...]) -> tuple[str, ...]:
+        boundaries.append(originals)
+        return (f"unmask={POWERCAP}",)
+
+    monkeypatch.setattr(launch, "require_podman_mask_compatibility", check)
+    launch.controlled_container_argv(
+        [
+            "podman", "--remote=false", "compose", "-f", str(base), "run", "--rm",
+            "--volume", "/roots/a;b:/first:ro",
+            "--mount", "type=bind,src=/roots/c d,dst=/second,readonly",
+            "web", "python",
+        ],
+        canonical_base=base,
+    )
+    assert boundaries == [(Path("/roots/a;b"), Path("/roots/c d"))]
+    assert not fake.commands
+
+
 def test_observer_preserves_original_boundary_error_before_probe(
     mask_engine: tuple[Any, MaskEngine],
     monkeypatch: pytest.MonkeyPatch,
