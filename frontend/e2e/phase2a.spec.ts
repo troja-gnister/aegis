@@ -343,7 +343,13 @@ test("stale cursor is refused by the server and Start from the beginning restart
   await page.getByRole("button", {name: "Load more files"}).click();
   const pageTwo = await next;
   expect(pageTwo.status()).toBe(200);
-  const cursor = (await pageTwo.json()).nextCursor as string;
+  // Read the signed cursor through the test's own request: Chromium does not always keep the
+  // body of a response the page has already consumed, so a browser response's body is not
+  // dependable.
+  const pageTwoUrl = new URL(pageTwo.url());
+  const pageTwoAgain = await page.request.get(pageTwoUrl.pathname + pageTwoUrl.search);
+  expect(pageTwoAgain.status()).toBe(200);
+  const cursor = (await pageTwoAgain.json()).nextCursor as string;
   expect(cursor).toBeTruthy();
 
   // A real signed cursor replayed with another filter context must restart.

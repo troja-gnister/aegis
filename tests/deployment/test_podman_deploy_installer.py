@@ -509,7 +509,9 @@ def test_init_creates_eight_private_labelled_secrets_for_the_container_user(rig:
         assert re.fullmatch(r"[0-9a-f]{64}\n", content), name
         values.add(content)
         info = path.lstat()
-        assert state["secrets"][name] == {"device": info.st_dev, "inode": info.st_ino}, name
+        assert state["secrets"][name] == {
+            "device": info.st_dev, "inode": info.st_ino, "ctime_ns": info.st_ctime_ns,
+        }, name
     assert len(values) == len(SECRET_NAMES)
 
     labels = rig.system.commands("chcon")
@@ -2018,6 +2020,7 @@ def test_bootstrap_password_mirrors_the_web_unit_and_shows_a_new_password_once(
     assert password not in rig.stderr.getvalue()
     assert rig.state()["secrets"]["bootstrap-password"] == {
         "device": password_file.lstat().st_dev, "inode": password_file.lstat().st_ino,
+        "ctime_ns": password_file.lstat().st_ctime_ns,
     }
 
     web = parse_unit(rendered_for(rig)[f"{SAMPLE_PREFIX}web.container"])
@@ -2237,6 +2240,18 @@ def test_purge_refuses_an_object_without_this_installs_label(rig: Rig) -> None:
     assert not rig.system.commands(*PODMAN, "network", "rm")
     assert sorted(path.name for path in rig.secrets.iterdir()) == sorted(SECRET_NAMES)
     assert rig.state_path.exists()
+
+
+def test_a_replacement_secret_reusing_the_inode_is_not_the_recorded_one() -> None:
+    # ext4 hands a deleted file's inode straight to the next new file, so device and inode
+    # alone cannot tell a replaced secret from the original; the change time can.
+    installer = load_installer()
+    record = {"device": 7, "inode": 42, "ctime_ns": 1_000}
+    original = os.stat_result((0o100600, 42, 7, 1, 0, 0, 65, 0, 0, 0, 0.0, 0.0, 0.0, 0, 0, 1_000))
+    replaced = os.stat_result((0o100600, 42, 7, 1, 0, 0, 8, 0, 0, 0, 0.0, 0.0, 0.0, 0, 0, 2_000))
+
+    assert installer._same_file(original, record)
+    assert not installer._same_file(replaced, record)
 
 
 def test_purge_refuses_a_secret_that_was_replaced_unless_forced(rig: Rig) -> None:

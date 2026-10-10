@@ -573,8 +573,8 @@ class State:
     """The record (``state.json``): what the installer configured, wrote and owns.
 
     ``files`` maps every file it wrote (units, configuration, release trees) to its sha256.
-    ``secrets`` maps each secret file to its device and inode: once handed to the container
-    user, the operator can no longer read it. ``volumes`` and ``networks`` are the names its
+    ``secrets`` maps each secret file to its device, inode and change time: once handed to
+    the container user, the operator can no longer read it. ``volumes`` and ``networks`` are the names its
     units define; each object Quadlet creates carries ``install_token`` as a label, and only
     an object that does is ever removed. ``pending`` is an upgrade whose units may already be
     written but which is not yet committed. ``desired`` is the run state the operator last
@@ -1905,8 +1905,13 @@ def _refuse_existing_objects(
 
 
 def _same_file(info: os.stat_result, record: Mapping[str, Any]) -> bool:
-    return stat.S_ISREG(info.st_mode) and (info.st_dev, info.st_ino) == (
-        record.get("device"), record.get("inode"),
+    # Device and inode alone are not enough: ext4 reuses a deleted file's inode for the next
+    # new file. A finished secret's record also pins its change time, which any replacement,
+    # chown or relabel moves.
+    return (
+        stat.S_ISREG(info.st_mode)
+        and (info.st_dev, info.st_ino) == (record.get("device"), record.get("inode"))
+        and ("ctime_ns" not in record or info.st_ctime_ns == record["ctime_ns"])
     )
 
 
@@ -1929,7 +1934,10 @@ def _secret_ready(paths: Paths, state: State, name: str) -> bool:
         final = _lstat(path)
         if final is not None and "device" in record and _same_file(final, record):
             # Renamed into place just before an interruption: it is complete.
-            state.secrets[name] = {"device": record["device"], "inode": record["inode"]}
+            state.secrets[name] = {
+                "device": record["device"], "inode": record["inode"],
+                "ctime_ns": final.st_ctime_ns,
+            }
             return True
         # Otherwise the creation never reached its name: drop exactly its own temporary.
         temporary = Path(record["pending"])
@@ -1980,9 +1988,10 @@ def _new_secret(host: Host, paths: Paths, state: State, name: str) -> str:
         raise InstallError(f"{path} appeared while it was being created; refusing to replace it")
     os.rename(temporary, path)
     _sync_directory(paths.secrets)
-    if not _same_file(path.lstat(), identity):
+    final = path.lstat()
+    if not _same_file(final, identity):
         raise InstallError(f"{path} changed while it was being created; refusing it")
-    state.secrets[name] = identity
+    state.secrets[name] = {**identity, "ctime_ns": final.st_ctime_ns}
     save_state(paths, state)
     return value
 
