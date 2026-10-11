@@ -198,7 +198,10 @@ export function AuthBoundary({children}: AuthBoundaryProps) {
   ) {
     return <PrivateContentSkeleton />;
   }
-  const checking = sessionQuery.isFetching || restoredPageChecking || popChecking;
+  // Content is withheld only while history (POP) or a bfcache restore is revalidated. A
+  // background refetch of a live page (window focus, reconnect) keeps it mounted: a failed
+  // or 401 answer still reaches the error branch above, which purges and redirects at once.
+  const checking = restoredPageChecking || popChecking;
   const content = typeof children === "function"
     ? children({checking})
     : <PrivateContentGate checking={checking}>{children}</PrivateContentGate>;

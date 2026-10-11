@@ -18,7 +18,8 @@ import type {
 const MAX_URL_LENGTH = 2048;
 const MAX_TEXT_LENGTH = 256;
 const MAX_DIMENSION = 2_147_483_647;
-const FINGERPRINT = /^[0-9a-f]{64}$/;
+// An opaque 32-hex HMAC token of the source fingerprint (never the raw fingerprint).
+const FINGERPRINT = /^[0-9a-f]{32}$/;
 const PRINTABLE_URL = /^[\x21-\x7e]+$/;
 const PRINTABLE_TEXT = /^[\x20-\x7e]+$/;
 const MAX_METADATA_TEXT_CODE_POINTS = 64;

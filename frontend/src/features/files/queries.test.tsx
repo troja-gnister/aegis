@@ -123,6 +123,15 @@ afterEach(async () => {
 });
 
 describe("directoryQueryOptions", () => {
+  it("never refetches retained pages on tab focus or reconnect", () => {
+    const options = directoryQueryOptions({
+      namespace: NAMESPACE, rootId: ROOT_ID, rootEpoch: 1, parentId: DIRECTORY_ID,
+      filters: {}, sort: "name", order: "asc",
+    } as unknown as BrowseInput);
+    expect(options.refetchOnWindowFocus).toBe(false);
+    expect(options.refetchOnReconnect).toBe(false);
+  });
+
   it("bounds the active directory and rejects foreign-root rows", async () => {
     const setup = await createBrowseQueryFixture();
     try {

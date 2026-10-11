@@ -1,6 +1,7 @@
 import {defaultRangeExtractor, useVirtualizer, type Range} from "@tanstack/react-virtual";
 import {
   useCallback,
+  useEffect,
   useLayoutEffect,
   useRef,
   useState,
@@ -25,6 +26,8 @@ export type VirtualFileListProps = {
   hasPrevious: boolean;
   initialAnchor?: VisibleAnchor;
   onAnchorChange?(anchor: VisibleAnchor): void;
+  /** A row to focus once it is rendered at mount (the entry a closed viewer showed last). */
+  initialFocusId?: string | null;
 };
 
 type FocusedRow = {id: string; index: number};
@@ -59,13 +62,21 @@ export function VirtualFileList({
   hasPrevious,
   initialAnchor,
   onAnchorChange,
+  initialFocusId,
 }: VirtualFileListProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const previousEntriesRef = useRef(entries);
   const scrollTopRef = useRef(0);
   const programmaticScrollTopRef = useRef<number | null>(null);
   const rowControlsRef = useRef(new Map<string, HTMLButtonElement>());
-  const focusedRef = useRef<FocusedRow | null>(null);
+  const [initialFocus] = useState<FocusedRow | null>(() => {
+    if (!initialFocusId) return null;
+    const index = entries.findIndex((entry) => entry.id === initialFocusId);
+    return index < 0 ? null : {id: initialFocusId, index};
+  });
+  // The initial focus target counts as focused, so the range keeps its row rendered.
+  const focusedRef = useRef<FocusedRow | null>(initialFocus);
+  const initialFocusPendingRef = useRef(initialFocus !== null);
   const pendingFocusOwnerRef = useRef<Element | null>(null);
   const pagingRef = useRef({next: false, previous: false});
   const initialAnchorRef = useRef(initialAnchor);
@@ -191,6 +202,21 @@ export function VirtualFileList({
     setAnnouncement("Focus moved to the nearest available file.");
     setPendingFocusId(null);
   }, [pendingFocusId, virtualItems]);
+
+  useLayoutEffect(() => {
+    if (!initialFocusPendingRef.current || initialFocus === null) return;
+    const control = rowControlsRef.current.get(initialFocus.id);
+    if (!control) return;
+    initialFocusPendingRef.current = false;
+    control.focus({preventScroll: true});
+  }, [initialFocus, virtualItems]);
+
+  useEffect(() => {
+    // The first committed range includes the target row; if it still was not focused, stop pinning it.
+    if (!initialFocusPendingRef.current) return;
+    initialFocusPendingRef.current = false;
+    if (focusedRef.current?.id === initialFocus?.id) focusedRef.current = null;
+  }, [initialFocus]);
 
   const load = useCallback(async (direction: "next" | "previous") => {
     if (pagingRef.current[direction]) return;

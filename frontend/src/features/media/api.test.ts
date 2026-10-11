@@ -83,6 +83,9 @@ describe("fetchEntryMedia", () => {
   it.each([
     ["another entry's ID", {entryId: OTHER_ID}],
     ["a malformed fingerprint", {fingerprint: "not-a-fingerprint"}],
+    ["a raw 64-hex fingerprint instead of the token", {fingerprint: "a".repeat(64)}],
+    ["an uppercase fingerprint token", {fingerprint: "A".repeat(32)}],
+    ["a short fingerprint token", {fingerprint: "a".repeat(31)}],
     ["an unknown media kind", {kind: "audio"}],
     ["an extra private field", {sourcePath: "/private/archive/photo.jpg"}],
     ["a non-boolean location flag", {metadata: {hasLocation: "no"}}],
@@ -117,7 +120,7 @@ describe("fetchEntryMedia", () => {
     }],
     ["a malformed content type", {original: {contentType: "image/jpeg; x=<script>"}}],
     ["a derivative URL for another fingerprint", {derivatives: {
-      thumbnail: {state: "ready", url: `/media/v1/derivatives/${ENTRY_ID}/thumbnail?f=${"b".repeat(64)}&n=x&e=4`},
+      thumbnail: {state: "ready", url: `/media/v1/derivatives/${ENTRY_ID}/thumbnail?f=${"b".repeat(32)}&n=x&e=4`},
     }}],
     ["a derivative URL without a namespace", {derivatives: {
       thumbnail: {state: "ready", url: `/media/v1/derivatives/${ENTRY_ID}/thumbnail?f=${FIXTURE_FINGERPRINT}&e=4`},

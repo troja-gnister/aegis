@@ -285,8 +285,14 @@ describe("EntryDetailsPanel media details", () => {
     await within(section).findByText("Captured", {selector: "dt"});
     const captured = descriptionFor("Captured");
     expect(captured.querySelector("time")).toHaveAttribute("dateTime", "2026-12-24T18:30:00+00:00");
-    expect(captured).toHaveTextContent("Exact: 2026-12-24T18:30:00+00:00");
-    expect(captured).toHaveTextContent("(UTC)");
+    // A wall-clock capture time is the camera's clock reading: no zone is claimed or converted.
+    expect(captured.querySelector("time")).toHaveTextContent(new Intl.DateTimeFormat(undefined, {
+      dateStyle: "medium", timeStyle: "medium", timeZone: "UTC",
+    }).format(Date.UTC(2026, 11, 24, 18, 30, 0)));
+    expect(captured).toHaveTextContent("Exact: 2026-12-24T18:30:00");
+    expect(captured).not.toHaveTextContent("+00:00");
+    expect(captured).not.toHaveTextContent("(UTC)");
+    expect(captured).toHaveTextContent("As recorded by the camera, without a time zone.");
     expect(captured).toHaveTextContent(/EXIF metadata/);
     expect(captured).not.toHaveTextContent("2027-01-15");
     const modified = descriptionFor("File modified");

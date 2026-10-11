@@ -1,5 +1,7 @@
 /** Media contract types shared by the file browser, the Photos timeline and the viewer. */
 
+import type {EntrySummary} from "../files/types";
+
 export type MediaKind = "photo" | "video";
 
 /** Thumbnail state carried by every entry summary's `media` field. */
@@ -11,7 +13,13 @@ export type SortDateSource = "captured" | "modified";
 export type EntryMedia = {
   kind: MediaKind;
   thumbnail: ThumbnailState;
-  /** RFC 3339; a capture time only when `sortDateSource` is `"captured"`. */
+  /**
+   * The sort date as a wall-clock time encoded with `Z`: the camera's local
+   * clock reading when `sortDateSource` is `"captured"`, the file's modification
+   * time otherwise ("Modified"). It carries no real zone, so the UI formats it
+   * in UTC (month headers, the `year` filter, captured dates), never in the
+   * viewer's zone, and every viewer of a root sees the same months.
+   */
   sortDate: string;
   sortDateSource: SortDateSource;
   /** Display dimensions, with EXIF orientation already applied by the server. */
@@ -39,7 +47,11 @@ export type MediaMetadata = {
   height: number | null;
   /** EXIF orientation 1–8, or null. */
   orientation: number | null;
-  /** Offset-qualified RFC 3339 capture time; never a filesystem time. */
+  /**
+   * The capture time as recorded by the camera, sent as a wall-clock time
+   * encoded with `Z` and shown as is (formatted in UTC, no zone conversion).
+   * Never a filesystem time.
+   */
   capturedAt: string | null;
   capturedAtSource: CapturedAtSource | null;
   cameraMake: string | null;
@@ -70,6 +82,7 @@ export type MediaPermissions = {
 export type MediaDetails = {
   entryId: string;
   kind: MediaKind;
+  /** An opaque 32-hex HMAC token of the source fingerprint; derivative URLs carry it as `f=`. */
   fingerprint: string;
   metadata: MediaMetadata;
   derivatives: Partial<Record<DerivativeKind, MediaDerivative>>;
@@ -86,14 +99,34 @@ export type MediaRequestResult = {
   kind: RequestableDerivativeKind;
 };
 
+/** The Photos timeline's kind filter (`kind` route search parameter; absent means all). */
+export type TimelineKind = "all" | "photo" | "video";
+
+/** The timeline's route filter: the kind and an optional calendar year. Neither is private. */
+export type TimelineFilter = {kind: TimelineKind; year: number | null};
+
+/** A timeline item: an entry summary of a media file, plus its parent directory. */
+export type TimelineItem = Omit<EntrySummary, "media"> & {
+  media: EntryMedia;
+  parentId: string | null;
+};
+
+/** `GET /api/v1/roots/{root}/timeline`. */
+export type TimelinePage = {
+  items: TimelineItem[];
+  nextCursor: string | null;
+  contractVersion: 1;
+};
+
 /**
  * Where the viewer was opened from. History state holds only opaque IDs that
- * already appear in URLs; names, filters and cursors stay in in-memory,
+ * already appear in URLs, the timeline's non-private route filter, and the
+ * opener's route key. Names, directory filters and cursors stay in in-memory,
  * namespace-owned stores keyed by `returnKey` (the opener's location key).
  */
 export type MediaViewerContext =
   | {source: "directory"; rootId: string; parentId: string | null; returnKey: string}
-  | {source: "timeline"; rootId: string; returnKey: string};
+  | {source: "timeline"; rootId: string; returnKey: string; kind: TimelineKind; year: number | null};
 
 export type MediaViewerState = {
   aegisMediaViewer: {

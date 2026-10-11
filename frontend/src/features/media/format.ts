@@ -60,3 +60,30 @@ export function formatRecordedTime(value: string): string | null {
   const offset = zone === "Z" || zone === "+00:00" || zone === "-00:00" ? "UTC" : `UTC${zone}`;
   return `${text} (${offset})`;
 }
+
+const WALL_CLOCK = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.\d{1,9})?(?:Z|[+-]00:00)$/;
+
+/**
+ * Whether a timestamp is a wall-clock time: the media contract sends capture
+ * and sort dates as the camera's (or file's) local clock reading, encoded with
+ * `Z`. Such a value has no time zone, so it is shown as is, never converted.
+ */
+export function isWallClockTime(value: string): boolean {
+  return WALL_CLOCK.test(value);
+}
+
+/**
+ * A capture time as the camera recorded it. Wall-clock values (`Z`) are
+ * formatted in UTC with no zone suffix, so the digits are the camera's own;
+ * a value with a real offset keeps that offset, as `formatRecordedTime` does.
+ */
+export function formatCameraTime(value: string): string | null {
+  if (!isWallClockTime(value)) return formatRecordedTime(value);
+  const recorded = formatRecordedTime(value);
+  return recorded === null ? null : recorded.replace(/ \(UTC\)$/, "");
+}
+
+/** The wall-clock digits of a `Z`-encoded time, without the zone designator or fraction. */
+export function wallClockDigits(value: string): string | null {
+  return WALL_CLOCK.exec(value)?.[1] ?? null;
+}

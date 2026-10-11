@@ -93,6 +93,10 @@ export function directoryQueryOptions(input: BrowseInput) {
     gcTime: 0,
     staleTime: 5000,
     retry: false,
+    // The page stays mounted across tab returns (the session check no longer unmounts it);
+    // refetching every retained page there would also expire the oldest cursor's window.
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
   });
 }
 

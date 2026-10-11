@@ -1,5 +1,14 @@
 import {describe, expect, it} from "vitest";
-import {cameraText, displayDimensions, formatDimensions, formatDuration, formatRecordedTime} from "./format";
+import {
+  cameraText,
+  displayDimensions,
+  formatCameraTime,
+  formatDimensions,
+  formatDuration,
+  formatRecordedTime,
+  isWallClockTime,
+  wallClockDigits,
+} from "./format";
 
 describe("media formatting", () => {
   it.each([
@@ -41,5 +50,20 @@ describe("media formatting", () => {
     expect(formatRecordedTime("2026-12-24T07:30:00Z")).toBe(`${wallClock(7)} (UTC)`);
     expect(formatRecordedTime("2026-12-24T07:30:00+00:00")).toBe(`${wallClock(7)} (UTC)`);
     expect(formatRecordedTime("2026-12-24T07:30:00")).toBeNull();
+  });
+
+  it("shows a wall-clock capture time as recorded, with no zone and no conversion", () => {
+    const wallClock = new Intl.DateTimeFormat(undefined, {
+      dateStyle: "medium", timeStyle: "medium", timeZone: "UTC",
+    }).format(Date.UTC(2026, 11, 31, 23, 30, 0));
+
+    expect(isWallClockTime("2026-12-31T23:30:00Z")).toBe(true);
+    expect(isWallClockTime("2026-12-31T23:30:00.5+00:00")).toBe(true);
+    expect(isWallClockTime("2026-12-31T23:30:00+09:00")).toBe(false);
+    expect(formatCameraTime("2026-12-31T23:30:00Z")).toBe(wallClock);
+    expect(formatCameraTime("2026-12-31T23:30:00+09:00")).toBe(`${wallClock} (UTC+09:00)`);
+    expect(formatCameraTime("not a time")).toBeNull();
+    expect(wallClockDigits("2026-12-31T23:30:00.123Z")).toBe("2026-12-31T23:30:00");
+    expect(wallClockDigits("2026-12-31T23:30:00+09:00")).toBeNull();
   });
 });

@@ -3,7 +3,14 @@ import {Link} from "react-router";
 import {ApiProblem} from "../../api/problem";
 import type {SourceState} from "../files/types";
 import {MEDIA_KIND_LABEL} from "./classify";
-import {cameraText, displayDimensions, formatDimensions, formatDuration, formatRecordedTime} from "./format";
+import {
+  cameraText,
+  displayDimensions,
+  formatCameraTime,
+  formatDimensions,
+  formatDuration,
+  wallClockDigits,
+} from "./format";
 import {useEntryMediaDetails} from "./hooks";
 import type {CapturedAtSource, EntryMedia, MediaDetails, MediaMetadata, MediaViewerContext} from "./types";
 import {canOpenInViewer, viewerLocationState, viewerPath} from "./viewer-route";
@@ -18,6 +25,8 @@ export type MediaDetailsSectionProps = {
   viewerContext?: MediaViewerContext;
   /** Called when Open is activated, before the viewer route is entered. */
   onOpenMedia?(entryId: string): void;
+  /** False inside the viewer, whose toolbar already offers Download. Defaults to true. */
+  showActions?: boolean;
 };
 
 const CAPTURE_SOURCE_TEXT: Record<CapturedAtSource, string> = {
@@ -28,10 +37,13 @@ const CAPTURE_SOURCE_TEXT: Record<CapturedAtSource, string> = {
 function CapturedValue({metadata}: {metadata: MediaMetadata}) {
   // Only a capture time recorded in the file is shown here, never the file modified time.
   if (metadata.capturedAt === null) return <>Capture time unknown</>;
+  // A wall-clock value is the camera's own clock reading: shown as recorded, with no zone.
+  const wallClock = wallClockDigits(metadata.capturedAt);
   return (
     <>
-      <time dateTime={metadata.capturedAt}>{formatRecordedTime(metadata.capturedAt) ?? metadata.capturedAt}</time>
-      <small className="entry-details__exact">Exact: {metadata.capturedAt}</small>
+      <time dateTime={metadata.capturedAt}>{formatCameraTime(metadata.capturedAt) ?? metadata.capturedAt}</time>
+      <small className="entry-details__exact">Exact: {wallClock ?? metadata.capturedAt}</small>
+      {wallClock !== null ? <small>As recorded by the camera, without a time zone.</small> : null}
       {metadata.capturedAtSource ? <small>{CAPTURE_SOURCE_TEXT[metadata.capturedAtSource]}</small> : null}
     </>
   );
@@ -98,7 +110,7 @@ function mediaError(error: unknown): string {
  * file modified time), camera and duration, plus Open (PREVIEW, when the
  * viewer can show it) and Download (EXPORT).
  */
-export function MediaDetailsSection({entry, viewerContext, onOpenMedia}: MediaDetailsSectionProps) {
+export function MediaDetailsSection({entry, viewerContext, onOpenMedia, showActions = true}: MediaDetailsSectionProps) {
   const headingId = useId();
   const {query, details} = useEntryMediaDetails(entry.id);
   const kindLabel = MEDIA_KIND_LABEL[details?.kind ?? entry.media.kind];
@@ -141,12 +153,14 @@ export function MediaDetailsSection({entry, viewerContext, onOpenMedia}: MediaDe
               </div>
             ) : null}
           </dl>
-          <MediaActions
-            entry={entry}
-            details={details}
-            viewerContext={viewerContext}
-            onOpenMedia={onOpenMedia}
-          />
+          {showActions ? (
+            <MediaActions
+              entry={entry}
+              details={details}
+              viewerContext={viewerContext}
+              onOpenMedia={onOpenMedia}
+            />
+          ) : null}
         </>
       ) : null}
     </section>

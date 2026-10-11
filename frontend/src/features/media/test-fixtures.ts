@@ -1,7 +1,9 @@
-import type {EntryMedia, MediaKind} from "./types";
+import {FIXTURE_ROOT_ID} from "../files/test-fixtures";
+import type {EntryMedia, MediaKind, SortDateSource, TimelineItem} from "./types";
 
 /** Synthetic media fixtures for tests; no real names, hosts or camera serials. */
-export const FIXTURE_FINGERPRINT = "a".repeat(64);
+/** The details `fingerprint` token (32 lowercase hex), also carried as the opaque `f=` parameter. */
+export const FIXTURE_FINGERPRINT = "a".repeat(32);
 export const FIXTURE_NAMESPACE_PARAMETER = "fixture-namespace";
 
 export function thumbnailUrlFor(entryId: string, epoch = 4): string {
@@ -84,4 +86,63 @@ export function mediaDetailsBody(entryId: string, overrides: Record<string, unkn
     permissions,
     ...rest,
   };
+}
+
+export const FIXTURE_PARENT_ID = "22222222-2222-4222-8222-222222222222";
+
+/** A synthetic timeline entry ID; index 0 is the newest item. */
+export function timelineItemId(index: number): string {
+  return `${index.toString(16).padStart(8, "0")}-3333-4333-8333-${index.toString(16).padStart(12, "0")}`;
+}
+
+export type TimelineItemOptions = {
+  kind?: MediaKind;
+  sortDate?: string;
+  sortDateSource?: SortDateSource;
+  rootId?: string;
+  displayName?: string;
+  media?: Partial<EntryMedia>;
+};
+
+/** One hour apart, newest first, starting at the end of January 2027 (UTC). */
+export function timelineSortDate(index: number): string {
+  return new Date(Date.UTC(2027, 0, 31, 12) - index * 3_600_000).toISOString();
+}
+
+/** A timeline item wire body: an entry summary with `media`, plus `parentId`. */
+export function timelineItemBody(index: number, options: TimelineItemOptions = {}): Record<string, unknown> {
+  const id = timelineItemId(index);
+  const kind = options.kind ?? "photo";
+  return {
+    id,
+    rootId: options.rootId ?? FIXTURE_ROOT_ID,
+    displayName: options.displayName ?? `Synthetic ${kind} ${index.toString().padStart(4, "0")}.${kind === "video" ? "mp4" : "jpg"}`,
+    kind: "file",
+    typeHint: kind === "video" ? "mp4" : "jpg",
+    size: String(1024 + index),
+    modifiedNs: "1800000000000000000",
+    sourceState: "present",
+    version: "1",
+    media: entryMediaFixture(id, {
+      kind,
+      durationMs: kind === "video" ? 61_000 : null,
+      sortDate: options.sortDate ?? timelineSortDate(index),
+      sortDateSource: options.sortDateSource ?? "captured",
+      ...options.media,
+    }),
+    parentId: FIXTURE_PARENT_ID,
+  };
+}
+
+/** The validated form of `timelineItemBody`, for components that take items directly. */
+export function timelineItemFixture(index: number, options: TimelineItemOptions = {}): TimelineItem {
+  return timelineItemBody(index, options) as unknown as TimelineItem;
+}
+
+/** A `GET /api/v1/roots/{root}/timeline` body. */
+export function timelinePageBody(
+  items: Record<string, unknown>[],
+  nextCursor: string | null = null,
+): Record<string, unknown> {
+  return {items, nextCursor, contractVersion: 1};
 }

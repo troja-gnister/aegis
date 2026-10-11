@@ -1,4 +1,4 @@
-import {QueryClient, QueryClientProvider, QueryObserver} from "@tanstack/react-query";
+import {focusManager, QueryClient, QueryClientProvider, QueryObserver} from "@tanstack/react-query";
 import {act, fireEvent, render, screen, waitFor} from "@testing-library/react";
 import {http, HttpResponse} from "msw";
 import {MemoryRouter, Route, Routes, useLocation, useNavigate} from "react-router";
@@ -339,6 +339,58 @@ describe("AuthBoundary", () => {
     releaseRevalidation();
     expect(await screen.findByText("Private family archive")).toBeVisible();
     expect(calls).toBe(2);
+  });
+
+  it("keeps private content mounted while a window-focus session refetch is pending", async () => {
+    let calls = 0;
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    server.use(http.get("/api/v1/auth/session", async () => {
+      calls += 1;
+      if (calls > 1) await gate;
+      return HttpResponse.json(SESSION);
+    }));
+    renderBoundary();
+    const content = await screen.findByText("Private family archive");
+
+    try {
+      act(() => {
+        focusManager.setFocused(false);
+        focusManager.setFocused(true);
+      });
+      await waitFor(() => expect(calls).toBe(2));
+      expect(screen.getByText("Private family archive")).toBe(content);
+      expect(screen.queryByLabelText("Checking session")).not.toBeInTheDocument();
+    } finally {
+      release();
+      focusManager.setFocused(undefined);
+    }
+    await waitFor(() => expect(calls).toBe(2));
+    expect(screen.getByText("Private family archive")).toBe(content);
+  });
+
+  it("purges and redirects at once when a window-focus session refetch is refused", async () => {
+    let revoked = false;
+    server.use(http.get("/api/v1/auth/session", () => revoked
+      ? HttpResponse.json({type: "authentication_required", title: "Authentication required"}, {status: 401})
+      : HttpResponse.json(SESSION)));
+    const queryClient = renderBoundary();
+    expect(await screen.findByText("Private family archive")).toBeVisible();
+    queryClient.setQueryData(["private", "root"], "secret");
+    revoked = true;
+
+    try {
+      act(() => {
+        focusManager.setFocused(false);
+        focusManager.setFocused(true);
+      });
+      expect(await screen.findByRole("heading", {name: "Sign in"})).toBeVisible();
+    } finally {
+      focusManager.setFocused(undefined);
+    }
+    expect(screen.queryByText("Private family archive")).not.toBeInTheDocument();
+    expect(queryClient.getQueryData(["private", "root"])).toBeUndefined();
+    expect(isSessionAccessOpen()).toBe(false);
   });
 
   it("withholds private content synchronously while a POP session revalidation is pending", async () => {

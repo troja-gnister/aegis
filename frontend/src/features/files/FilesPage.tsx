@@ -1,4 +1,4 @@
-import {useInfiniteQuery, useQuery, useQueryClient} from "@tanstack/react-query";
+import {useInfiniteQuery, useQueryClient} from "@tanstack/react-query";
 import {
   createContext,
   useCallback,
@@ -12,9 +12,15 @@ import {
 } from "react";
 import {Link, useLocation, useNavigate, useParams} from "react-router";
 import {ApiProblem} from "../../api/problem";
-import {purgePrivateBrowserState} from "../auth/cache";
-import {beginSignOut, completeSignOut, useAuthSession} from "../auth/session";
-import {fetchRoots} from "../roots/api";
+import {useAuthSession} from "../auth/session";
+import {RootSectionNav} from "../media/RootSectionNav";
+import {
+  forgetViewerReturn,
+  isReturnRetained,
+  peekViewerReturn,
+  releaseReturnRetention,
+} from "../media/viewer-return";
+import {useAuthorizedRoot} from "../roots/useAuthorizedRoot";
 import {EntryDetailsPanel} from "./EntryDetailsPanel";
 import {FilterChips} from "./FilterChips";
 import {FilterPanel} from "./FilterPanel";
@@ -112,7 +118,6 @@ export function FilesPage() {
   const location = useLocation();
   const navigationRoute = useFileNavigationRoute();
   const navigation = navigationRoute.navigation;
-  const [sessionExpiring, setSessionExpiring] = useState(false);
   const [selection, setSelection] = useState<Selection | null>(null);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [liveStatus, setLiveStatus] = useState<{rootId: string; status: IndexStatus} | null>(null);
@@ -136,13 +141,11 @@ export function FilesPage() {
     : {v: 1 as const};
   const sort = restored?.sort ?? "name";
   const order = restored?.order ?? "asc";
-  const rootQuery = useQuery({
-    queryKey: ["roots", session.cacheNamespace],
-    queryFn: fetchRoots,
-    retry: false,
-  });
-  const root = rootQuery.data?.roots.find((candidate) =>
-    candidate.id === rootId && candidate.permissions.includes("browse"),
+  const {rootQuery, root, sessionExpiring} = useAuthorizedRoot(rootId);
+  // A viewer closed through Back left this route's window held for us; take it back as is.
+  const retainedReturn = useMemo(
+    () => isReturnRetained(session.cacheNamespace, routeKey),
+    [routeKey, session.cacheNamespace],
   );
   const input: BrowseInput = {
     namespace: session.cacheNamespace,
@@ -157,7 +160,13 @@ export function FilesPage() {
   const directoryQuery = useInfiniteQuery({
     ...directoryQueryOptions(input),
     enabled: Boolean(root),
+    ...(retainedReturn ? {refetchOnMount: false} : {}),
   });
+
+  useEffect(() => {
+    // This page's observer now holds the window (it subscribed above).
+    if (retainedReturn) releaseReturnRetention(session.cacheNamespace, routeKey);
+  }, [retainedReturn, routeKey, session.cacheNamespace]);
   const entries = directoryQuery.data?.pages.flatMap((page) => page.entries) ?? [];
   const status = directoryQuery.data?.pages.at(-1)?.indexStatus;
   const filtersActive = activeFilterFields(filters).length > 0;
@@ -169,6 +178,13 @@ export function FilesPage() {
   const restartRequired = directoryQuery.isError && isCursorRestart(directoryQuery.error);
   const directoryKeyRef = useRef(directoryQueryOptions(input).queryKey);
   const refetchDirectory = directoryQuery.refetch;
+  // A viewer opened from this route leaves the entry it showed last; Back focuses that row once.
+  const viewerReturnId = useMemo(
+    () => peekViewerReturn(session.cacheNamespace, routeKey)?.entryId ?? null,
+    [routeKey, session.cacheNamespace],
+  );
+  const [consumedReturnKey, setConsumedReturnKey] = useState<string | null>(null);
+  const initialFocusId = consumedReturnKey === routeKey ? null : viewerReturnId;
 
   const remember = useCallback((anchor = anchorRef.current) => {
     if (!navigation) return;
@@ -212,6 +228,13 @@ export function FilesPage() {
   useEffect(() => {
     directoryKeyRef.current = directoryQueryOptions(input).queryKey;
   });
+
+  useEffect(() => {
+    // The list captured the focus target when it mounted with entries; forget the record.
+    if (viewerReturnId === null || entries.length === 0 || consumedReturnKey === routeKey) return;
+    forgetViewerReturn(session.cacheNamespace, routeKey);
+    setConsumedReturnKey(routeKey);
+  }, [consumedReturnKey, entries.length, routeKey, session.cacheNamespace, viewerReturnId]);
 
   useEffect(() => {
     if (filtersWereOpenRef.current && !filtersOpen) filtersButtonRef.current?.focus({preventScroll: true});
@@ -308,16 +331,6 @@ export function FilesPage() {
     filtersButtonRef.current?.focus({preventScroll: true});
   };
 
-  useEffect(() => {
-    if (!(rootQuery.error instanceof ApiProblem) || rootQuery.error.status !== 401 || sessionExpiring) return;
-    setSessionExpiring(true);
-    const generation = beginSignOut();
-    void purgePrivateBrowserState(queryClient).then(
-      () => completeSignOut(generation, true),
-      () => completeSignOut(generation, true, false),
-    ).then(() => navigate("/login", {replace: true, state: {reason: "session"}}));
-  }, [navigate, queryClient, rootQuery.error, sessionExpiring]);
-
   if (rootQuery.isPending || sessionExpiring) {
     return <section className="files-page"><p role="status">Loading root…</p></section>;
   }
@@ -355,6 +368,7 @@ export function FilesPage() {
       </nav>
       <p className="eyebrow">Read-only library</p>
       <h1 dir="auto">{root.displayName}</h1>
+      <RootSectionNav rootId={root.id} current="files" />
       <p className="files-page__access">Original access: read only</p>
       <IndexStatusPanel
         key={`${session.cacheNamespace}:${root.id}:${root.authorizationEpoch}`}
@@ -446,6 +460,7 @@ export function FilesPage() {
             anchorRef.current = anchor;
             remember(anchor);
           }}
+          initialFocusId={initialFocusId}
         />
       ) : null}
       {selectedFileId ? (
