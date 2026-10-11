@@ -19,3 +19,18 @@ frontend/playwright-report
 backend/staticfiles
 tests
 docs
+fixtures
+# Local-only material at any depth; tests/deployment/test_image_hygiene.py asserts these.
+# The last matching pattern wins, so the example re-include must follow the env patterns.
+**/.env
+**/.env.*
+!**/.env.example
+deploy/mounts.*.toml
+deploy/mounts.manifest.json
+deploy/mounts.gateway.attestation
+compose.mounts.generated.yaml
+**/test-results
+**/playwright-report
+**/blob-report
+**/coverage
+**/*.log

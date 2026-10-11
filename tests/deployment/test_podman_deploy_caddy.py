@@ -201,6 +201,9 @@ def test_build_context_excludes_bytecode_but_keeps_the_deployment_files() -> Non
     assert {"**/__pycache__", "**/*.pyc"} <= set(patterns)
     assert [pattern for pattern in patterns if pattern.startswith("deploy")] == [
         "deploy/secrets",
+        "deploy/mounts.*.toml",
+        "deploy/mounts.manifest.json",
+        "deploy/mounts.gateway.attestation",
     ]
 
 
