@@ -217,6 +217,59 @@ MANAGED_TABLE_COLUMNS: Final[dict[str, tuple[str, ...]]] = {
         "status",
         "metrics",
     ),
+    "media_mediaasset": (
+        "entry_id",
+        "kind",
+        "device",
+        "inode",
+        "size",
+        "mtime_ns",
+        "fingerprint",
+        "probe_state",
+        "thumbnail_state",
+        "poster_state",
+        "lane",
+        "attempts",
+        "attempt_token",
+        "next_attempt_at",
+        "lease_owner",
+        "lease_expires_at",
+        "processor_version",
+        "safe_error_code",
+        "width",
+        "height",
+        "orientation",
+        "captured_at",
+        "captured_at_source",
+        "camera_make",
+        "camera_model",
+        "duration_ms",
+        "video_codec",
+        "audio_codec",
+        "container",
+        "has_location",
+        "sort_at",
+        "sort_source",
+        "created_at",
+        "updated_at",
+        "root_id",
+    ),
+    "media_mediaderivative": (
+        "id",
+        "kind",
+        "fingerprint",
+        "params_digest",
+        "key",
+        "extension",
+        "bytes",
+        "width",
+        "height",
+        "state",
+        "evictable",
+        "created_at",
+        "last_access_at",
+        "asset_id",
+    ),
 }
 
 MANAGED_SEQUENCES: Final[tuple[str, ...]] = (
@@ -256,6 +309,8 @@ ROLE_TABLE_PRIVILEGES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
         "operations_operation": ("SELECT", "INSERT"),
         "operations_job": ("SELECT", "INSERT"),
         "operations_workerheartbeat": ("SELECT",),
+        "media_mediaasset": ("SELECT",),
+        "media_mediaderivative": ("SELECT",),
     },
     "aegis_operations": {
         "django_migrations": ("SELECT",),
@@ -282,6 +337,8 @@ ROLE_TABLE_PRIVILEGES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
         "operations_job": ("SELECT",),
         "operations_workerheartbeat": ("SELECT",),
         "audit_auditevent": ("INSERT",),
+        "media_mediaasset": ("SELECT", "INSERT", "UPDATE"),
+        "media_mediaderivative": ("SELECT", "INSERT", "UPDATE", "DELETE"),
     },
 }
 
@@ -305,6 +362,21 @@ _WORKER_ROOT_READS: Final = {
     column: ("SELECT",)
     for column in ("id", "mode", "active", "authorization_epoch")
 }
+# The media worker discovers present media files and builds their source paths; it never
+# reads display names, ordering keys, logical organization or scan bookkeeping.
+MEDIA_CATALOG_READ_COLUMNS: Final = (
+    "id",
+    "root_id",
+    "source_parent_id",
+    "raw_name",
+    "kind",
+    "type_hint",
+    "source_state",
+    "size",
+    "mtime_ns",
+    "device",
+    "inode",
+)
 ROLE_COLUMN_PRIVILEGES: Final[
     dict[str, dict[str, dict[str, tuple[str, ...]]]]
 ] = {
@@ -321,7 +393,10 @@ ROLE_COLUMN_PRIVILEGES: Final[
     },
     "aegis_media": {
         "operations_job": dict(_WORKER_JOB_UPDATES),
-        "roots_root": dict(_WORKER_ROOT_READS),
+        "roots_root": {**_WORKER_ROOT_READS, "slot_id": ("SELECT",)},
+        "catalog_catalogentry": {
+            column: ("SELECT",) for column in MEDIA_CATALOG_READ_COLUMNS
+        },
     },
 }
 
@@ -339,7 +414,7 @@ ROLE_SEQUENCE_PRIVILEGES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
 }
 
 ROLE_FUNCTION_PRIVILEGES: Final[dict[str, tuple[str, ...]]] = {
-    "aegis_web": ("aegis_request_root_scan",),
+    "aegis_web": ("aegis_request_root_scan", "aegis_touch_media_derivative"),
     "aegis_operations": (
         "aegis_publish_operations_heartbeat",
         "aegis_validate_operation_authorization",
@@ -365,6 +440,8 @@ HEARTBEAT_FUNCTION_SIGNATURE: Final = (
     "(text,text,text,text,text,jsonb,uuid,integer,integer)"
 )
 AUTHORIZATION_FUNCTION_SIGNATURE: Final = "(uuid)"
+MEDIA_TOUCH_FUNCTION_SIGNATURE: Final = "(text)"
+MEDIA_TOUCH_INTERVAL_SECONDS: Final = 3600
 
 
 def _heartbeat_function_sql(
@@ -833,6 +910,44 @@ $aegis_function$;
 """
 
 
+# The web role records derivative access for least-recently-used eviction without any
+# write grant on the media tables: one evictable, ready row by exact key, at most once per
+# interval, so delivery causes at most one write per derivative per hour. The row is
+# locked with SKIP LOCKED, so a delivery request never waits on (or deadlocks with) a
+# worker holding that row: a locked row is simply not touched, since this is only a hint.
+MEDIA_TOUCH_FUNCTION_SQL: Final = f"""
+CREATE OR REPLACE FUNCTION public.aegis_touch_media_derivative(
+    p_key text
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $aegis_function$
+BEGIN
+    IF p_key IS NULL OR p_key !~ '^[0-9a-f]{{64}}$' THEN
+        RAISE EXCEPTION 'invalid media derivative key'
+            USING ERRCODE = '22023';
+    END IF;
+
+    UPDATE public.media_mediaderivative AS derivative
+       SET last_access_at = pg_catalog.now()
+     WHERE derivative.id = (
+            SELECT candidate.id
+              FROM public.media_mediaderivative AS candidate
+             WHERE candidate.key = p_key
+               AND candidate.evictable
+               AND candidate.state = 'ready'
+               AND candidate.last_access_at
+                   < pg_catalog.now()
+                     - pg_catalog.make_interval(secs => {MEDIA_TOUCH_INTERVAL_SECONDS})
+             FOR UPDATE SKIP LOCKED
+       );
+END;
+$aegis_function$;
+"""
+
+
 MANAGED_FUNCTION_SIGNATURES: Final[dict[str, str]] = {
     "aegis_guard_directory_commit": "public.aegis_guard_directory_commit()",
     "aegis_record_scan_batch": "public.aegis_record_scan_batch(jsonb,jsonb)",
@@ -851,6 +966,9 @@ MANAGED_FUNCTION_SIGNATURES: Final[dict[str, str]] = {
         "public.aegis_validate_operation_authorization"
         f"{AUTHORIZATION_FUNCTION_SIGNATURE}"
     ),
+    "aegis_touch_media_derivative": (
+        f"public.aegis_touch_media_derivative{MEDIA_TOUCH_FUNCTION_SIGNATURE}"
+    ),
 }
 MANAGED_FUNCTION_IDENTITY_ARGUMENTS: Final[dict[str, str]] = {
     "aegis_guard_directory_commit": "",
@@ -867,6 +985,7 @@ MANAGED_FUNCTION_IDENTITY_ARGUMENTS: Final[dict[str, str]] = {
         for function_name in HEARTBEAT_FUNCTION_SQL
     },
     "aegis_validate_operation_authorization": "uuid",
+    "aegis_touch_media_derivative": "text",
 }
 
 
@@ -1082,6 +1201,7 @@ def _install_boundary_functions(cursor: Any) -> None:
     for function_sql in HEARTBEAT_FUNCTION_SQL.values():
         cursor.execute(function_sql)
     cursor.execute(AUTHORIZATION_FUNCTION_SQL)
+    cursor.execute(MEDIA_TOUCH_FUNCTION_SQL)
     for function_sql in _scan_function_sql():
         cursor.execute(function_sql)
 

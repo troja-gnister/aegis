@@ -3,6 +3,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from aegis_apps.indexing.config import ScanPolicy
+from aegis_apps.media.config import MediaPolicy
 from aegis_apps.operations.config import WorkerRuntimeConfig
 
 from aegis.config import RuntimeConfig, read_secret, web_database_pool_options
@@ -16,6 +17,7 @@ if _runtime_environ.get("AEGIS_ENV", "development").strip().lower() != "producti
 RUNTIME_CONFIG = RuntimeConfig.from_environ(_runtime_environ)
 WORKER_RUNTIME_CONFIG = WorkerRuntimeConfig.from_environ(_runtime_environ)
 AEGIS_SCAN_POLICY = ScanPolicy.from_environment(_runtime_environ)
+AEGIS_MEDIA_POLICY = MediaPolicy.from_environ(_runtime_environ)
 AEGIS_AUTH_THROTTLE_HMAC_KEY = read_secret(
     _runtime_environ,
     "AEGIS_AUTH_THROTTLE_HMAC_KEY",
@@ -58,6 +60,7 @@ INSTALLED_APPS = [
     "aegis_apps.operations",
     "aegis_apps.catalog",
     "aegis_apps.indexing",
+    "aegis_apps.media",
 ]
 
 MIDDLEWARE = [

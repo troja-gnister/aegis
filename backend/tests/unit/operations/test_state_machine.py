@@ -57,4 +57,8 @@ def test_phase_one_enum_values_are_stable() -> None:
         "succeeded",
         "failed",
     )
-    assert tuple(kind.value for kind in JobKind) == ("foundation.probe",)
+    assert tuple(kind.value for kind in JobKind) == (
+        "foundation.probe",
+        "media.preview",
+        "media.transcode",
+    )

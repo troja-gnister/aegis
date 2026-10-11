@@ -433,6 +433,39 @@ def test_database_rejects_invalid_job_cross_field_shapes(updates: dict[str, obje
         Job.objects.bulk_create([Job(**values)])
 
 
+@pytest.mark.parametrize("kind", ["media.preview", "media.transcode"])
+def test_database_accepts_media_operation_and_job_kinds(kind: str) -> None:
+    actor = User.objects.create_user(username=f"media-kind-{uuid.uuid4()}")
+    operation = Operation.objects.bulk_create(
+        [
+            Operation(
+                id=uuid.uuid4(),
+                actor=actor,
+                request_id=f"media_kind_{uuid.uuid4().hex[:16]}",
+                kind=kind,
+                request_hash=uuid.uuid4().bytes + uuid.uuid4().bytes,
+                intent={"roots": []},
+                authorization_snapshot={"userEpoch": 0, "rootEpochs": {}},
+            )
+        ]
+    )[0]
+    Job.objects.bulk_create(
+        [
+            Job(
+                id=uuid.uuid4(),
+                operation=operation,
+                target_role="media",
+                kind=kind,
+                payload={"roots": []},
+                available_at=timezone.now(),
+            )
+        ]
+    )
+
+    assert Operation.objects.get(pk=operation.pk).kind == kind
+    assert Job.objects.get(operation=operation).kind == kind
+
+
 def test_database_rejects_duplicate_role_enqueue_for_one_operation() -> None:
     operation = _operation()
     original = operation.jobs.get()

@@ -248,6 +248,59 @@ EXPECTED_TABLE_COLUMNS = {
         "status",
         "metrics",
     ),
+    "media_mediaasset": (
+        "entry_id",
+        "kind",
+        "device",
+        "inode",
+        "size",
+        "mtime_ns",
+        "fingerprint",
+        "probe_state",
+        "thumbnail_state",
+        "poster_state",
+        "lane",
+        "attempts",
+        "attempt_token",
+        "next_attempt_at",
+        "lease_owner",
+        "lease_expires_at",
+        "processor_version",
+        "safe_error_code",
+        "width",
+        "height",
+        "orientation",
+        "captured_at",
+        "captured_at_source",
+        "camera_make",
+        "camera_model",
+        "duration_ms",
+        "video_codec",
+        "audio_codec",
+        "container",
+        "has_location",
+        "sort_at",
+        "sort_source",
+        "created_at",
+        "updated_at",
+        "root_id",
+    ),
+    "media_mediaderivative": (
+        "id",
+        "kind",
+        "fingerprint",
+        "params_digest",
+        "key",
+        "extension",
+        "bytes",
+        "width",
+        "height",
+        "state",
+        "evictable",
+        "created_at",
+        "last_access_at",
+        "asset_id",
+    ),
 }
 
 
@@ -311,7 +364,7 @@ def test_worker_grants_are_column_fenced_without_authorization_graph_access() ->
         root_reads = privilege_source.ROLE_COLUMN_PRIVILEGES[role][
             "roots_root"
         ]
-        if role == "aegis_indexer":
+        if role in ("aegis_indexer", "aegis_media"):
             assert root_reads == {**expected_root_reads, "slot_id": ("SELECT",)}
         else:
             assert root_reads == expected_root_reads
@@ -325,12 +378,102 @@ def test_worker_grants_are_column_fenced_without_authorization_graph_access() ->
             assert table not in privilege_source.ROLE_TABLE_PRIVILEGES[role]
 
 
-def test_catalog_is_select_only_for_web_and_indexer() -> None:
+def test_catalog_is_select_only_and_media_reads_only_its_fixed_columns() -> None:
+    expected_media_columns = (
+        "id",
+        "root_id",
+        "source_parent_id",
+        "raw_name",
+        "kind",
+        "type_hint",
+        "source_state",
+        "size",
+        "mtime_ns",
+        "device",
+        "inode",
+    )
+    assert expected_media_columns == database_privileges.MEDIA_CATALOG_READ_COLUMNS
+    assert set(expected_media_columns) < set(
+        database_privileges.MANAGED_TABLE_COLUMNS["catalog_catalogentry"]
+    )
     for role in database_privileges.RUNTIME_DATABASE_ROLES:
         assert database_privileges.ROLE_TABLE_PRIVILEGES[role].get("catalog_catalogentry", ()) == (
             ("SELECT",) if role in ("aegis_web", "aegis_indexer") else ()
         )
-        assert "catalog_catalogentry" not in database_privileges.ROLE_COLUMN_PRIVILEGES[role]
+        column_grants = database_privileges.ROLE_COLUMN_PRIVILEGES[role].get(
+            "catalog_catalogentry"
+        )
+        if role == "aegis_media":
+            assert column_grants == {
+                column: ("SELECT",) for column in expected_media_columns
+            }
+        else:
+            assert column_grants is None
+    media_catalog = database_privileges.ROLE_COLUMN_PRIVILEGES["aegis_media"][
+        "catalog_catalogentry"
+    ]
+    for hidden in (
+        "display_name",
+        "name_key",
+        "logical_name",
+        "logical_parent_id",
+        "ctime_ns",
+        "source_revision",
+        "observed_at",
+    ):
+        assert hidden not in media_catalog
+
+
+def test_media_tables_are_media_owned_and_web_readable_only() -> None:
+    media_tables = ("media_mediaasset", "media_mediaderivative")
+    expected = {
+        "aegis_web": {
+            "media_mediaasset": ("SELECT",),
+            "media_mediaderivative": ("SELECT",),
+        },
+        "aegis_media": {
+            "media_mediaasset": ("SELECT", "INSERT", "UPDATE"),
+            "media_mediaderivative": ("SELECT", "INSERT", "UPDATE", "DELETE"),
+        },
+        "aegis_operations": {},
+        "aegis_indexer": {},
+    }
+    for role in database_privileges.RUNTIME_DATABASE_ROLES:
+        granted = {
+            table: privileges
+            for table, privileges in database_privileges.ROLE_TABLE_PRIVILEGES[role].items()
+            if table.startswith("media_")
+        }
+        assert granted == expected[role]
+        for table in media_tables:
+            assert table not in database_privileges.ROLE_COLUMN_PRIVILEGES[role]
+            assert "TRUNCATE" not in granted.get(table, ())
+        assert not any(
+            sequence.startswith("media_")
+            for sequence in database_privileges.ROLE_SEQUENCE_PRIVILEGES[role]
+        )
+    assert set(media_tables) <= set(database_privileges.MANAGED_TABLE_COLUMNS)
+    assert not any(
+        sequence.startswith("media_") for sequence in database_privileges.MANAGED_SEQUENCES
+    )
+
+
+def test_media_grants_add_no_other_media_role_privileges() -> None:
+    assert database_privileges.ROLE_TABLE_PRIVILEGES["aegis_media"] == {
+        "django_migrations": ("SELECT",),
+        "operations_operation": ("SELECT",),
+        "operations_job": ("SELECT",),
+        "operations_workerheartbeat": ("SELECT",),
+        "audit_auditevent": ("INSERT",),
+        "media_mediaasset": ("SELECT", "INSERT", "UPDATE"),
+        "media_mediaderivative": ("SELECT", "INSERT", "UPDATE", "DELETE"),
+    }
+    assert set(database_privileges.ROLE_COLUMN_PRIVILEGES["aegis_media"]) == {
+        "operations_job",
+        "roots_root",
+        "catalog_catalogentry",
+    }
+    assert database_privileges.ROLE_SEQUENCE_PRIVILEGES["aegis_media"] == {}
 
 
 def test_indexing_state_is_select_only_for_web_and_indexer() -> None:
@@ -365,7 +508,7 @@ def test_function_execution_allowlist_is_exact_and_public_is_never_a_grantee() -
     privilege_source = database_privileges
 
     assert privilege_source.ROLE_FUNCTION_PRIVILEGES == {
-        "aegis_web": ("aegis_request_root_scan",),
+        "aegis_web": ("aegis_request_root_scan", "aegis_touch_media_derivative"),
         "aegis_operations": (
             "aegis_publish_operations_heartbeat",
             "aegis_validate_operation_authorization",
@@ -414,6 +557,61 @@ def test_function_execution_allowlist_is_exact_and_public_is_never_a_grantee() -
             "p_slot_limit",
         ):
             assert f"{argument} is null" in normalized
+
+
+def test_media_touch_boundary_is_web_only_and_bounded() -> None:
+    privilege_source = database_privileges
+    normalized = " ".join(privilege_source.MEDIA_TOUCH_FUNCTION_SQL.split()).lower()
+
+    assert privilege_source.MANAGED_FUNCTION_SIGNATURES["aegis_touch_media_derivative"] == (
+        "public.aegis_touch_media_derivative(text)"
+    )
+    assert (
+        privilege_source.MANAGED_FUNCTION_IDENTITY_ARGUMENTS["aegis_touch_media_derivative"]
+        == "text"
+    )
+    assert [
+        role
+        for role, functions in privilege_source.ROLE_FUNCTION_PRIVILEGES.items()
+        if "aegis_touch_media_derivative" in functions
+    ] == ["aegis_web"]
+    assert "security definer" in normalized
+    assert "set search_path = ''" in normalized
+    assert "returns void" in normalized
+    assert "p_key is null or p_key !~ '^[0-9a-f]{64}$'" in normalized
+    assert (
+        "update public.media_mediaderivative as derivative "
+        "set last_access_at = pg_catalog.now() "
+        "where derivative.id = ( select candidate.id "
+        "from public.media_mediaderivative as candidate "
+        "where candidate.key = p_key "
+        "and candidate.evictable "
+        "and candidate.state = 'ready' "
+        "and candidate.last_access_at < pg_catalog.now() - "
+        "pg_catalog.make_interval(secs => 3600) "
+        "for update skip locked );"
+    ) in normalized
+    assert privilege_source.MEDIA_TOUCH_INTERVAL_SECONDS == 3600
+    for forbidden in (
+        "session_user",
+        "current_user",
+        "delete",
+        "insert",
+        "execute ",
+        "nowait",
+        "lock table",
+    ):
+        assert forbidden not in normalized
+    assert normalized.count("update public.") == 1
+    assert normalized.count("for update") == 1
+    install = inspect.getsource(privilege_source._install_boundary_functions)
+    assert "MEDIA_TOUCH_FUNCTION_SQL" in install
+    assert "aegis_touch_media_derivative" not in privilege_source.ROLE_TABLE_PRIVILEGES[
+        "aegis_web"
+    ]
+    assert privilege_source.ROLE_TABLE_PRIVILEGES["aegis_web"]["media_mediaderivative"] == (
+        "SELECT",
+    )
 
 
 def test_authorization_boundary_bounds_json_and_does_not_mask_database_faults() -> None:

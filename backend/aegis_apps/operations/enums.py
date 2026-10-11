@@ -9,6 +9,8 @@ class WorkerRole(models.TextChoices):
 
 class JobKind(models.TextChoices):
     FOUNDATION_PROBE = "foundation.probe", "Foundation probe"
+    MEDIA_PREVIEW = "media.preview", "Media preview"
+    MEDIA_TRANSCODE = "media.transcode", "Media transcode"
 
 
 class JobState(models.TextChoices):

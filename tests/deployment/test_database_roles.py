@@ -4,6 +4,7 @@ import json
 import secrets
 import sys
 import uuid
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ from aegis_apps.common.database_privileges import (
     MANAGED_FUNCTION_SIGNATURES,
     MANAGED_SEQUENCES,
     MANAGED_TABLE_COLUMNS,
+    MEDIA_CATALOG_READ_COLUMNS,
     ROLE_COLUMN_PRIVILEGES,
     ROLE_FUNCTION_PRIVILEGES,
     ROLE_SEQUENCE_PRIVILEGES,
@@ -579,17 +581,282 @@ def test_catalog_actual_login_read_and_mutation_boundary(
             with runtime.cursor() as cursor:
                 cursor.execute("SELECT id FROM catalog_catalogentry WHERE id = %s", [anchor.pk])
                 assert cursor.fetchone() == (anchor.pk,)
+        elif role == "aegis_media":
+            with runtime.cursor() as cursor:
+                cursor.execute(
+                    f"SELECT {', '.join(MEDIA_CATALOG_READ_COLUMNS)} "
+                    "FROM catalog_catalogentry WHERE id = %s",
+                    [anchor.pk],
+                )
+                row = cursor.fetchone()
+                assert row is not None and row[0] == anchor.pk
+            for column in (
+                "display_name",
+                "name_key",
+                "logical_name",
+                "logical_parent_id",
+                "ctime_ns",
+                "source_revision",
+                "observed_at",
+            ):
+                _assert_sqlstate(runtime, f"SELECT {column} FROM catalog_catalogentry")
+            _assert_sqlstate(runtime, "SELECT * FROM catalog_catalogentry")
+            _assert_sqlstate(runtime, "SELECT id FROM catalog_catalogentry FOR SHARE")
         else:
             _assert_sqlstate(runtime, "SELECT id FROM catalog_catalogentry")
         for statement in (
             "INSERT INTO catalog_catalogentry SELECT * FROM catalog_catalogentry WHERE false",
             "UPDATE catalog_catalogentry SET display_name = 'changed'",
+            "UPDATE catalog_catalogentry SET size = size",
             "DELETE FROM catalog_catalogentry",
             "TRUNCATE catalog_catalogentry",
         ):
             _assert_sqlstate(runtime, statement)
     anchor.refresh_from_db()
     assert anchor.display_name == ""
+
+
+def _media_fixture() -> tuple[Root, Any, Any, Any]:
+    from aegis_apps.catalog.models import CatalogEntry
+    from aegis_apps.media.keys import fingerprint
+    from aegis_apps.media.models import MediaAsset, MediaDerivative
+
+    root = Root.objects.create(
+        slot_id=f"media-{uuid.uuid4().hex[:12]}", display_name="Synthetic media root",
+        mode=Root.Mode.READ_ONLY, active=True,
+    )
+    anchor = CatalogEntry.objects.create(
+        root=root, raw_name=b"", display_name="", name_key=b"", kind="directory"
+    )
+    entries = [
+        CatalogEntry.objects.create(
+            root=root, source_parent=anchor, logical_parent=anchor, raw_name=raw,
+            display_name=raw.decode(), name_key=raw.lower(), kind="file", type_hint="jpg",
+            size=10, mtime_ns=20, device=1, inode=index + 2,
+        )
+        for index, raw in enumerate((b"IMG_0001.jpg", b"IMG_0002.jpg"))
+    ]
+    asset = MediaAsset.objects.create(
+        entry=entries[0], root=root, kind="photo", device=1, inode=2, size=10, mtime_ns=20,
+        fingerprint=fingerprint(root.pk, entries[0].pk, 1, 2, 10, 20), sort_at=timezone.now(),
+    )
+    derivative = MediaDerivative.objects.create(
+        asset=asset, kind="thumbnail", fingerprint=asset.fingerprint, params_digest="a" * 64,
+        key="b" * 64, extension="webp", bytes=100, width=40, height=30, state="ready",
+        evictable=False,
+    )
+    return root, entries[1], asset, derivative
+
+
+def _evictable_derivative(
+    asset: Any, kind: str, key: str, extension: str, last_access_at: Any, state: str = "ready"
+) -> Any:
+    from aegis_apps.media.models import MediaDerivative
+
+    return MediaDerivative.objects.create(
+        asset=asset, kind=kind, fingerprint=asset.fingerprint, params_digest="a" * 64,
+        key=key, extension=extension, bytes=100, width=40, height=30, state=state,
+        evictable=True, last_access_at=last_access_at,
+    )
+
+
+@pytest.mark.parametrize("role", RUNTIME_DATABASE_ROLES)
+def test_media_tables_actual_login_read_and_write_boundary(
+    role_database: RoleDatabase, role: str
+) -> None:
+    from aegis_apps.media.keys import fingerprint
+    from aegis_apps.media.models import MediaAsset, MediaDerivative
+
+    root, spare_entry, asset, derivative = _media_fixture()
+    asset_insert = (
+        "INSERT INTO media_mediaasset (entry_id, root_id, kind, device, inode, size, "
+        "mtime_ns, fingerprint, probe_state, thumbnail_state, lane, attempts, "
+        "attempt_token, next_attempt_at, has_location, sort_at, sort_source, created_at, "
+        "updated_at) VALUES (%s, %s, 'photo', 1, 3, 10, 20, %s, 'pending', 'pending', "
+        "'background', 0, 0, now(), false, now(), 'modified', now(), now())"
+    )
+    asset_insert_parameters = (
+        spare_entry.pk,
+        root.pk,
+        fingerprint(root.pk, spare_entry.pk, 1, 3, 10, 20),
+    )
+    derivative_insert = (
+        "INSERT INTO media_mediaderivative (id, asset_id, kind, fingerprint, params_digest, "
+        "key, extension, state, evictable, created_at, last_access_at) VALUES "
+        "(%s, %s, 'preview', %s, %s, %s, 'webp', 'pending', true, now(), now())"
+    )
+    derivative_insert_parameters = (
+        uuid.uuid4(), asset.pk, asset.fingerprint, "c" * 64, "d" * 64
+    )
+
+    with role_database.connect(role) as runtime:
+        if role in ("aegis_web", "aegis_media"):
+            with runtime.cursor() as cursor:
+                cursor.execute(
+                    "SELECT fingerprint FROM media_mediaasset WHERE entry_id = %s", [asset.pk]
+                )
+                assert cursor.fetchone() == (asset.fingerprint,)
+                cursor.execute(
+                    "SELECT key FROM media_mediaderivative WHERE id = %s", [derivative.pk]
+                )
+                assert cursor.fetchone() == (derivative.key,)
+        else:
+            _assert_sqlstate(runtime, "SELECT entry_id FROM media_mediaasset")
+            _assert_sqlstate(runtime, "SELECT id FROM media_mediaderivative")
+
+        if role == "aegis_media":
+            with runtime.cursor() as cursor:
+                cursor.execute(asset_insert, asset_insert_parameters)
+                cursor.execute(
+                    "UPDATE media_mediaasset SET lane = 'interactive' WHERE entry_id = %s",
+                    [spare_entry.pk],
+                )
+                cursor.execute(
+                    "SELECT entry_id FROM media_mediaasset WHERE entry_id = %s FOR UPDATE",
+                    [spare_entry.pk],
+                )
+                cursor.execute(derivative_insert, derivative_insert_parameters)
+                cursor.execute(
+                    "UPDATE media_mediaderivative SET state = 'stale' WHERE id = %s",
+                    [derivative.pk],
+                )
+                cursor.execute(
+                    "DELETE FROM media_mediaderivative WHERE id = %s", [derivative.pk]
+                )
+                cursor.execute(
+                    "SELECT slot_id FROM roots_root WHERE id = %s", [root.pk]
+                )
+                assert cursor.fetchone() == (root.slot_id,)
+            _assert_sqlstate(
+                runtime, "DELETE FROM media_mediaasset WHERE entry_id = %s", (asset.pk,)
+            )
+            _assert_sqlstate(runtime, "TRUNCATE media_mediaasset")
+            _assert_sqlstate(runtime, "TRUNCATE media_mediaderivative")
+            for statement in (
+                "SELECT display_name FROM roots_root",
+                "SELECT capabilities FROM roots_root",
+                "SELECT id FROM roots_rootgrant",
+                "SELECT id FROM identity_user",
+                "SELECT id FROM indexing_directorywork",
+                "UPDATE roots_root SET active = active",
+            ):
+                _assert_sqlstate(runtime, statement)
+        else:
+            _assert_sqlstate(runtime, asset_insert, asset_insert_parameters)
+            _assert_sqlstate(runtime, derivative_insert, derivative_insert_parameters)
+            for statement, parameters in (
+                ("UPDATE media_mediaasset SET lane = 'interactive' WHERE entry_id = %s",
+                 (asset.pk,)),
+                ("UPDATE media_mediaderivative SET state = 'stale' WHERE id = %s",
+                 (derivative.pk,)),
+                ("DELETE FROM media_mediaderivative WHERE id = %s", (derivative.pk,)),
+                ("DELETE FROM media_mediaasset WHERE entry_id = %s", (asset.pk,)),
+            ):
+                _assert_sqlstate(runtime, statement, parameters)
+            _assert_sqlstate(runtime, "TRUNCATE media_mediaasset")
+            _assert_sqlstate(runtime, "TRUNCATE media_mediaderivative")
+
+    if role == "aegis_media":
+        assert MediaAsset.objects.get(pk=spare_entry.pk).lane == "interactive"
+        assert not MediaDerivative.objects.filter(pk=derivative.pk).exists()
+        assert MediaDerivative.objects.filter(asset=asset, kind="preview").exists()
+    else:
+        assert not MediaAsset.objects.filter(pk=spare_entry.pk).exists()
+        derivative.refresh_from_db()
+        assert derivative.state == "ready"
+    assert MediaAsset.objects.filter(pk=asset.pk).exists()
+
+
+@pytest.mark.parametrize("role", ["aegis_operations", "aegis_indexer", "aegis_media"])
+def test_only_web_can_touch_media_derivatives(role_database: RoleDatabase, role: str) -> None:
+    from aegis_apps.media.models import MediaDerivative
+
+    _root, _spare_entry, asset, _thumbnail = _media_fixture()
+    old = timezone.now() - timedelta(hours=2)
+    # A row the function would touch if the caller could execute it.
+    preview = _evictable_derivative(asset, "preview", "1" * 64, "webp", old)
+    with role_database.connect(role) as caller:
+        _assert_sqlstate(
+            caller, "SELECT public.aegis_touch_media_derivative(%s)", (preview.key,)
+        )
+    assert MediaDerivative.objects.get(pk=preview.pk).last_access_at == old
+
+
+def test_media_derivative_touch_skips_a_locked_row_without_waiting(
+    role_database: RoleDatabase,
+) -> None:
+    from aegis_apps.media.models import MediaDerivative
+
+    _root, _spare_entry, asset, _thumbnail = _media_fixture()
+    old = timezone.now() - timedelta(hours=2)
+    preview = _evictable_derivative(asset, "preview", "1" * 64, "webp", old)
+    touch = "SELECT public.aegis_touch_media_derivative(%s)"
+
+    with (
+        role_database.connect(MIGRATOR_ROLE) as holder,
+        role_database.connect("aegis_web") as web,
+    ):
+        # Waiting on the row lock would fail with 55P03 instead of returning.
+        web.execute("SET lock_timeout = '2s'")
+        with holder.transaction():
+            holder.execute(
+                "SELECT id FROM public.media_mediaderivative WHERE id = %s FOR UPDATE",
+                [preview.pk],
+            )
+            web.execute(touch, [preview.key])
+            assert MediaDerivative.objects.get(pk=preview.pk).last_access_at == old
+        web.execute(touch, [preview.key])
+
+    assert MediaDerivative.objects.get(pk=preview.pk).last_access_at > old + timedelta(hours=1)
+
+
+def test_media_derivative_touch_updates_only_stale_evictable_ready_rows(
+    role_database: RoleDatabase,
+) -> None:
+    from aegis_apps.media.keys import fingerprint
+    from aegis_apps.media.models import MediaAsset, MediaDerivative
+
+    root, spare_entry, asset, thumbnail = _media_fixture()
+    other = MediaAsset.objects.create(
+        entry=spare_entry, root=root, kind="photo", device=1, inode=3, size=10, mtime_ns=20,
+        fingerprint=fingerprint(root.pk, spare_entry.pk, 1, 3, 10, 20), sort_at=timezone.now(),
+    )
+    old = timezone.now() - timedelta(hours=2)
+    recent = timezone.now() - timedelta(minutes=10)
+    MediaDerivative.objects.filter(pk=thumbnail.pk).update(last_access_at=old)
+
+    preview = _evictable_derivative(asset, "preview", "1" * 64, "webp", old)
+    transcode = _evictable_derivative(asset, "transcode", "2" * 64, "mp4", recent)
+    stale = _evictable_derivative(other, "preview", "3" * 64, "webp", old, "stale")
+
+    with role_database.connect("aegis_web") as web, web.cursor() as cursor:
+        for key in (preview.key, transcode.key, thumbnail.key, stale.key, "f" * 64):
+            cursor.execute("SELECT public.aegis_touch_media_derivative(%s)", [key])
+
+    touched = MediaDerivative.objects.get(pk=preview.pk).last_access_at
+    assert touched > timezone.now() - timedelta(minutes=30)
+    assert MediaDerivative.objects.get(pk=transcode.pk).last_access_at == recent
+    assert MediaDerivative.objects.get(pk=thumbnail.pk).last_access_at == old
+    assert MediaDerivative.objects.get(pk=stale.pk).last_access_at == old
+    assert not MediaDerivative.objects.filter(key="f" * 64).exists()
+
+    with role_database.connect("aegis_web") as web, web.cursor() as cursor:
+        cursor.execute("SELECT public.aegis_touch_media_derivative(%s)", [preview.key])
+    assert MediaDerivative.objects.get(pk=preview.pk).last_access_at == touched
+
+    with role_database.connect("aegis_web") as web:
+        for value in (None, "A" * 64, "a" * 63, "../" + "a" * 61, "a" * 64 + "\n"):
+            _assert_sqlstate(
+                web,
+                "SELECT public.aegis_touch_media_derivative(%s)",
+                (value,),
+                sqlstate="22023",
+            )
+        _assert_sqlstate(
+            web,
+            "UPDATE media_mediaderivative SET last_access_at = now() WHERE id = %s",
+            (preview.pk,),
+        )
 
 
 def test_sync_is_idempotent_only_for_an_authenticated_migrator(
