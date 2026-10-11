@@ -278,3 +278,12 @@ html.viewer-open body {
 .photo-stage:focus-visible {
   outline-offset: -3px;
 }
+
+.viewer-stage__status a {
+  pointer-events: auto;
+}
+
+.viewer-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}

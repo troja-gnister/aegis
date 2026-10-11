@@ -1,4 +1,4 @@
-import {ApiProblem, genericApiProblem} from "./problem";
+import {ApiProblem, GENERIC_PROBLEM_TITLE, GENERIC_PROBLEM_TYPE, genericApiProblem} from "./problem";
 
 const MAX_PROBLEM_BYTES = 16 * 1024;
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
@@ -78,18 +78,33 @@ function containsControlCharacter(value: string): boolean {
   });
 }
 
+/**
+ * A generic problem that keeps a bounded `Retry-After` header, so a rate limit
+ * answered without a problem body (the gateway's 429) can still be honored.
+ */
+function headerOnlyProblem(response: Response): ApiProblem {
+  const retryAfterSeconds = boundedRetryAfter(response, undefined);
+  if (retryAfterSeconds === undefined) return genericApiProblem(response.status);
+  return new ApiProblem({
+    type: GENERIC_PROBLEM_TYPE,
+    title: GENERIC_PROBLEM_TITLE,
+    status: response.status,
+    retryAfterSeconds,
+  });
+}
+
 export async function parseBoundedProblem(response: Response): Promise<ApiProblem> {
   const contentType = response.headers.get("Content-Type")?.toLowerCase() ?? "";
   if (!contentType.includes("application/json")) {
-    return genericApiProblem(response.status);
+    return headerOnlyProblem(response);
   }
 
   try {
     const text = await readBoundedText(response);
-    if (text === null) return genericApiProblem(response.status);
+    if (text === null) return headerOnlyProblem(response);
     const candidate: unknown = JSON.parse(text);
     if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
-      return genericApiProblem(response.status);
+      return headerOnlyProblem(response);
     }
     const fields = candidate as Record<string, unknown>;
     if (
@@ -100,7 +115,7 @@ export async function parseBoundedProblem(response: Response): Promise<ApiProble
       fields.title.length > 160 ||
       containsControlCharacter(fields.title)
     ) {
-      return genericApiProblem(response.status);
+      return headerOnlyProblem(response);
     }
     return new ApiProblem({
       type: fields.type,
@@ -109,7 +124,7 @@ export async function parseBoundedProblem(response: Response): Promise<ApiProble
       retryAfterSeconds: boundedRetryAfter(response, fields.retryAfterSeconds),
     });
   } catch {
-    return genericApiProblem(response.status);
+    return headerOnlyProblem(response);
   }
 }
 

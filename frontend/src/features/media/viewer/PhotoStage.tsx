@@ -72,7 +72,9 @@ const PHASE_TEXT: Partial<Record<string, string>> = {
   preparing: "Preparing a larger preview…",
   failed: "A larger preview could not be created. Showing a smaller image.",
   stalled: "The larger preview is taking longer than expected. Showing a smaller image.",
-  unsupported: "A larger preview is not available for this format. Showing a smaller image.",
+  unsupported: "Preview isn't available for this file.",
+  busy: "Busy, retrying…",
+  backoff: "Couldn't prepare this file; try again later.",
   unavailable: "Your access to this file does not include viewing it.",
 };
 
@@ -119,9 +121,12 @@ export function PhotoStage({
     refetchDetails,
     enabled: details === undefined || details.kind === "photo",
   });
-  const fallbackUrl = preview.phase === "failed" || preview.phase === "unsupported" || preview.phase === "stalled"
+  // A failed or slow preview may fall back to a browser-native original; an unsupported or
+  // quarantined file never shows its original, only the thumbnail.
+  const fallbackUrl = preview.phase === "failed" || preview.phase === "stalled"
     ? details?.original.inlineUrl ?? null
     : null;
+  const downloadUrl = details?.permissions.export ? details.original.downloadUrl : null;
   const candidateUrl = preview.url ?? fallbackUrl;
   const mainUrl = candidateUrl !== null && candidateUrl !== failedUrl ? candidateUrl : null;
   const mainLoaded = mainUrl !== null && loadedUrl === mainUrl;
@@ -349,6 +354,17 @@ export function PhotoStage({
             <button className="viewer-button interactive" type="button" onClick={preview.retry}>
               Try the preview again
             </button>
+          ) : preview.phase === "backoff" ? (
+            <button
+              className="viewer-button interactive"
+              type="button"
+              disabled={!preview.retryReady}
+              onClick={preview.retry}
+            >
+              Try again
+            </button>
+          ) : preview.phase === "unsupported" && downloadUrl !== null ? (
+            <a className="viewer-button interactive" href={downloadUrl} download>Download original</a>
           ) : null}
         </div>
       ) : null}

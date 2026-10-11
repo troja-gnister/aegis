@@ -80,6 +80,28 @@ describe("apiRequest", () => {
     });
   });
 
+  it("keeps a bounded Retry-After from a rate limit answered without a problem body", async () => {
+    server.use(
+      http.post("/api/v1/limited", () => new HttpResponse("<h1>Too many requests</h1>", {
+        status: 429,
+        headers: {"Content-Type": "text/html", "Retry-After": "7"},
+      })),
+      http.post("/api/v1/unbounded", () => new HttpResponse("slow down", {
+        status: 429,
+        headers: {"Content-Type": "text/plain", "Retry-After": "999999"},
+      })),
+    );
+
+    await expect(apiRequest("/api/v1/limited", {method: "POST"})).rejects.toMatchObject({
+      type: "request_failed",
+      status: 429,
+      retryAfterSeconds: 7,
+    });
+    const unbounded = await apiRequest("/api/v1/unbounded", {method: "POST"}).catch((error: unknown) => error);
+    expect(unbounded).toMatchObject({type: "request_failed", status: 429});
+    expect((unbounded as ApiProblem).retryAfterSeconds).toBeUndefined();
+  });
+
   it("bounds successful bodies without forwarding the local byte cap", async () => {
     server.use(
       http.get("/api/v1/bounded-success", ({request}) => {

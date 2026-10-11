@@ -38,16 +38,47 @@ export type DerivativePhase =
   | "preparing"
   | "stalled"
   | "failed"
+  | "busy"
+  | "backoff"
   | "unsupported"
   | "unavailable";
 
-type RequestStatus = "idle" | "pending" | "done" | "failed" | "blocked";
+type RequestStatus = "idle" | "pending" | "done" | "failed" | "blocked" | "busy" | "backoff";
+
+/** Server-side codes of a refused derivative request (`POST …/media/requests`). */
+export const MEDIA_UNSUPPORTED = "media_unsupported";
+export const MEDIA_REQUEST_BACKOFF = "media_request_backoff";
+
+const RETRY_AFTER_MIN_SECONDS = 1;
+const RETRY_AFTER_MAX_SECONDS = 120;
+const RETRY_AFTER_DEFAULT_SECONDS = 5;
+
+/** A `Retry-After` wait in milliseconds, clamped to 1–120 s (5 s when the server gave none). */
+export function retryAfterDelay(seconds: number | undefined): number {
+  const value = seconds ?? RETRY_AFTER_DEFAULT_SECONDS;
+  return Math.min(RETRY_AFTER_MAX_SECONDS, Math.max(RETRY_AFTER_MIN_SECONDS, value)) * 1000;
+}
+
+/**
+ * How a refused request is handled. A 429 (the per-user cap or the gateway's
+ * rate limit) is retried automatically once after `Retry-After`; a second one,
+ * or a 409 backoff (recent failures for this file), waits for the user; any
+ * other 409 means the file is unsupported or quarantined and is never retried.
+ */
+function refusal(error: unknown, autoRetried: boolean): RequestStatus {
+  if (!(error instanceof ApiProblem)) return "failed";
+  if (error.status === 429) return autoRetried ? "backoff" : "busy";
+  if (error.status === 409) return error.type === MEDIA_REQUEST_BACKOFF ? "backoff" : "blocked";
+  return "failed";
+}
 
 export type ViewingDerivative = {
   phase: DerivativePhase;
   url: string | null;
   /** Ask for the derivative again (after a failure) and restart polling. */
   retry(): void;
+  /** False while a backoff's short wait has not passed; the retry control stays disabled. */
+  retryReady: boolean;
 };
 
 export type ViewingDerivativeOptions = {
@@ -82,6 +113,9 @@ export function useViewingDerivative({
   const requestedRef = useRef(false);
   const sawPendingRef = useRef(false);
   const refetchRef = useRef(refetchDetails);
+  const autoRetriedRef = useRef(false);
+  const [waitMs, setWaitMs] = useState(0);
+  const [retryReady, setRetryReady] = useState(true);
   const visible = useDocumentVisible();
 
   useEffect(() => {
@@ -99,7 +133,9 @@ export function useViewingDerivative({
   else if (derivative.state === "ready") phase = derivative.url === null ? "unavailable" : "ready";
   else if (derivative.state === "unsupported" || derivative.state === "quarantined" || requestStatus === "blocked") {
     phase = "unsupported";
-  } else if (requestStatus === "failed") phase = "failed";
+  } else if (requestStatus === "busy") phase = "busy";
+  else if (requestStatus === "backoff") phase = "backoff";
+  else if (requestStatus === "failed") phase = "failed";
   else if (derivative.state === "failed" && !(retries > 0 && requestStatus !== "done")) phase = "failed";
   else phase = attempt >= MAX_POLL_ATTEMPTS ? "stalled" : "preparing";
 
@@ -127,6 +163,7 @@ export function useViewingDerivative({
       (result) => {
         settled = true;
         if (controller.signal.aborted) return;
+        autoRetriedRef.current = false;
         setRequestStatus("done");
         setAttempt(0);
         // A ready answer is shown at once, and a retry re-reads the failed state it replaced;
@@ -136,7 +173,13 @@ export function useViewingDerivative({
       (error: unknown) => {
         settled = true;
         if (controller.signal.aborted || !isSessionAccessOpen()) return;
-        setRequestStatus(error instanceof ApiProblem && error.status === 409 ? "blocked" : "failed");
+        const status = refusal(error, autoRetriedRef.current);
+        if (status === "busy" || status === "backoff") {
+          setWaitMs(retryAfterDelay(error instanceof ApiProblem ? error.retryAfterSeconds : undefined));
+        }
+        if (status === "busy") autoRetriedRef.current = true;
+        if (status === "backoff") setRetryReady(false);
+        setRequestStatus(status);
       },
     );
     return () => {
@@ -166,12 +209,36 @@ export function useViewingDerivative({
     };
   }, [attempt, polling]);
 
+  useEffect(() => {
+    // Busy: one automatic retry after Retry-After. Backoff: the retry control unlocks after it.
+    // Both timers stop on unmount, which the viewer forces on every entry change.
+    if (requestStatus !== "busy" && requestStatus !== "backoff") return;
+    const timer = setTimeout(() => {
+      if (requestStatus === "backoff") {
+        setRetryReady(true);
+        return;
+      }
+      requestedRef.current = false;
+      setRequestStatus("idle");
+      setRetries((count) => count + 1);
+    }, waitMs);
+    return () => clearTimeout(timer);
+  }, [requestStatus, waitMs]);
+
   const retry = useCallback(() => {
+    // Each user action allows at most one automatic retry after a 429, so nothing loops.
+    autoRetriedRef.current = false;
     requestedRef.current = false;
+    setRetryReady(true);
     setRequestStatus("idle");
     setRetries((count) => count + 1);
     setAttempt(0);
   }, []);
 
-  return {phase, url: phase === "ready" ? derivative?.url ?? null : null, retry};
+  return {
+    phase,
+    url: phase === "ready" ? derivative?.url ?? null : null,
+    retry,
+    retryReady: phase !== "backoff" || retryReady,
+  };
 }

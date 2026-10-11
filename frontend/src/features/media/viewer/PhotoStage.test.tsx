@@ -13,7 +13,7 @@ import {useEntryMediaDetails} from "../hooks";
 import {derivativeUrlFor, mediaDetailsBody, originalUrlFor, thumbnailUrlFor} from "../test-fixtures";
 import {validatedMediaDetails} from "../validate";
 import {PhotoStage} from "./PhotoStage";
-import {MAX_POLL_ATTEMPTS, pollDelay} from "./useViewingDerivative";
+import {MAX_POLL_ATTEMPTS, pollDelay, retryAfterDelay} from "./useViewingDerivative";
 
 const ENTRY_ID = "33333333-3333-4333-8333-333333333333";
 const OTHER_ID = "44444444-4444-4444-8444-444444444444";
@@ -206,19 +206,128 @@ describe("preview requests and polling", () => {
     expect(callsFor(fetchMedia, OTHER_ID)).toBeGreaterThan(1);
   });
 
-  it("explains an unsupported format and stops", async () => {
+  it("says an unsupported file has no preview, keeps the thumbnail, offers Download and never retries", async () => {
     vi.useFakeTimers();
     const fetchMedia = vi.spyOn(mediaApi, "fetchEntryMedia")
-      .mockImplementation(async (entryId) => photoDetails(entryId, "missing", {original: {inlineUrl: null}}));
-    vi.spyOn(mediaApi, "requestMediaDerivative").mockRejectedValue(new ApiProblem({
-      type: "media_unsupported", title: "Unsupported", status: 409,
+      .mockImplementation(async (entryId) => photoDetails(entryId, "missing"));
+    const request = vi.spyOn(mediaApi, "requestMediaDerivative").mockRejectedValue(new ApiProblem({
+      type: "media_unsupported", title: "Media unsupported", status: 409,
     }));
     await renderStage();
     await settle();
 
-    expect(screen.getByRole("status")).toHaveTextContent("A larger preview is not available for this format.");
-    await advance(30_000);
+    expect(screen.getByRole("status")).toHaveTextContent("Preview isn't available for this file.");
+    expect(screen.getByRole("img", {name: "Synthetic photo"})).toHaveAttribute("src", derivativeUrlFor(ENTRY_ID, "thumbnail"));
+    expect(screen.getByRole("link", {name: "Download original"}))
+      .toHaveAttribute("href", originalUrlFor(ENTRY_ID, "attachment"));
+    // The inline original of an unsupported (possibly quarantined) file is never shown.
+    expect(screen.queryAllByRole("img").map((image) => image.getAttribute("src")))
+      .not.toContain(originalUrlFor(ENTRY_ID, "inline"));
+    await advance(120_000);
     expect(fetchMedia).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it("never shows the original of a quarantined photo", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(mediaApi, "fetchEntryMedia")
+      .mockImplementation(async (entryId) => photoDetails(entryId, "quarantined", {permissions: {preview: true, export: false}}));
+    const request = vi.spyOn(mediaApi, "requestMediaDerivative");
+    await renderStage();
+    await settle();
+
+    expect(screen.getByRole("status")).toHaveTextContent("Preview isn't available for this file.");
+    expect(screen.queryAllByRole("img").map((image) => image.getAttribute("src")))
+      .not.toContain(originalUrlFor(ENTRY_ID, "inline"));
+    expect(screen.queryByRole("link", {name: "Download original"})).not.toBeInTheDocument();
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("waits out a request backoff before allowing one manual retry", async () => {
+    vi.useFakeTimers();
+    let state = "missing";
+    vi.spyOn(mediaApi, "fetchEntryMedia").mockImplementation(async (entryId) => photoDetails(entryId, state));
+    const request = vi.spyOn(mediaApi, "requestMediaDerivative")
+      .mockRejectedValueOnce(new ApiProblem({
+        type: "media_request_backoff", title: "Media request failed recently", status: 409, retryAfterSeconds: 30,
+      }))
+      .mockImplementation(async () => {
+        state = "pending";
+        return {state: "pending", kind: "preview"};
+      });
+    await renderStage();
+    await settle();
+
+    expect(screen.getByRole("status")).toHaveTextContent("Couldn't prepare this file; try again later.");
+    const retry = screen.getByRole("button", {name: "Try again"});
+    expect(retry).toBeDisabled();
+    await advance(29_999);
+    expect(screen.getByRole("button", {name: "Try again"})).toBeDisabled();
+    expect(request).toHaveBeenCalledTimes(1);
+    await advance(1);
+    expect(screen.getByRole("button", {name: "Try again"})).toBeEnabled();
+    expect(request).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", {name: "Try again"}));
+    await settle();
+
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("status")).toHaveTextContent("Preparing a larger preview…");
+  });
+
+  it("retries once after a 429, at Retry-After, then waits for the user", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(mediaApi, "fetchEntryMedia").mockImplementation(async (entryId) => photoDetails(entryId, "missing"));
+    const request = vi.spyOn(mediaApi, "requestMediaDerivative").mockRejectedValue(new ApiProblem({
+      type: "media_request_limit", title: "Too many media requests", status: 429, retryAfterSeconds: 3,
+    }));
+    await renderStage();
+    await settle();
+
+    expect(screen.getByRole("status")).toHaveTextContent("Busy, retrying…");
+    await advance(2999);
+    expect(request).toHaveBeenCalledTimes(1);
+    await advance(1);
+    await settle();
+    expect(request).toHaveBeenCalledTimes(2);
+
+    // A second 429 is not retried automatically.
+    expect(screen.getByRole("status")).toHaveTextContent("Couldn't prepare this file; try again later.");
+    await advance(300_000);
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+
+  it("clamps Retry-After to two minutes", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(mediaApi, "fetchEntryMedia").mockImplementation(async (entryId) => photoDetails(entryId, "missing"));
+    const request = vi.spyOn(mediaApi, "requestMediaDerivative")
+      .mockRejectedValueOnce(new ApiProblem({type: "request_failed", title: "Request failed", status: 429, retryAfterSeconds: 3600}))
+      .mockResolvedValue({state: "pending", kind: "preview"});
+    await renderStage();
+    await settle();
+
+    await advance(119_999);
+    expect(request).toHaveBeenCalledTimes(1);
+    await advance(1);
+    await settle();
+    expect(request).toHaveBeenCalledTimes(2);
+    expect([0, 1, 30, 120, 3600, undefined].map(retryAfterDelay)).toEqual([1000, 1000, 30_000, 120_000, 120_000, 5000]);
+  });
+
+  it("cancels a pending 429 retry when the viewer leaves the photo", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(mediaApi, "fetchEntryMedia").mockImplementation(async (entryId) => photoDetails(entryId, "missing"));
+    const request = vi.spyOn(mediaApi, "requestMediaDerivative").mockRejectedValue(new ApiProblem({
+      type: "media_request_limit", title: "Too many media requests", status: 429, retryAfterSeconds: 3,
+    }));
+    const {unmount} = await renderStage();
+    await settle();
+    expect(screen.getByRole("status")).toHaveTextContent("Busy, retrying…");
+
+    unmount();
+    await advance(60_000);
+
+    expect(request).toHaveBeenCalledTimes(1);
   });
 
   it("pauses polling while the page is hidden and resumes when it is visible", async () => {
@@ -279,9 +388,9 @@ describe("preview requests and polling", () => {
     expect(fetchMedia).toHaveBeenCalledTimes(MAX_POLL_ATTEMPTS + 2);
   });
 
-  it("falls back to the inline original when no preview can be made", async () => {
+  it("falls back to the inline original when the preview failed", async () => {
     vi.useFakeTimers();
-    vi.spyOn(mediaApi, "fetchEntryMedia").mockImplementation(async (entryId) => photoDetails(entryId, "unsupported"));
+    vi.spyOn(mediaApi, "fetchEntryMedia").mockImplementation(async (entryId) => photoDetails(entryId, "failed"));
     await renderStage();
     await settle();
 

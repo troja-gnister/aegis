@@ -71,7 +71,8 @@ export function VideoStage({
   }, [source?.url, attempt]);
 
   let status: string | null = null;
-  let action: {label: string; run(): void} | null = null;
+  let action: {label: string; run(): void; disabled?: boolean} | null = null;
+  let download: string | null = null;
   if (choice?.source === "none" || transcode.phase === "unavailable") {
     status = "Your access to this file does not include playing it.";
   } else if (playbackFailed) {
@@ -84,7 +85,14 @@ export function VideoStage({
       },
     };
   } else if (wantsTranscode && transcode.phase === "unsupported") {
-    status = "This video cannot be played in the browser.";
+    // Unsupported or quarantined: never retried; the poster stays and Download remains (with EXPORT).
+    status = "Playback isn't available for this file.";
+    download = details?.permissions.export ? details.original.downloadUrl : null;
+  } else if (wantsTranscode && transcode.phase === "busy") {
+    status = "Busy, retrying…";
+  } else if (wantsTranscode && transcode.phase === "backoff") {
+    status = "Couldn't prepare this file; try again later.";
+    action = {label: "Retry playback", run: transcode.retry, disabled: !transcode.retryReady};
   } else if (wantsTranscode && transcode.phase === "failed") {
     status = "Playback could not be prepared.";
     action = {label: "Retry playback", run: transcode.retry};
@@ -122,7 +130,12 @@ export function VideoStage({
         <div className="viewer-stage__status">
           <p role="status">{status}</p>
           {action !== null ? (
-            <button className="viewer-button interactive" type="button" onClick={action.run}>{action.label}</button>
+            <button className="viewer-button interactive" type="button" disabled={action.disabled} onClick={action.run}>
+              {action.label}
+            </button>
+          ) : null}
+          {download !== null ? (
+            <a className="viewer-button interactive" href={download} download>Download original</a>
           ) : null}
         </div>
       ) : null}

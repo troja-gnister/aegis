@@ -4,6 +4,7 @@ import {afterEach, beforeEach, describe, expect, it, vi} from "vitest";
 import {activateCacheNamespace, purgePrivateBrowserState} from "../../auth/cache";
 import {AuthSessionContext} from "../../auth/session";
 import type {SessionResponse} from "../../auth/types";
+import {ApiProblem} from "../../../api/problem";
 import * as mediaApi from "../api";
 import {useEntryMediaDetails} from "../hooks";
 import {derivativeUrlFor, mediaDetailsBody, originalUrlFor, thumbnailUrlFor} from "../test-fixtures";
@@ -190,12 +191,70 @@ describe("VideoStage", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Preparing playback…");
   });
 
-  it("says so when the format cannot be played at all", async () => {
+  it("says so when the format cannot be played at all, keeping the poster and Download", async () => {
     vi.spyOn(mediaApi, "fetchEntryMedia").mockResolvedValue(videoDetails("unsupported", {original: {inlineUrl: null}}));
+    const request = vi.spyOn(mediaApi, "requestMediaDerivative");
     await renderStage(() => "");
     await settle();
-    expect(screen.getByRole("status")).toHaveTextContent("This video cannot be played in the browser.");
+    expect(screen.getByRole("status")).toHaveTextContent("Playback isn't available for this file.");
     expect(video()).toBeNull();
+    expect(document.querySelector("img.video-stage__poster")).toHaveAttribute("src", derivativeUrlFor(ENTRY_ID, "poster"));
+    expect(screen.getByRole("link", {name: "Download original"}))
+      .toHaveAttribute("href", originalUrlFor(ENTRY_ID, "attachment"));
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("never retries a transcode request refused as unsupported", async () => {
+    vi.spyOn(mediaApi, "fetchEntryMedia").mockResolvedValue(videoDetails("missing"));
+    const request = vi.spyOn(mediaApi, "requestMediaDerivative").mockRejectedValue(new ApiProblem({
+      type: "media_unsupported", title: "Media unsupported", status: 409,
+    }));
+    await renderStage(() => "");
+    await settle();
+    expect(screen.getByRole("status")).toHaveTextContent("Playback isn't available for this file.");
+    await advance(120_000);
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries a transcode once after a 429 and then prepares it", async () => {
+    let state = "missing";
+    vi.spyOn(mediaApi, "fetchEntryMedia").mockImplementation(async () => videoDetails(state));
+    const request = vi.spyOn(mediaApi, "requestMediaDerivative")
+      .mockRejectedValueOnce(new ApiProblem({
+        type: "media_request_limit", title: "Too many media requests", status: 429, retryAfterSeconds: 2,
+      }))
+      .mockImplementation(async () => {
+        state = "pending";
+        return {state: "pending", kind: "transcode"};
+      });
+    await renderStage(() => "");
+    await settle();
+    expect(screen.getByRole("status")).toHaveTextContent("Busy, retrying…");
+
+    await advance(2000);
+    await settle();
+
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("status")).toHaveTextContent("Preparing playback…");
+  });
+
+  it("keeps the playback retry disabled during a request backoff", async () => {
+    vi.spyOn(mediaApi, "fetchEntryMedia").mockResolvedValue(videoDetails("missing"));
+    const request = vi.spyOn(mediaApi, "requestMediaDerivative").mockRejectedValue(new ApiProblem({
+      type: "media_request_backoff", title: "Media request failed recently", status: 409, retryAfterSeconds: 10,
+    }));
+    await renderStage(() => "");
+    await settle();
+
+    expect(screen.getByRole("status")).toHaveTextContent("Couldn't prepare this file; try again later.");
+    expect(screen.getByRole("button", {name: "Retry playback"})).toBeDisabled();
+    await advance(10_000);
+    expect(screen.getByRole("button", {name: "Retry playback"})).toBeEnabled();
+    expect(request).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", {name: "Retry playback"}));
+    await settle();
+    expect(request).toHaveBeenCalledTimes(2);
   });
 
   it("plays nothing without PREVIEW", async () => {
