@@ -114,7 +114,7 @@ Pillow's decompression-bomb limit is enforced, and ffmpeg runs with `-nostdin -p
 ### M5. Metadata
 
 The probe records:
-- width, height and orientation;
+- width and height as displayed (EXIF orientation or video rotation applied), plus the orientation itself for information;
 - `captured_at`, with its source (`exif`, `container`, or none);
 - camera make and model;
 - duration, video and audio codecs, and container (videos);
@@ -129,7 +129,7 @@ A new gateway location, `/media/`, proxies to web without forcing `no-store`. Dj
 | Endpoint | Permission | Response |
 |---|---|---|
 | `GET /media/v1/derivatives/{entry}/{kind}?f=<fingerprint>&n=<cache namespace>&e=<root epoch>` | PREVIEW | Strong ETag (the derivative key), `Cache-Control: private, no-cache`, `Vary: Cookie`. Answers `304` itself. On `200`, `X-Accel-Redirect` to `/__aegis_derivatives/...` with the content type set by Django. |
-| `GET /media/v1/originals/{entry}?disposition=inline\|attachment&n=…` | `inline`: PREVIEW, and only for allowlisted browser-native types. `attachment`: EXPORT. | `Cache-Control: private, no-store`, `X-Accel-Redirect` to `/__aegis_roots/<slot>/<percent-encoded raw path>`, safe RFC 6266 `Content-Disposition`, content type from the extension allowlist (never file-sniffed), `nosniff`. Every other type is attachment-only. |
+| `GET /media/v1/originals/{entry}?d=inline\|attachment&n=…&e=…` | `inline`: PREVIEW, and only for allowlisted browser-native types. `attachment`: EXPORT. | `Cache-Control: private, no-store`, `X-Accel-Redirect` to `/__aegis_roots/<slot>/<percent-encoded raw path>`, safe RFC 6266 `Content-Disposition`, content type from the extension allowlist (never file-sniffed), `nosniff`. Every other type is attachment-only. |
 | `GET /api/v1/entries/{id}/media` | — | Metadata, derivative states, delivery URLs. Under `/api/`, `no-store`. |
 | `POST /api/v1/entries/{id}/media/requests` | PREVIEW | Body `{kind: preview\|transcode}`, with CSRF. Queues an interactive job and answers 202 with its state. |
 | `GET /api/v1/roots/{root}/timeline` | — | Keyset (sort key descending, then id), signed cursors bound like the catalog cursors, filters `kind=photo\|video` and a year. |
