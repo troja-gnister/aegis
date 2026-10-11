@@ -202,6 +202,10 @@ Rootless Podman 5.x is a secondary, optional runtime, paired with a Docker Compo
 
 Detailed evidence, the corrected PostgreSQL/Caddy/indexer adaptations, and current status are recorded in the [Linux/Podman prerequisite report](docs/verification/linux-podman-prerequisite.md).
 
+#### Deploying on Podman
+
+The optional [Podman deployment guide](docs/operations/podman-deployment.md) covers a persistent install on a rootless Podman host with systemd 254 or newer, SELinux enforcing and firewalld. Aegis runs from the published `sha-<commit>` images as systemd user (Quadlet) units, with no checkout or Compose provider, and serves local-CA HTTPS to the private network and VPN only. Its socket-activated edge keeps real client addresses, so the published-port limitation above does not apply to it. Docker remains the primary, supported runtime; acceptance results are recorded in [part 2 of the verification report](docs/verification/linux-podman-prerequisite.md#part-2-private-network-deployment-october-2026).
+
 #### Developing on Podman
 
 A committed helper prepares a rootless Podman development session; Docker users can ignore it.

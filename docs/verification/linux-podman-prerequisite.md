@@ -2,7 +2,7 @@
 
 Observed September 22–24, 2026, beginning from repository checkpoint `ab57e3037b9daed79aeb691eb486a4d2397ae4aa`, whose last accepted application change is `a82db75d9949170e1d22acfed0f08050f067edf2`. Reviewed engine/verification tooling is committed at `163c02563d95de8e4e3930ae68377e946feef3b8`; guarded duplicate-mask compatibility and focused mount regressions are committed at `71da40ed34bbe05990093afbf12925df40462ccf`. PostgreSQL, Caddy, and indexer tmpfs adaptations are corrected; the rootless client-source-address gap (O11) and complete application gates remain open. Docker Engine with Compose v2 is the supported, primary runtime; Podman is a secondary, optional runtime, and this report's remaining items are deferred, optional follow-ups, not blockers. This report records scoped successes and failed application-gate evidence, not full Podman acceptance. Phase 2A.1 remains **18 tasks: 12 complete, 6 remaining**; Task 13 has not started.
 
-**October 2026 update:** the final section, [Fedora Server development host](#fedora-server-development-host-october-2026), records the October 4 runs of all three canonical gates under rootless Podman on the new development host. O11 remains open. The sections before it are kept as historical evidence.
+**October 2026 update:** the section [Fedora Server development host](#fedora-server-development-host-october-2026) records the October 4 runs of all three canonical gates under rootless Podman on the new development host. O11 remains open. The sections before it are kept as historical evidence. The final section, [Part 2: private-network deployment](#part-2-private-network-deployment-october-2026), records the deployment's design-time measurements and its acceptance results.
 
 ## Actual environment
 
@@ -343,3 +343,82 @@ Names alone do not authorize deleting any of these.
 ### Status
 
 On this host, `make verify` and `make test-e2e` pass under rootless Podman, and `make verify-compose` passes except the nine O11 tests above. **Full Podman compatibility is not claimed while O11 is open.** Docker remains the primary, supported runtime.
+
+## Part 2: private-network deployment (October 2026)
+
+Part 2 of the Fedora Server continuation runs Aegis persistently as rootless Podman Quadlet units under the operator's systemd user manager, installed from published images and reachable over local-CA HTTPS from the private network and VPN only. The [design](../superpowers/specs/2026-10-10-podman-lan-deployment-design.md) records the decisions and the [operator guide](../operations/podman-deployment.md) the procedure. Docker Engine with Compose v2 remains the primary, supported runtime, and Docker CI remains the acceptance authority. Host-specific values (names, addresses, ports, firewall zones and paths) are kept in ignored local notes, never in this report.
+
+### Design-time measurements, October 10
+
+Measured on the development host while designing part 2, before any part 2 code existed:
+
+| Item | Observed |
+| --- | --- |
+| Engine | Rootless Podman 5.8.7 with crun, netavark and pasta; SELinux enforcing |
+| Rootless port forwarding | Passt ships `pesto`, but pasta's rootless port forwarder needs Podman 6.0, where it is experimental |
+| systemd | The user manager runs with linger on, and Quadlet is available. Existing containers are started at boot by `podman-restart.service`, which starts only containers that have a restart policy |
+| Ports | Unprivileged ports start at 1024; several high ports are already taken by existing services |
+| Firewall | firewalld, with the private network and the VPN in separate zones |
+| First root | An ext4 tree whose files carry the explicit label `unlabeled_t`; its directories are owner and group only (`750`), owned by the operator |
+
+Probes and throwaway spikes:
+
+- **Denials on the first root.** A confined container (`container_t`) was denied reading the tree even as container root; this is SELinux. With an SELinux-permitted copy, container UID 10001 was still denied, by the permission bits.
+- **Socket-activated edge (design D2).** Caddy 2.11.4 ran in a rootless container on a bridge network and was started through `systemd-socket-activate`. It reported the client's private-network source address, not its own container address. The socket binding needs `protocols h1 h2`, because a stream socket cannot carry HTTP/3, and `skip_install_trust`; site addresses must carry the externally visible port.
+- **Group-only ID mapping (design D5).** With the container's primary group mapped to the operator's host group (`GIDMap=+g<container gid>:@<host gid>:1`), reads through the group permission bits succeeded, and writes through the read-only bind failed with `Read-only file system`.
+- **Secrets (design D9).** Podman's `--secret type=mount` mounts secrets read-write, which PostgreSQL's secret staging correctly refuses. The units therefore bind installer-owned secret files read-only, as Compose's file secrets are.
+
+These measurements are not deployment acceptance. Health-gated startup (`Notify=healthy`) and `GIDMap` with `@` host IDs are measured by the deployment harness below, not assumed. The SELinux module can be verified only on the real host, after the user loads it through the host setup script.
+
+### Deployment harness
+
+`make verify-podman-deploy` installs run-unique units without `[Install]` sections, so nothing it creates can start at boot, and removes exactly what it recorded.
+
+| Item | Result |
+| --- | --- |
+| Commit and date | *Pending* |
+| Exit and duration | *Pending* |
+| All services healthy through systemd ordering | *Pending* |
+| Local-CA HTTPS on the test name, verified with the exported root | *Pending* |
+| Distinct login-throttle buckets for loopback and a non-loopback host address | *Pending* |
+| Indexer attests and reads a group-only (`750`/`640`) synthetic root through the ID mapping | *Pending* |
+| A write into the root fails | *Pending* |
+| No published gateway port; no Podman restart policy on any container | *Pending* |
+| Recovery after a PostgreSQL restart and after a failed migrate attempt, without manual action | *Pending* |
+| Exact cleanup; port, disk and stack-left-running checks | *Pending* |
+
+### Acceptance run on the development host
+
+The run follows section 6 of the design. Its host-specific evidence stays in ignored local notes.
+
+| Step | Result |
+| --- | --- |
+| Release installed (`sha-<commit>`) | *Pending* |
+| `init` | *Pending* |
+| Host setup script run by the user: module loaded, rules added | *Pending* |
+| `install` and `start`: all units healthy; time to healthy | *Pending* |
+| HTTPS from the private network, with the exported root certificate | *Pending* |
+| HTTPS from the VPN, with the exported root certificate | *Pending* |
+| Client address seen by the gateway throttle from outside the host is not a container address | *Pending* |
+| First root: SELinux type, `roots add` flow (exit code 4, host setup, probe) | *Pending* |
+| Rescan as `root_admin`: entry count, duration and peak indexer memory | *Pending* |
+| Root browsed in the UI | *Pending* |
+| Existing services and Podman objects unaffected | *Pending* |
+| Reboot, scheduled with the user: Aegis returns, existing services unaffected | *Pending* |
+
+The indexing measurement on real storage is not Task 16 scale acceptance.
+
+### Gates
+
+| Gate | Result |
+| --- | --- |
+| Docker CI, including the `publish` job and the parity test | *Pending* |
+| `make verify-podman-deploy` on this host | *Pending* |
+| `make verify` under rootless Podman | *Pending* |
+| `make verify-compose` under rootless Podman (only the documented O11 module exception) | *Pending* |
+| `make test-e2e` under rootless Podman | *Pending* |
+| `git diff --check` | *Pending* |
+
+### Part 2 status
+
+Part 2 acceptance is pending until the tables above are complete. The deployment's socket-activated edge is designed to remove O11 for this deployment only; the Compose-based TLS test module keeps its nine O11 failures under rootless Podman until follow-up (j) of the design runs its Caddy socket-activated. Docker remains the primary, supported runtime.
