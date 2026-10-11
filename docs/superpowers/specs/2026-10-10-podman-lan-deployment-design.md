@@ -120,9 +120,11 @@ The installer prepares such files with `podman unshare chown 10001:0`, which giv
 ### D6. SELinux: a dedicated, read-only process type
 
 The installer renders a CIL module defining `aegis_reader`. The module inherits udica's base container template and adds read-only rules for the SELinux types of the configured roots:
-- directories: `getattr open read search`;
-- files: `getattr open read map`;
+- directories: `getattr open read search ioctl lock`;
+- files: `getattr open read map ioctl lock`;
 - symlinks: `getattr read`.
+
+`ioctl` and `lock` cover the read-side calls that ordinary readers make, such as advisory locks and file-system ioctls. They grant no write. SELinux does not filter `ioctl` by command, so "no write" rests on the read-only bind (every write-type ioctl gets `EROFS`), DAC ownership and the dropped capabilities. `lock` lets a reader hold an advisory lock on an original, which could stall a host program that locks it; that is interference, not a write.
 
 The four containers that mount originals run as `aegis_reader.process`. Every other container keeps `container_t`.
 

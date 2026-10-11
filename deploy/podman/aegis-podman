@@ -14,7 +14,8 @@ RestartMaxDelaySec= and RestartMode=).
 
 Installing: the installer creates, changes and removes only what its record names, by exact
 path, identity or object name, never by pattern. Every program runs through one runner as an
-argument vector; there is no shell and no sudo.
+argument vector; there is no shell and no sudo. The privileged host steps (the SELinux module
+and the firewall rules) go into a script the operator reviews and runs with sudo.
 """
 from __future__ import annotations
 
@@ -31,6 +32,7 @@ import ipaddress
 import json
 import os
 import posixpath
+import pwd
 import re
 import secrets
 import shlex
@@ -415,6 +417,91 @@ BOOTSTRAP_IGNORED = frozenset({
     "HealthTimeout", "HealthRetries", "HealthStartPeriod", "Notify",
 })
 
+# Roots (spec D5, D6, D11). The release's aegisctl package, copied out of its backend image,
+# validates, observes and renders every root on the host's own Python.
+LIBRARY_SOURCE = "/app/backend/aegisctl"
+LIBRARY_PACKAGE = "aegisctl"
+LIBRARY_REQUIRED = tuple(
+    f"{LIBRARY_PACKAGE}/{name}" for name in ("__init__.py", "__main__.py", "cli.py", "mounts.py")
+)
+# -I would make Python ignore PYTHONPATH. -P (no script or working directory on sys.path) and
+# -S (no site-packages, user or system, and no .pth files), with every other PYTHON* variable
+# dropped from the environment, give the same isolation with the release's library on the
+# path; -B keeps bytecode out of that recorded copy.
+AEGISCTL_FLAGS = ("-B", "-P", "-S")
+# The units aegisctl's Quadlet render writes a drop-in for, and the drop-in's name.
+ROOT_ROLES = ("migrate", "web", "operations", "indexer", "media", "gateway")
+WORKER_ROLES = ("operations", "indexer", "media")
+DROP_IN = "50-aegis-roots.conf"
+DROP_IN_KEYS = frozenset({"Environment", "Exec", "Volume"})
+MANIFEST_TARGET = "/run/aegis/mounts.manifest.json"
+ATTESTATION_TARGET = "/run/aegis/mounts.gateway.attestation"
+MANIFEST_VARIABLES = frozenset({"AEGIS_MOUNT_MANIFEST", "AEGIS_MOUNT_MANIFEST_SHA256"})
+ATTESTATION_VARIABLES = frozenset({
+    "AEGIS_GATEWAY_MOUNT_ATTESTATION", "AEGIS_GATEWAY_MOUNT_ATTESTATION_SHA256",
+})
+SLOT_ID = re.compile(r"[a-z][a-z0-9-]{0,62}")
+LOCAL_IDENTITY = re.compile(r"local:(?:0|[1-9][0-9]{0,18}):[1-9][0-9]{0,18}")
+REMOTE_IDENTITY = re.compile(
+    r"remote:[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9])?:"
+    r"/[A-Za-z0-9._~!$&'()+,;=:@%/-]{1,383}"
+)
+# What aegisctl's Quadlet renderer refuses in a root's path: Quadlet's Volume= syntax,
+# systemd's specifier and variable expansion and Podman's -v parser must read it literally.
+ROOT_SOURCE_UNSAFE = frozenset(" \"'\\%$,:")
+MAX_ROOT_SOURCE = 4096
+# Each generation of the manifest and gateway attestation has its own names, so drop-ins
+# that are installed keep binding complete files until new ones replace them.
+GENERATION = re.compile(r"[0-9a-f]{16}")
+# The SELinux module (spec D6). Read access is never granted to these types.
+SELINUX_TYPE = re.compile(r"[a-z0-9_]{1,124}_t")
+REFUSED_SELINUX_TYPES = frozenset({
+    "unconfined_t", "spc_t", "etc_t", "proc_t", "sysfs_t", "init_t", "kernel_t", "ssh_home_t",
+    "passwd_file_t", "cert_t",
+})
+REFUSED_SELINUX_PREFIXES = ("shadow", "security")
+REFUSED_SELINUX_SUFFIXES = ("_exec_t", "_secret_t", "_key_t")
+SELINUX_TEMPLATE = "selinux/aegis_reader.cil.in"
+READ_RULES = (
+    "(allow process {type} (dir (getattr open read search ioctl lock)))",
+    "(allow process {type} (file (getattr open read map ioctl lock)))",
+    "(allow process {type} (lnk_file (getattr read)))",
+)
+# The udica template file that provides each block the module may inherit.
+UDICA_TEMPLATES = {
+    "container": "/usr/share/udica/templates/base_container.cil",
+    "net_container": "/usr/share/udica/templates/net_container.cil",
+    "restricted_net_container": "/usr/share/udica/templates/net_container.cil",
+}
+# roots add stops with this exit code when the module must be loaded again first.
+EXIT_MODULE_PENDING = 4
+# The reader probe: a container of the backend image reads a root as the reader type, under
+# the deployment's group mapping (spec D5), to prove the loaded policy grants the root's type.
+PROBE_LABEL = "aegis.probe"
+PROBE_TARGET = "/srv/aegis/probe"
+# Fails unless the root directory can be listed and, when the installer names one ($1), one
+# of its top-level files of the root's own type can be opened and read: listing alone may be
+# allowed by other policy; reading a file of that type is the module's own rule.
+PROBE_SCRIPT = (
+    "set -eu\n"
+    f"root={PROBE_TARGET}\n"
+    'if [ ! -d "$root" ]; then echo "aegis probe: the root is not a directory" >&2; exit 1; fi\n'
+    'ls -A -- "$root" >/dev/null\n'
+    'if [ "$#" -gt 0 ]; then head -c 1 -- "$root/$1" >/dev/null; fi'
+)
+# How many top-level entries the installer looks at for that file.
+PROBE_CANDIDATES = 256
+PROBE_TIMEOUT = 120.0
+BACKEND_USER = "10001:10001"
+BACKEND_GID = 10001
+# The host-setup script (spec D7): the HTTPS port only from private and VPN sources.
+ZONE = re.compile(r"[A-Za-z0-9_-]{1,32}")
+LOGIN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,31}")
+PRIVATE_SOURCES = (
+    ("ipv4", "10.0.0.0/8"), ("ipv4", "172.16.0.0/12"), ("ipv4", "192.168.0.0/16"),
+    ("ipv4", "100.64.0.0/10"), ("ipv6", "fc00::/7"), ("ipv6", "fe80::/10"),
+)
+
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 Network = ipaddress.IPv4Network | ipaddress.IPv6Network
 
@@ -427,12 +514,26 @@ class LockBusy(InstallError):
     """Another aegis-podman command holds the lock."""
 
 
-def run_command(arguments: Sequence[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
-    """Run one program as an argument vector, never through a shell, with nothing on stdin."""
+def run_command(
+    arguments: Sequence[str], *, timeout: float, env: Mapping[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run one program as an argument vector, never through a shell, with nothing on stdin.
+
+    ``env`` replaces the environment; without it the program inherits the installer's.
+    """
     return subprocess.run(
         list(arguments), stdin=subprocess.DEVNULL, capture_output=True, text=True,
-        timeout=timeout, check=False,
+        timeout=timeout, check=False, env=None if env is None else dict(env),
     )
+
+
+def read_selinux_label(path: str, name: str) -> bytes:
+    """An extended attribute of ``path`` itself, never of what a link points to."""
+    return os.getxattr(path, name, follow_symlinks=False)
+
+
+def login_name(uid: int) -> str:
+    return pwd.getpwuid(uid).pw_name
 
 
 def port_in_use(port: int) -> bool:
@@ -481,6 +582,10 @@ class Host:
     port_in_use: Callable[[int], bool] = port_in_use
     quadlet: Path = Path("/usr/libexec/podman/quadlet")
     selinux_enforce: Path = Path("/sys/fs/selinux/enforce")
+    # The host's Python, which runs the release's aegisctl: the one running this installer.
+    python: str = field(default_factory=lambda: sys.executable or "python3")
+    getxattr: Callable[[str, str], bytes] = read_selinux_label
+    login_name: Callable[[int], str] = login_name
 
 
 def _absolute(name: str, value: str) -> Path:
@@ -536,20 +641,58 @@ class Paths:
     def lock(self) -> Path:
         return self.data / "lock"
 
+    @property
+    def mounts(self) -> Path:
+        """The root manifest and gateway attestation the drop-ins bind."""
+        return self.data / "mounts"
+
+    @property
+    def selinux(self) -> Path:
+        return self.data / "selinux"
+
+    @property
+    def selinux_module(self) -> Path:
+        return self.selinux / "aegis_reader.cil"
+
+    @property
+    def host_setup(self) -> Path:
+        return self.data / "host-setup.sh"
+
+    @property
+    def mounts_config(self) -> Path:
+        """aegisctl's mount configuration, written from the record's roots."""
+        return self.config_directory / "mounts.toml"
+
     def release_tree(self, release: str) -> Path:
         return self.releases / release / "podman"
+
+    def library(self, release: str) -> Path:
+        return self.releases / release / "lib"
+
+    def manifest(self, generation: str) -> Path:
+        return self.mounts / f"manifest.{generation}.json"
+
+    def attestation(self, generation: str) -> Path:
+        return self.mounts / f"gateway.{generation}.attestation"
+
+    def drop_in(self, prefix: str, role: str) -> Path:
+        return (self.config / UNIT_DIRECTORIES[".container"] / f"{prefix}{role}.container.d"
+                / DROP_IN)
 
     def unit_directories(self) -> tuple[Path, ...]:
         return tuple(self.config / directory for directory in sorted(INSTALL_DIRECTORIES))
 
     def private_directories(self) -> tuple[Path, ...]:
         """The installer's own directories, each after its parent."""
-        ordered = (self.config_directory, self.data, self.secrets, self.releases)
+        ordered = (
+            self.config_directory, self.data, self.secrets, self.releases, self.mounts,
+            self.selinux,
+        )
         return tuple(dict.fromkeys(ordered))
 
     def removable_roots(self) -> tuple[Path, ...]:
         """Where a recorded file may be: nothing outside these is ever removed."""
-        return (*self.unit_directories(), self.config_directory, self.secrets, self.releases)
+        return (*self.unit_directories(), self.config_directory, self.data)
 
 
 # Field types of the record; a record that does not match is refused, not half-read.
@@ -560,7 +703,8 @@ _STATE_TYPES: dict[str, type | tuple[type, ...]] = {
     "pending": (dict, type(None)), "desired": str, "install_sections": bool,
     "firewall_zones": list, "installed": bool, "history": list, "files": dict,
     "secrets": dict, "releases": dict, "units": dict, "volumes": list, "networks": list,
-    "extractions": list, "version": int,
+    "extractions": list, "roots": dict, "selinux_covered": list, "selinux_pending": list,
+    "mounts": dict, "version": int,
 }
 _INVENTORY_TYPES: dict[str, type] = {
     "files": list, "socket": str, "services": list, "oneshots": list, "generated": list,
@@ -572,13 +716,23 @@ _INVENTORY_TYPES: dict[str, type] = {
 class State:
     """The record (``state.json``): what the installer configured, wrote and owns.
 
-    ``files`` maps every file it wrote (units, configuration, release trees) to its sha256.
-    ``secrets`` maps each secret file to its device, inode and change time: once handed to
-    the container user, the operator can no longer read it. ``volumes`` and ``networks`` are the names its
-    units define; each object Quadlet creates carries ``install_token`` as a label, and only
-    an object that does is ever removed. ``pending`` is an upgrade whose units may already be
+    ``files`` maps every file it wrote (units, drop-ins, configuration, release trees and
+    libraries, the SELinux module and the host-setup script) to its sha256. ``secrets`` maps
+    each secret file to its device, inode and change time: once handed to the container user,
+    the operator can no longer read it. ``volumes`` and ``networks`` are the names its units
+    define; each object Quadlet creates carries ``install_token`` as a label, and only an
+    object that does is ever removed. ``pending`` is an upgrade whose units may already be
     written but which is not yet committed. ``desired`` is the run state the operator last
     asked for. ``history`` lists, in order, every release that became current.
+
+    ``roots`` maps each slot to its source, expected identity and SELinux type: exactly the
+    roots that the installed and loaded drop-ins mount. ``selinux_covered`` are the types a
+    probe proved the loaded module grants; ``selinux_pending`` are in the module file but not
+    yet proven loaded. ``mounts`` records each generation of the manifest (by device, inode
+    and change time, once it belongs to the container user) and gateway attestation (by
+    sha256). ``current`` is the generation the installed drop-ins bind; ``installing`` is set
+    from the first drop-in written until systemd has loaded them all, so an interrupted
+    switch is flagged, rendered again by the next command, and never pruned meanwhile.
     """
 
     phase: str
@@ -606,10 +760,34 @@ class State:
     volumes: list[str] = field(default_factory=list)
     networks: list[str] = field(default_factory=list)
     extractions: list[str] = field(default_factory=list)
+    roots: dict[str, dict[str, str]] = field(default_factory=dict)
+    selinux_covered: list[str] = field(default_factory=list)
+    selinux_pending: list[str] = field(default_factory=list)
+    mounts: dict[str, Any] = field(
+        default_factory=lambda: {"current": None, "installing": None, "generations": {}},
+    )
     version: int = STATE_VERSION
 
     @classmethod
     def from_json(cls, data: object) -> State:
+        if isinstance(data, dict):
+            # A record written before roots existed: it has no roots yet.
+            data = {"roots": {}, "selinux_covered": [], "selinux_pending": [],
+                    "mounts": {"current": None, "generations": {}}} | data
+            if isinstance(data["mounts"], dict):
+                data["mounts"] = {"installing": None} | data["mounts"]
+            for key in ("selinux_covered", "selinux_pending"):
+                values = data[key]
+                blocked = [
+                    value for value in values if isinstance(value, str)
+                    and SELINUX_TYPE.fullmatch(value) and _type_problem(value) is not None
+                ] if isinstance(values, list) else []
+                if blocked:
+                    # A later blocklist must not lock the operator out of the record.
+                    print(f"aegis-podman: warning: the record names SELinux types that are "
+                          f"never granted now ({', '.join(blocked)}); dropping them",
+                          file=sys.stderr)
+                    data[key] = [value for value in values if value not in blocked]
         problem = _record_problem(data)
         if problem is not None:
             raise InstallError(f"the aegis-podman record is not usable ({problem}); it was "
@@ -653,6 +831,37 @@ def _record_problem(data: object) -> str | None:
         isinstance(data["units"].get(key), expected) for key, expected in _INVENTORY_TYPES.items()
     ):
         return "installed without a unit inventory"
+    return _roots_problem(data)
+
+
+def _roots_problem(data: Mapping[str, Any]) -> str | None:
+    """What makes the record's roots, SELinux types or mount generations unusable."""
+    for slot, root in data["roots"].items():
+        if not (
+            SLOT_ID.fullmatch(slot) and isinstance(root, dict)
+            and set(root) == {"source", "identity", "selinux_type"}
+            and all(isinstance(value, str) for value in root.values())
+        ):
+            return "malformed root entries"
+    for value in (*data["selinux_covered"], *data["selinux_pending"]):
+        if not isinstance(value, str) or _type_problem(value) is not None:
+            return "malformed SELinux types"
+    mounts = data["mounts"]
+    generations = mounts.get("generations")
+    if (
+        set(mounts) != {"current", "installing", "generations"}
+        or not isinstance(generations, dict)
+        or not all(
+            GENERATION.fullmatch(name) and isinstance(record, dict)
+            and set(record) == {"manifest", "attestation"}
+            and isinstance(record["manifest"], (dict, type(None)))
+            and isinstance(record["attestation"], (str, type(None)))
+            for name, record in generations.items()
+        )
+        or any(mounts[key] is not None and mounts[key] not in generations
+               for key in ("current", "installing"))
+    ):
+        return "malformed mount generations"
     return None
 
 
@@ -677,8 +886,11 @@ def _detail(text: str | None) -> str:
 
 def _run(
     host: Host, arguments: Sequence[str], *, timeout: float,
+    env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     try:
+        if env is not None:
+            return host.run(list(arguments), timeout=timeout, env=env)
         return host.run(list(arguments), timeout=timeout)
     except FileNotFoundError:
         raise InstallError(f"{arguments[0]} is not installed") from None
@@ -1325,8 +1537,11 @@ def _remove_extractions(host: Host, paths: Paths, state: State) -> None:
         save_state(paths, state)
 
 
-def _copy_out(host: Host, paths: Paths, state: State, image: str, destination: Path) -> None:
-    """Copy the release tree out of ``image`` through a created, never started container.
+def _copy_out(
+    host: Host, paths: Paths, state: State, image: str, destination: Path,
+    source: str = RELEASE_SOURCE,
+) -> None:
+    """Copy ``source`` out of ``image`` through a created, never started container.
 
     Podman writes the new container's ID to a file the record names before the container
     exists, so even an interrupted run leaves an exact ID to remove. That container, and
@@ -1349,8 +1564,7 @@ def _copy_out(host: Host, paths: Paths, state: State, image: str, destination: P
         raise InstallError(f"podman create gave no container ID{detail}")
     try:
         copied = (
-            _run(host, [*PODMAN, "cp", f"{container}:{RELEASE_SOURCE}", str(destination)],
-                 timeout=300)
+            _run(host, [*PODMAN, "cp", f"{container}:{source}", str(destination)], timeout=300)
             if created.returncode == 0 else created
         )
     finally:
@@ -1373,15 +1587,15 @@ def _copy_out(host: Host, paths: Paths, state: State, image: str, destination: P
         )
     if copied.returncode != 0:
         raise InstallError(
-            f"copying the release tree out of {image} failed (exit {copied.returncode})"
+            f"copying {source} out of {image} failed (exit {copied.returncode})"
             f"{_detail(copied.stderr)}"
         )
     if removed.returncode != 0:
         raise InstallError(f"could not remove the extraction container: podman rm {container}")
 
 
-def _scan_tree(root: Path, *, normalize: bool) -> dict[str, bytes]:
-    """Every regular file under a release tree, by relative path.
+def _walk_tree(root: Path, *, normalize: bool, what: str) -> dict[str, bytes]:
+    """Every regular file under a tree the installer copied or rendered, by relative path.
 
     Symbolic links and special files are refused. With ``normalize`` (a fresh copy, which
     the image ships read-only), directories become 0700 and files 0600: a private tree the
@@ -1390,9 +1604,9 @@ def _scan_tree(root: Path, *, normalize: bool) -> dict[str, bytes]:
     try:
         info = root.lstat()
     except FileNotFoundError:
-        raise InstallError(f"the release tree {root} is missing") from None
+        raise InstallError(f"{what} {root} is missing") from None
     if not stat.S_ISDIR(info.st_mode):
-        raise InstallError(f"the release tree {root} is not a directory")
+        raise InstallError(f"{what} {root} is not a directory")
     contents: dict[str, bytes] = {}
     pending = [(root, "")]
     while pending:
@@ -1403,9 +1617,7 @@ def _scan_tree(root: Path, *, normalize: bool) -> dict[str, bytes]:
             for entry in sorted(entries, key=lambda item: item.name):
                 relative = f"{prefix}{entry.name}"
                 if entry.is_symlink():
-                    raise InstallError(
-                        f"the release tree holds a symbolic link, {relative}; refusing it"
-                    )
+                    raise InstallError(f"{what} holds a symbolic link, {relative}; refusing it")
                 if entry.is_dir(follow_symlinks=False):
                     pending.append((Path(entry.path), f"{relative}/"))
                 elif entry.is_file(follow_symlinks=False):
@@ -1413,9 +1625,13 @@ def _scan_tree(root: Path, *, normalize: bool) -> dict[str, bytes]:
                         os.chmod(entry.path, 0o600)
                     contents[relative] = _read_regular(Path(entry.path))
                 else:
-                    raise InstallError(
-                        f"the release tree holds a special file, {relative}; refusing it"
-                    )
+                    raise InstallError(f"{what} holds a special file, {relative}; refusing it")
+    return contents
+
+
+def _scan_tree(root: Path, *, normalize: bool) -> dict[str, bytes]:
+    """Every regular file under a release tree, which must hold the installer and templates."""
+    contents = _walk_tree(root, normalize=normalize, what="the release tree")
     if RELEASE_INSTALLER not in contents or not any(
         name.startswith(f"{RELEASE_TEMPLATES}/") for name in contents
     ):
@@ -1426,10 +1642,11 @@ def _scan_tree(root: Path, *, normalize: bool) -> dict[str, bytes]:
 
 
 def _forget_release(state: State, release: str) -> None:
+    """Drop a lost release directory's records: its tree and its aegisctl copy."""
     state.releases.pop(release, None)
     for path in [
         path for path, record in state.files.items()
-        if record.get("kind") == "release" and record.get("release") == release
+        if record.get("kind") in ("release", "lib") and record.get("release") == release
     ]:
         del state.files[path]
 
@@ -1793,6 +2010,12 @@ def _print_status(
     _say(host, f"release {state.release} ({state.desired})")
     for role in ROLES:
         _say(host, f"  {role:<9} {state.images.get(role, '-')}")
+    for slot, root in sorted(state.roots.items()):
+        _say(host, f"  root {slot}: {root['source']} ({root['selinux_type']})")
+    if state.selinux_pending:
+        _say(host, f"SELinux types the host setup has yet to load: "
+                   f"{', '.join(state.selinux_pending)}; run aegis-podman host-setup and its "
+                   "script, then roots add again")
     if state.pending is not None:
         release = state.pending["release"]
         _say(host, f"upgrade to {release} is pending; finish it with: aegis-podman upgrade "
@@ -2055,6 +2278,1090 @@ def _record_history(state: State, release: str) -> None:
     state.history.append({"sequence": sequence, "release": release})
 
 
+# -- roots: the release's aegisctl, labels, drop-ins and manifests (spec D5, D6, D11) -----------
+
+
+@dataclass(frozen=True)
+class RenderedRoots:
+    """A generation of the manifest and gateway attestation, and the drop-ins that bind it."""
+
+    generation: str
+    drop_ins: dict[str, bytes]
+
+
+def _slot_argument(value: str) -> str:
+    if SLOT_ID.fullmatch(value) is None:
+        raise InstallError(
+            f"--slot {value!r} must be a lowercase letter, then up to 62 lowercase letters, "
+            "digits or hyphens"
+        )
+    return value
+
+
+def _source_argument(value: str) -> str:
+    """A root's path as the units and Podman read it: absolute, normalized and literal."""
+    if (
+        not value.startswith("/") or len(value) > MAX_ROOT_SOURCE or not value.isascii()
+        or not value.isprintable() or not ROOT_SOURCE_UNSAFE.isdisjoint(value)
+        or posixpath.normpath(value) != value
+    ):
+        raise InstallError(
+            f"--source {value!r} must be an absolute, normalized path of printable ASCII "
+            "without whitespace, quotes, backslashes, commas, colons, '%' or '$', so that "
+            "Quadlet, systemd and Podman read it literally"
+        )
+    return value
+
+
+def _identity_argument(value: str) -> str:
+    if LOCAL_IDENTITY.fullmatch(value) is None and REMOTE_IDENTITY.fullmatch(value) is None:
+        raise InstallError(
+            f"--identity {value!r} must be local:<device>:<inode> or remote:<host>:<path>"
+        )
+    return value
+
+
+def _overlaps(first: str, second: str) -> bool:
+    return os.path.commonpath([first, second]) in (first, second)
+
+
+def _ancestors(path: str) -> set[tuple[int, int]]:
+    """The device and inode of ``path`` and of every directory above it that exists."""
+    found = set()
+    current = path
+    while True:
+        with contextlib.suppress(OSError):
+            info = os.stat(current)
+            found.add((info.st_dev, info.st_ino))
+        parent = os.path.dirname(current)
+        if parent == current:
+            return found
+        current = parent
+
+
+def _check_root_source(paths: Paths, state: State, slot: str, source: str) -> str:
+    """The source must already be a real directory, reached through no symbolic link, apart
+    from every directory of the installer and from every other root, by path and by device
+    and inode (which also catches a bind-mounted alias). aegis-podman never creates or
+    changes it. Returns its identity, local:<device>:<inode>."""
+    try:
+        info = os.lstat(source)
+    except FileNotFoundError:
+        raise InstallError(
+            f"{source} does not exist; aegis-podman never creates a root, so create or mount "
+            "it first"
+        ) from None
+    except OSError as error:
+        raise InstallError(f"cannot inspect {source}: {error.strerror}") from None
+    if stat.S_ISLNK(info.st_mode):
+        raise InstallError(f"{source} is a symbolic link; give the directory it points to")
+    if not stat.S_ISDIR(info.st_mode):
+        raise InstallError(f"{source} is not a directory")
+    real = os.path.realpath(source)
+    if real != source:
+        # aegisctl resolves the path again later; a link swapped in between would redirect it.
+        raise InstallError(f"{source} is reached through a symbolic link; give its real path, "
+                           f"{shlex.quote(real)}")
+    above = _ancestors(source)
+    for directory in (paths.data, paths.config_directory, *paths.unit_directories()):
+        own = os.path.realpath(directory)
+        try:
+            own_info = os.stat(own)
+        except OSError:
+            own_info = None
+        if _overlaps(real, own) or (info.st_dev, info.st_ino) in _ancestors(own) or (
+            own_info is not None and (own_info.st_dev, own_info.st_ino) in above
+        ):
+            raise InstallError(
+                f"{source} overlaps aegis-podman's own directory {directory}; a root must lie "
+                "outside it, and it outside the root"
+            )
+    for other, root in sorted(state.roots.items()):
+        if other != slot and _overlaps(real, os.path.realpath(root["source"])):
+            raise InstallError(f"{source} overlaps the root {other} ({root['source']})")
+    return f"local:{info.st_dev}:{info.st_ino}"
+
+
+def _type_problem(value: str) -> str | None:
+    if SELINUX_TYPE.fullmatch(value) is None:
+        return f"{value!r} is not an SELinux type name"
+    if (
+        value in REFUSED_SELINUX_TYPES or value.endswith(REFUSED_SELINUX_SUFFIXES)
+        or value.startswith(REFUSED_SELINUX_PREFIXES)
+    ):
+        return f"aegis_reader is never granted read access to {value}"
+    return None
+
+
+def _checked_type(value: str, where: str) -> str:
+    problem = _type_problem(value)
+    if problem is not None:
+        raise InstallError(f"{where}: {problem}")
+    return value
+
+
+def _selinux_type(host: Host, source: str) -> str:
+    """The SELinux type of ``source`` itself, from its user:role:type:level label."""
+    try:
+        raw = host.getxattr(source, "security.selinux")
+    except OSError as error:
+        raise InstallError(
+            f"cannot read the SELinux label of {source}: {error.strerror or error}"
+        ) from None
+    try:
+        label = raw.rstrip(b"\0").decode("ascii")
+    except UnicodeDecodeError:
+        label = ""
+    parts = label.split(":", 3)
+    if not label.isprintable() or len(parts) != 4 or not all(parts):
+        raise InstallError(f"{source} has an SELinux label aegis-podman cannot read: {label!r}")
+    return _checked_type(parts[2], f"{source} is labelled {parts[2]}")
+
+
+def _module_text(template: str, types: Iterable[str]) -> str:
+    """The aegis_reader module: the template with read-only rules for each type."""
+    checked = sorted({_checked_type(value, "the SELinux module") for value in types})
+    rules = [rule.format(type=value) for value in checked for rule in READ_RULES]
+    try:
+        return _substitute(SELINUX_TEMPLATE, template, {
+            "READ_RULES": "\n    ".join(rules) or "; no root type is covered yet",
+        })
+    except RenderError as error:
+        raise InstallError(f"the SELinux module template: {error}") from None
+
+
+def _inherited_templates(module: str) -> list[str]:
+    """The udica template files that provide the blocks ``module`` inherits, in order."""
+    code = "\n".join(line.partition(";")[0] for line in module.splitlines())
+    templates: list[str] = []
+    for block in re.findall(r"\(\s*blockinherit\s+([^\s()]+)\s*\)", code):
+        template = UDICA_TEMPLATES.get(block)
+        if template is None:
+            raise InstallError(
+                f"the SELinux module inherits {block}, which no udica template known to "
+                "aegis-podman provides"
+            )
+        if template not in templates:
+            templates.append(template)
+    if UDICA_TEMPLATES["container"] not in templates:
+        raise InstallError("the SELinux module does not inherit udica's container template")
+    return templates
+
+
+def _remove_probe(host: Host, name: str, token: str) -> None:
+    """Remove the probe container ``name`` if it is still there: only by its exact ID, and
+    only when it carries this probe's label."""
+    exists = _run(host, [*PODMAN, "container", "exists", name], timeout=60)
+    if exists.returncode == 1:
+        return
+    if exists.returncode != 0:
+        raise InstallError(
+            f"podman container exists {name} failed{_detail(exists.stderr)}; check for the "
+            f"probe container with: podman container inspect {name}"
+        )
+    entry = _single(
+        _json_output(host, [*PODMAN, "container", "inspect", name], "podman container inspect"),
+        "Name", name, "podman container inspect",
+    )
+    labels = (entry.get("Config") or {}).get("Labels") or {}
+    identifier = entry.get("Id")
+    if (
+        not isinstance(labels, dict) or labels.get(PROBE_LABEL) != token
+        or not isinstance(identifier, str) or CONTAINER_ID.fullmatch(identifier) is None
+    ):
+        raise InstallError(
+            f"a container named {name} exists without this probe's label; it was left in place"
+        )
+    # --ignore: Podman's own --rm cleanup may remove it first, which is just as good.
+    _check(host, [*PODMAN, "rm", "--force", "--ignore", identifier],
+           f"removing the probe container {name}", timeout=120)
+
+
+def _probe_file(host: Host, source: str, selinux_type: str) -> str | None:
+    """A regular file at the top of ``source`` for the probe to open, or None.
+
+    It has the root's own SELinux type: a file of another type, as ``mv`` leaves one, must
+    not fail the probe. The permission bits that apply to the probe's user must allow
+    reading: the group's when the file is in the operator's group, which the probe has as
+    its mapped group, and the others' bits otherwise. Only metadata is read, from at most
+    ``PROBE_CANDIDATES`` entries.
+    """
+    try:
+        entries = os.scandir(source)
+    except OSError:
+        return None
+    with entries:
+        for index, entry in enumerate(entries):
+            if index >= PROBE_CANDIDATES:
+                break
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            bits = stat.S_IRGRP if info.st_gid == host.gid else stat.S_IROTH
+            if not stat.S_ISREG(info.st_mode) or not info.st_mode & bits:
+                continue
+            try:
+                label = host.getxattr(entry.path, "security.selinux")
+            except OSError:
+                continue
+            parts = label.rstrip(b"\0").decode("ascii", "replace").split(":", 3)
+            if len(parts) == 4 and parts[2] == selinux_type:
+                return entry.name
+    return None
+
+
+def _probe_reader(
+    host: Host, state: State, source: str, selinux_type: str,
+) -> tuple[bool, str]:
+    """Whether the loaded policy lets the reader type read ``source``, and why not.
+
+    This is the unprivileged proof that the host setup loaded a module granting the root's
+    type; ``semodule -l`` needs root. A container of the backend image, running as the reader
+    type under the deployment's group mapping, lists the root directory and opens one of its
+    top-level files of the root's type, if it has one (``_probe_file``), through a read-only
+    bind with no relabel option. Only reading proves it: the reader type exists as soon as
+    any earlier module was loaded, and other policy may already allow listing a directory.
+    The container runs with --rm; one that a timed-out run leaves behind is removed by exact
+    name, label and ID.
+    """
+    file = _probe_file(host, source, selinux_type)
+    name = f"aegis-probe-{secrets.token_hex(8)}"
+    token = secrets.token_hex(16)
+    command = [
+        *PODMAN, "run", "--rm", "--pull", "never", "--network", "none", "--name", name,
+        "--label", f"{PROBE_LABEL}={token}", "--security-opt", f"label=type:{state.reader_type}",
+        "--read-only", "--cap-drop", "all", "--security-opt", "no-new-privileges",
+        "--user", BACKEND_USER, "--gidmap", f"+g{BACKEND_GID}:@{state.host_gid}:1",
+        "-v", f"{source}:{PROBE_TARGET}:ro", "--entrypoint", "/bin/sh", state.images["backend"],
+        "-c", PROBE_SCRIPT, "aegis-probe", *([] if file is None else [file]),
+    ]
+    try:
+        result = host.run(command, timeout=PROBE_TIMEOUT)
+    except FileNotFoundError:
+        raise InstallError("podman is not installed") from None
+    except subprocess.TimeoutExpired:
+        _remove_probe(host, name, token)
+        raise InstallError(
+            f"the SELinux reader probe did not finish within {PROBE_TIMEOUT:g}s; nothing of it "
+            "is left, so try again"
+        ) from None
+    if result.returncode == 0:
+        return True, ""
+    _remove_probe(host, name, token)  # --rm leaves nothing behind; make sure of it
+    return False, _detail(result.stderr)
+
+
+def _write_module(host: Host, paths: Paths, state: State) -> str:
+    """Write the module for the covered and pending types, from the current release's
+    template. Only the host-setup script, run by the operator, loads it."""
+    _extract_release(host, paths, state, state.release, state.images["backend"])
+    raw = _verified_tree(paths, state, state.release).get(SELINUX_TEMPLATE)
+    if raw is None:
+        raise InstallError(
+            f"release {state.release} ships no SELinux module template ({SELINUX_TEMPLATE}); "
+            "move to a release that does"
+        )
+    try:
+        template = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise InstallError("the SELinux module template is not UTF-8") from None
+    text = _module_text(template, [*state.selinux_covered, *state.selinux_pending])
+    _inherited_templates(text)
+    _check_replaceable(state, paths.selinux_module)
+    _publish(paths, state, paths.selinux_module, text.encode("utf-8"), "selinux", 0o644)
+    return text
+
+
+def _library_records(state: State, release: str) -> list[str]:
+    return [
+        path for path, record in state.files.items()
+        if record.get("kind") == "lib" and record.get("release") == release
+    ]
+
+
+def _release_library(
+    host: Host, paths: Paths, state: State, release: str, backend_image: str,
+) -> Path:
+    """``releases/<release>/lib``: that release's aegisctl, copied out of its backend image
+    by digest, recorded file by file and verified before every use."""
+    _extract_release(host, paths, state, release, backend_image)
+    library = paths.library(release)
+    recorded = _library_records(state, release)
+    if recorded and os.path.lexists(library):
+        expected = {
+            posixpath.relpath(path, str(library)): state.files[path].get("sha256")
+            for path in recorded
+        }
+        contents = _walk_tree(library, normalize=False, what="the aegisctl copy")
+        actual = {name: hashlib.sha256(content).hexdigest() for name, content in contents.items()}
+        if actual != expected:
+            raise InstallError(
+                f"the aegisctl copy {library} differs from its record; refusing to run it"
+            )
+        return library
+    for path in recorded:  # lost: copy it out again
+        del state.files[path]
+    if os.path.lexists(library):
+        raise InstallError(f"{library} exists but is not recorded by aegis-podman; move it")
+    staging = paths.releases / f".{release}.lib.{secrets.token_hex(8)}.partial"
+    staging.mkdir(mode=0o700)
+    try:
+        _copy_out(host, paths, state, backend_image, staging / LIBRARY_PACKAGE, LIBRARY_SOURCE)
+        contents = _walk_tree(staging, normalize=True, what="the aegisctl copy")
+        missing = [name for name in LIBRARY_REQUIRED if name not in contents]
+        if missing:
+            raise InstallError(f"the backend image's aegisctl lacks {', '.join(missing)}")
+        for relative, content in contents.items():
+            state.files[str(library / relative)] = {
+                "kind": "lib", "release": release,
+                "sha256": hashlib.sha256(content).hexdigest(),
+            }
+        save_state(paths, state)
+        os.rename(staging, library)
+    except BaseException:
+        _remove_tree(staging)
+        raise
+    _sync_directory(library.parent)
+    return library
+
+
+def _aegisctl_error(stderr: str | None) -> str:
+    lines = [line for line in (stderr or "").splitlines() if line.strip()]
+    if lines:
+        try:
+            payload = json.loads(lines[-1])
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict) and isinstance(payload.get("message"), str):
+            return f": {payload['message'][:512]}"
+    return _detail(stderr)
+
+
+def _aegisctl(
+    host: Host, library: Path, verb: str, *arguments: str, timeout: float = 120,
+) -> str:
+    """Run ``aegisctl mounts <verb>`` from the release's copy on the host's Python."""
+    environment = {
+        key: value for key, value in host.environ.items() if not key.startswith("PYTHON")
+    }
+    environment |= {"PYTHONPATH": str(library), "AEGIS_CONTAINER_ENGINE": "podman"}
+    result = _run(
+        host,
+        [host.python, *AEGISCTL_FLAGS, "-m", LIBRARY_PACKAGE, "mounts", verb, *arguments],
+        timeout=timeout, env=environment,
+    )
+    if result.returncode != 0:
+        raise InstallError(
+            f"aegisctl mounts {verb} refused (exit {result.returncode})"
+            f"{_aegisctl_error(result.stderr)}"
+        )
+    return result.stdout
+
+
+def _mounts_config(roots: Mapping[str, Mapping[str, str]]) -> bytes:
+    """aegisctl's mount configuration for ``roots``: every root read-only."""
+    lines = [
+        "# aegisctl's mount configuration, written by aegis-podman from its record. Change",
+        "# the roots with aegis-podman roots add and remove, not in this file.",
+        "version = 1",
+    ]
+    for slot, root in sorted(roots.items()):
+        lines += [
+            "", "[[slots]]", f"slot_id = {json.dumps(slot)}",
+            f"source = {json.dumps(root['source'])}",
+            f"container_path = {json.dumps(f'/srv/aegis/roots/{slot}')}",
+            'mode = "read_only"', f"expected_identity = {json.dumps(root['identity'])}",
+        ]
+    return ("\n".join(lines) + "\n").encode("ascii")
+
+
+def _check_drop_ins(paths: Paths, state: State) -> None:
+    for role in ROOT_ROLES:
+        _check_replaceable(state, paths.drop_in(state.prefix, role))
+
+
+def _drop_in_paths(state: State) -> list[Path]:
+    return [Path(path) for path, record in state.files.items() if record.get("kind") == "drop-in"]
+
+
+def _drop_in_problem(
+    role: str, sections: Mapping[str, list[tuple[str, str]]],
+    roots: Mapping[str, Mapping[str, str]], manifest: str, attestation: str,
+) -> str | None:
+    """What a rendered drop-in sets beyond exactly what aegisctl's render gives ``role``.
+
+    Readers bind every root read-only at its slot path with no other option (a relabel or
+    chown option on an original is what the spec forbids most), and every role binds the
+    manifest, or for the gateway the attestation, under its fixed variables. Only the three
+    workers replace their command, with the attestation step.
+    """
+    entries = sections.get("Container", [])
+    if set(sections) != {"Container"} or not {key for key, _ in entries} <= DROP_IN_KEYS:
+        return "sets more than Environment, Exec and Volume"
+    names = sorted(value.partition("=")[0] for key, value in entries if key == "Environment")
+    gateway = role == "gateway"
+    if names != sorted(ATTESTATION_VARIABLES if gateway else MANIFEST_VARIABLES):
+        return f"sets the environment variables {', '.join(names) or 'none'}"
+    if len(_values(sections, "Container", "Exec")) != (1 if role in WORKER_ROLES else 0):
+        return "replaces the command of a role other than the workers"
+    expected = {f"{attestation}:{ATTESTATION_TARGET}:ro" if gateway
+                else f"{manifest}:{MANIFEST_TARGET}:ro"}
+    if gateway or role in WORKER_ROLES:
+        expected |= {
+            f"{os.path.realpath(root['source'])}:/srv/aegis/roots/{slot}:ro"
+            for slot, root in roots.items()
+        }
+    volumes = _values(sections, "Container", "Volume")
+    if len(volumes) != len(set(volumes)) or set(volumes) != expected:
+        return ("binds other than its roots, read-only and without options, and its manifest "
+                "or attestation")
+    return None
+
+
+def _read_drop_ins(
+    directory: Path, prefix: str, roots: Mapping[str, Mapping[str, str]], manifest: Path,
+    attestation: Path,
+) -> dict[str, bytes]:
+    """The six drop-ins aegisctl rendered into ``directory``, checked before any is used."""
+    expected = {f"{prefix}{role}.container.d/{DROP_IN}": role for role in ROOT_ROLES}
+    contents = _walk_tree(directory, normalize=False, what="aegisctl's rendered drop-ins")
+    if set(contents) != set(expected):
+        raise InstallError(
+            "aegisctl rendered other drop-ins than the six expected: "
+            f"{', '.join(sorted(contents)) or 'none'}"
+        )
+    drop_ins = {}
+    for relative, content in contents.items():
+        try:
+            sections = _unit_sections(content.decode("ascii"))
+        except UnicodeDecodeError:
+            raise InstallError(f"the rendered drop-in {relative} is not ASCII") from None
+        problem = _drop_in_problem(
+            expected[relative], sections, roots, os.path.realpath(manifest),
+            os.path.realpath(attestation),
+        )
+        if problem is not None:
+            raise InstallError(f"the rendered drop-in {relative} {problem}; refusing it")
+        drop_ins[expected[relative]] = content
+    return drop_ins
+
+
+def _render_roots(
+    host: Host, paths: Paths, state: State, roots: Mapping[str, Mapping[str, str]],
+    release: str, images: Mapping[str, str],
+) -> RenderedRoots:
+    """Validate, observe and render ``roots`` with ``release``'s aegisctl.
+
+    The result is a new generation of the manifest and gateway attestation, with the
+    drop-ins that bind it; nothing installed changes, so the drop-ins in place keep binding
+    their own generation until ``_install_drop_ins`` replaces them. The manifest is rendered
+    right after a fresh preflight, while the operator still owns it, and only then handed to
+    the group-mapped container user (spec D5). Both files are labelled container_file_t;
+    the originals themselves are never touched.
+    """
+    for slot, root in sorted(roots.items()):
+        selinux_type = _selinux_type(host, root["source"])
+        if selinux_type not in state.selinux_covered:
+            source = shlex.quote(root["source"])
+            advice = (
+                f"add it again with: aegis-podman roots add --slot {slot} --source {source}"
+                if state.installed else
+                f"remove it with: aegis-podman roots remove --slot {slot}, install, then add "
+                "it again"
+            )
+            raise InstallError(
+                f"the root {slot} ({root['source']}) is labelled {selinux_type}, which the "
+                f"loaded aegis_reader module does not cover; {advice}"
+            )
+    _check_drop_ins(paths, state)
+    _check_replaceable(state, paths.mounts_config)
+    library = _release_library(host, paths, state, release, images["backend"])
+    _publish(paths, state, paths.mounts_config, _mounts_config(roots), "mounts-config", 0o600)
+    generation = secrets.token_hex(8)
+    manifest, attestation = paths.manifest(generation), paths.attestation(generation)
+    if os.path.lexists(manifest) or os.path.lexists(attestation):
+        raise InstallError(f"{manifest} or {attestation} already exists; refusing to reuse it")
+    state.mounts["generations"][generation] = {"manifest": None, "attestation": None}
+    save_state(paths, state)
+    config, gid = str(paths.mounts_config), str(state.host_gid)
+    _aegisctl(host, library, "validate", "--config", config)
+    _aegisctl(
+        host, library, "preflight", "--config", config, "--manifest", str(manifest),
+        "--observer", "podman-run", "--observer-image", images["gateway"], "--host-gid", gid,
+        "--reader-type", state.reader_type, timeout=300,
+    )
+    staging = paths.mounts / f".render.{secrets.token_hex(8)}.partial"
+    staging.mkdir(mode=0o700)
+    try:
+        _aegisctl(
+            host, library, "render", "--format", "quadlet", "--config", config,
+            "--manifest", str(manifest), "--gateway-attestation", str(attestation),
+            "--unit-prefix", state.prefix, "--output-dir", str(staging), "--host-gid", gid,
+        )
+        drop_ins = _read_drop_ins(staging, state.prefix, roots, manifest, attestation)
+    finally:
+        _remove_tree(staging)
+    prepare_for_mapped_containers(host, manifest)
+    _check(host, ["chcon", "-h", "-t", CONTAINER_FILE_TYPE, str(attestation)],
+           f"labelling {attestation}", timeout=60)
+    info = manifest.lstat()
+    state.mounts["generations"][generation] = {
+        # The operator can no longer read it: its identity, as for the secrets.
+        "manifest": {"device": info.st_dev, "inode": info.st_ino, "ctime_ns": info.st_ctime_ns},
+        "attestation": _file_digest(attestation),
+    }
+    save_state(paths, state)
+    return RenderedRoots(generation, drop_ins)
+
+
+def _own_directory(directory: Path) -> None:
+    with contextlib.suppress(FileExistsError):
+        directory.mkdir(mode=0o700)
+    if not stat.S_ISDIR(directory.lstat().st_mode):
+        raise InstallError(f"{directory} is not a directory; refusing to write into it")
+
+
+def _install_drop_ins(paths: Paths, state: State, rendered: RenderedRoots) -> set[str]:
+    """Write the drop-ins as recorded files; return the roles whose drop-in changed.
+
+    The generation is recorded as ``installing`` before the first drop-in is written. Until
+    ``_commit_roots`` runs, after systemd has loaded them all, the drop-ins may bind two
+    generations: the switch is flagged, the next install or roots command renders again,
+    and pruning keeps both.
+    """
+    _check_drop_ins(paths, state)
+    state.mounts["installing"] = rendered.generation
+    save_state(paths, state)
+    changed = set()
+    for role in ROOT_ROLES:
+        path = paths.drop_in(state.prefix, role)
+        _own_directory(path.parent)
+        if _publish(paths, state, path, rendered.drop_ins[role], "drop-in", 0o644):
+            changed.add(role)
+    state.mounts["current"] = rendered.generation
+    save_state(paths, state)
+    return changed
+
+
+def _remove_drop_ins(paths: Paths, state: State, drop_ins: Sequence[Path]) -> None:
+    for path in drop_ins:
+        _remove_recorded(paths, state, path)
+        with contextlib.suppress(OSError):  # the drop-in directory, once it is empty
+            path.parent.rmdir()
+
+
+def _roots_need_render(paths: Paths, state: State) -> bool:
+    """Whether the roots' drop-ins, or the files they bind, are not all in place as recorded:
+    a switch was interrupted, a drop-in is missing, unsettled, changed or binds another
+    generation, or the current generation's files are gone."""
+    current = state.mounts["current"]
+    if state.mounts["installing"] is not None or current is None:
+        return True
+    expected = {role: paths.drop_in(state.prefix, role) for role in ROOT_ROLES}
+    if {str(path) for path in _drop_in_paths(state)} != {str(path) for path in expected.values()}:
+        return True
+    manifest, attestation = paths.manifest(current), paths.attestation(current)
+    if not (os.path.lexists(manifest) and os.path.lexists(attestation)):
+        return True
+    for role, path in expected.items():
+        record = state.files[str(path)]
+        try:
+            content = _read_regular(path)
+        except (OSError, InstallError):
+            return True
+        bound = os.path.realpath(attestation if role == "gateway" else manifest)
+        if (
+            "previous" in record or hashlib.sha256(content).hexdigest() != record["sha256"]
+            or f"\nVolume={bound}:".encode() not in content
+        ):
+            return True
+    return False
+
+
+def _generation_files(
+    paths: Paths, generation: str, record: Mapping[str, Any], *, force: bool,
+) -> tuple[list[Path], list[str]]:
+    """A generation's files that may go, and the problems that keep the others."""
+    removable: list[Path] = []
+    problems: list[str] = []
+    manifest = paths.manifest(generation)
+    info = _lstat(manifest)
+    if info is not None:
+        identity = record.get("manifest")
+        if force or (stat.S_ISREG(info.st_mode) and (identity is None
+                                                     or _same_file(info, identity))):
+            removable.append(manifest)
+        else:
+            problems.append(f"{manifest} is not the manifest aegis-podman prepared")
+    attestation = paths.attestation(generation)
+    info = _lstat(attestation)
+    if info is not None:
+        expected = record.get("attestation")
+        if force or (stat.S_ISREG(info.st_mode) and (expected is None
+                                                     or _file_digest(attestation) == expected)):
+            removable.append(attestation)
+        else:
+            problems.append(f"{attestation} was changed since aegisctl rendered it")
+    return removable, problems
+
+
+def _bound_paths(state: State) -> set[str]:
+    """Every file a recorded drop-in on disk binds, as a resolved path."""
+    bound = set()
+    for path in _drop_in_paths(state):
+        try:
+            content = _read_regular(path).decode("ascii", "replace")
+        except (OSError, InstallError):
+            continue
+        for line in content.splitlines():
+            key, _, value = line.partition("=")
+            if key.strip() == "Volume":
+                bound.add(os.path.realpath(value.split(":")[0]))
+    return bound
+
+
+def _prune_generations(host: Host, paths: Paths, state: State) -> None:
+    """Remove the generations nothing binds any more: not the current one, not one being
+    installed, and none whose manifest or attestation a drop-in on disk binds. A file that
+    is not what aegis-podman wrote stays, with its generation recorded, and a warning says
+    so."""
+    bound = _bound_paths(state)
+    for generation, record in list(state.mounts["generations"].items()):
+        if generation in (state.mounts["current"], state.mounts["installing"]) or any(
+            os.path.realpath(path) in bound
+            for path in (paths.manifest(generation), paths.attestation(generation))
+        ):
+            continue
+        removable, problems = _generation_files(paths, generation, record, force=False)
+        if problems:
+            print(f"aegis-podman: warning: kept {'; '.join(problems)}", file=host.err)
+            continue
+        for path in removable:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(path)
+        del state.mounts["generations"][generation]
+        save_state(paths, state)
+
+
+def _leftover_drop_ins(paths: Paths, state: State) -> bool:
+    """Whether drop-ins are recorded, or a switch is marked, while no root is: an interrupted
+    first ``roots add``. They are checked here and removed, before the next reload, by
+    ``_remove_roots``, because no slot means nothing to render."""
+    drop_ins = _drop_in_paths(state)
+    if state.roots or not (drop_ins or state.mounts["installing"] is not None):
+        return False
+    for path in drop_ins:
+        _check_removable(paths, state, path, force=False)
+    return True
+
+
+def _remove_roots(paths: Paths, state: State) -> set[str]:
+    """The last root goes, and with no slot there is nothing to render: remove every drop-in.
+
+    The manifests and attestations stay until systemd has loaded the units without them;
+    ``_commit_roots`` prunes them then, with aegisctl's configuration. Returns every root
+    role: a rerun after a failed reload has no drop-in left to remove, yet the units still
+    need their restart.
+    """
+    drop_ins = _drop_in_paths(state)
+    for path in drop_ins:
+        _check_removable(paths, state, path, force=False)
+    _remove_drop_ins(paths, state, drop_ins)
+    state.mounts["current"] = None
+    state.mounts["installing"] = None
+    save_state(paths, state)
+    return set(ROOT_ROLES)
+
+
+def _restart_roots(host: Host, state: State, changed: set[str]) -> bool:
+    """Queue a restart of the units whose drop-ins changed, when Aegis should run."""
+    if state.desired != "running":
+        return False
+    known = {*state.units["services"], *state.units["oneshots"]}
+    units = [
+        unit for role in ROOT_ROLES
+        if role in changed and (unit := f"{state.prefix}{role}.service") in known
+    ]
+    if not units:
+        return False
+    _check(host, [*SYSTEMCTL, "--no-block", "restart", *units], "systemctl --user restart",
+           timeout=120)
+    return True
+
+
+def _commit_roots(
+    host: Host, paths: Paths, state: State, roots: Mapping[str, Mapping[str, str]],
+    forget_types: Iterable[str] = (),
+) -> None:
+    """systemd has loaded the drop-ins for ``roots``, and any restart is queued: record them,
+    end the switch, and remove what nothing binds any more. A type in ``forget_types`` that
+    no root uses is no longer covered, so the next host setup loads a module without it."""
+    state.roots = {slot: dict(root) for slot, root in roots.items()}
+    used = {root["selinux_type"] for root in roots.values()}
+    unused = set(forget_types) - used
+    state.selinux_covered = [value for value in state.selinux_covered if value not in unused]
+    _settle(paths, state)
+    # The switch ends only once pruning, which keeps the generation being installed, is done.
+    _prune_generations(host, paths, state)
+    state.mounts["installing"] = None
+    save_state(paths, state)
+    if not roots and str(paths.mounts_config) in state.files:
+        try:
+            _check_removable(paths, state, paths.mounts_config, force=False)
+            _remove_recorded(paths, state, paths.mounts_config)
+        except InstallError as error:
+            print(f"aegis-podman: warning: kept {paths.mounts_config}: {error}", file=host.err)
+
+
+def _apply_roots(
+    host: Host, paths: Paths, state: State, changed: set[str],
+    roots: Mapping[str, Mapping[str, str]], *, rerun: str, forget_types: Iterable[str] = (),
+) -> bool:
+    """Reload systemd and queue any restart; only then commit ``roots`` and prune.
+
+    A failure on the way keeps the record and every file systemd may still bind, so running
+    the same command again finishes the job.
+    """
+    try:
+        _check(host, [*SYSTEMCTL, "daemon-reload"], "systemctl --user daemon-reload",
+               timeout=120)
+        restart = _restart_roots(host, state, changed)
+    except InstallError as error:
+        raise InstallError(f"{error}; nothing was committed, so finish with: {rerun}") from None
+    _commit_roots(host, paths, state, roots, forget_types)
+    return restart
+
+
+def _after_roots(
+    host: Host, state: State, args: argparse.Namespace, restart: bool, changed: set[str],
+) -> int:
+    if restart:
+        _say(host, "Restarting the units whose drop-ins changed")
+        if not _await_ready(host, state, args.timeout):
+            return 1
+        _say(host, "aegis-podman: every unit is active, healthy and on its recorded image")
+    elif not changed:
+        _say(host, "No drop-in changed")
+    else:
+        _say(host, "Aegis is stopped; the roots apply at the next aegis-podman start")
+    return 0
+
+
+def _command_words(args: argparse.Namespace) -> str:
+    """The options that select this install, for the commands a message suggests."""
+    words = [] if args.prefix is None else ["--prefix", args.prefix]
+    words += [] if args.state_home is None else ["--state-home", args.state_home]
+    return "".join(f" {shlex.quote(word)}" for word in words)
+
+
+def _report_pending(
+    host: Host, paths: Paths, state: State, args: argparse.Namespace, slot: str, source: str,
+    selinux_type: str, probe: str | None,
+) -> None:
+    zones = " ".join(f"--zone {zone}" for zone in state.firewall_zones) or "--zone <zone>"
+    rerun = (f"aegis-podman roots add{_command_words(args)} --slot {slot} "
+             f"--source {shlex.quote(source)}")
+    if args.identity is not None:
+        rerun += f" --identity {shlex.quote(args.identity)}"
+    if probe is None:
+        _say(host, f"aegis-podman: {source} is labelled {selinux_type}, which the loaded "
+                   "aegis_reader SELinux module does not cover yet.")
+    else:
+        _say(host, f"aegis-podman: the reader probe could not read {source} as "
+                   f"{state.reader_type}{probe}. Either the host setup has not loaded the "
+                   f"module that covers {selinux_type} yet, or the directory is not readable "
+                   "by its group.")
+    _say(host, f"  The module file covers it: {paths.selinux_module}")
+    _say(host, "  Review it, then write and review the host setup script, and run it with sudo:")
+    _say(host, f"    aegis-podman host-setup{_command_words(args)} {zones}")
+    _say(host, f"    sudo sh {paths.host_setup}")
+    _say(host, "  Then add the root again; a probe checks that the module is loaded:")
+    _say(host, f"    {rerun}")
+
+
+def command_roots(host: Host, paths: Paths, args: argparse.Namespace) -> int:
+    if args.roots_command == "add":
+        return _roots_add(host, paths, args)
+    return _roots_remove(host, paths, args)
+
+
+def _roots_add(host: Host, paths: Paths, args: argparse.Namespace) -> int:
+    """Add a read-only root (spec D11).
+
+    In order: the source is checked and its SELinux type read. A type no probe has proven
+    loaded is probed; when the reader type cannot read the root, the type is added to the
+    module file and the command stops (exit 4) for the operator's host setup. Only then is
+    the release's aegisctl copied
+    out and run (inspect, validate, preflight, render), the manifest prepared, the drop-ins
+    installed and systemd reloaded; a running stack restarts the units whose drop-ins changed.
+    """
+    slot = _slot_argument(args.slot)
+    source = _source_argument(args.source)
+    identity = None if args.identity is None else _identity_argument(args.identity)
+    _check_directories(paths, host.uid, create=False)
+    with _locked(paths):
+        state = _installed_state(paths, host.uid, args)
+        _refuse_pending(state)
+        _check_directories(paths, host.uid, create=True)
+        observed = _check_root_source(paths, state, slot, source)
+        recorded = state.roots.get(slot)
+        if recorded is not None:
+            if recorded["source"] != source:
+                raise InstallError(
+                    f"the slot {slot} already uses {recorded['source']}; remove it first with: "
+                    f"aegis-podman roots remove --slot {slot}"
+                )
+            if identity is not None and identity != recorded["identity"]:
+                raise InstallError(
+                    f"the slot {slot} expects the identity {recorded['identity']}, not {identity}"
+                )
+            identity = recorded["identity"]  # the same root again: render it afresh
+        if identity is not None and identity.startswith("local:") and identity != observed:
+            raise InstallError(
+                f"{source} has the identity {observed}, not {identity}; is it the right "
+                "directory, with its file system mounted?"
+            )
+        selinux_type = _selinux_type(host, source)
+        was_pending = selinux_type in state.selinux_pending
+        probe = None
+        if selinux_type not in state.selinux_covered:
+            # The loaded module may grant it already: it is pending, or a removal forgot it
+            # while the module that grants it is still loaded.
+            readable, probe = _probe_reader(host, state, source, selinux_type)
+            if readable:
+                # Proven for this type only: an older module may grant one pending type and
+                # not another.
+                if was_pending:
+                    state.selinux_pending.remove(selinux_type)
+                state.selinux_covered = sorted({*state.selinux_covered, selinux_type})
+                save_state(paths, state)
+        if selinux_type not in state.selinux_covered:
+            if selinux_type not in state.selinux_pending:
+                state.selinux_pending.append(selinux_type)
+            _write_module(host, paths, state)
+            _settle(paths, state)
+            _report_pending(host, paths, state, args, slot, source, selinux_type,
+                            probe if was_pending else None)
+            return EXIT_MODULE_PENDING
+        _preflight(host, paths)
+        library = _release_library(host, paths, state, state.release, state.images["backend"])
+        inspected = _aegisctl(host, library, "inspect", "--source", source).strip()
+        if inspected != observed:
+            raise InstallError(
+                f"{source} changed while it was being added: aegisctl sees "
+                f"{inspected or 'nothing'}, not {observed}; check it and try again"
+            )
+        roots = {**state.roots, slot: {
+            "source": source, "identity": identity or observed, "selinux_type": selinux_type,
+        }}
+        rendered = _render_roots(host, paths, state, roots, state.release, state.images)
+        changed = _install_drop_ins(paths, state, rendered)
+        restart = _apply_roots(
+            host, paths, state, changed, roots, rerun=f"aegis-podman roots add"
+            f"{_command_words(args)} --slot {slot} --source {shlex.quote(source)}",
+        )
+    _say(host, f"aegis-podman: the root {slot} ({source}, {selinux_type}) is configured")
+    return _after_roots(host, state, args, restart, changed)
+
+
+def _roots_remove(host: Host, paths: Paths, args: argparse.Namespace) -> int:
+    """Remove a root: render the others again, or, for the last one, remove its files.
+
+    With the units uninstalled there are no drop-ins, so only the record changes and install
+    renders the roots left. That way a root that can no longer be observed never blocks
+    install.
+    """
+    slot = _slot_argument(args.slot)
+    _check_directories(paths, host.uid, create=False)
+    with _locked(paths):
+        state = _ready_state(paths, host.uid, args)
+        _refuse_pending(state)
+        if slot not in state.roots:
+            raise InstallError(f"no root uses the slot {slot}")
+        remaining = {name: root for name, root in state.roots.items() if name != slot}
+        forget = [state.roots[slot]["selinux_type"]]
+        if not state.installed:
+            if not remaining:
+                _remove_roots(paths, state)
+            _commit_roots(host, paths, state, remaining, forget)
+            _say(host, f"aegis-podman: removed the root {slot} from the record; the units are "
+                       "not installed, so aegis-podman install renders the roots left")
+            return 0
+        _preflight(host, paths)
+        # The slot stays recorded until systemd has the units without it and their restart
+        # is queued, so a failure on the way leaves a command that can simply be run again.
+        if remaining:
+            rendered = _render_roots(host, paths, state, remaining, state.release, state.images)
+            changed = _install_drop_ins(paths, state, rendered)
+        else:
+            changed = _remove_roots(paths, state)
+        restart = _apply_roots(
+            host, paths, state, changed, remaining, forget_types=forget,
+            rerun=f"aegis-podman roots remove{_command_words(args)} --slot {slot}",
+        )
+    _say(host, f"aegis-podman: removed the root {slot}" + (
+        "" if remaining else "; no root is left, so the drop-ins, manifest and attestation "
+                             "are removed"))
+    return _after_roots(host, state, args, restart, changed)
+
+
+# -- the host-setup script (spec D6, D7) -------------------------------------------------------
+
+
+def _zone_argument(value: str) -> str:
+    if ZONE.fullmatch(value) is None:
+        raise InstallError(
+            f"--zone {value!r} must be a firewalld zone name of 1 to 32 letters, digits, "
+            "underscores or hyphens"
+        )
+    return value
+
+
+def _operator_login(host: Host) -> str:
+    try:
+        name = host.login_name(host.uid)
+    except KeyError:
+        raise InstallError(
+            f"uid {host.uid} has no account name, which the host setup script needs"
+        ) from None
+    if not isinstance(name, str) or LOGIN.fullmatch(name) is None:
+        raise InstallError(
+            f"the account name {name!r} cannot be embedded in the host setup script safely"
+        )
+    return name
+
+
+def _rich_rules(zones: Sequence[str], port: int) -> list[tuple[str, str]]:
+    """Each zone's rich rules: the HTTPS port from each private or VPN source range."""
+    return [
+        (zone, f"rule family={family} source address={source} port port={port} protocol=tcp "
+               "accept")
+        for zone in zones for family, source in PRIVATE_SOURCES
+    ]
+
+
+def _host_setup_script(
+    paths: Paths, login: str, templates: Sequence[str], zones: Sequence[str], port: int,
+    module_digest: str,
+) -> str:
+    """The script the operator reviews and runs with sudo (spec D7).
+
+    It loads the module with exactly the udica templates it inherits, and admits the HTTPS
+    port from the private and VPN ranges in each zone by one rich rule each, added to the
+    permanent and to the runtime configuration only where a query finds it missing. It never
+    reloads firewalld, which would drop the runtime-only rules of other services, never
+    changes a zone's target, adds a service or a port without a source, or removes anything.
+    It loads the module only if its content is still the one this script was written for,
+    and it warns, changing nothing, when a zone already admits the port from everywhere.
+    """
+    quote = shlex.quote
+    lines = [
+        "#!/bin/sh",
+        "# Aegis host setup, written by aegis-podman host-setup (spec D6, D7). Review it, then",
+        f"# run it once with: sudo sh {quote(str(paths.host_setup))}",
+        "#",
+        "# It installs udica if it is missing, loads the aegis_reader SELinux module with the",
+        f"# udica templates it inherits, and admits TCP port {port} only from private and VPN",
+        "# source ranges in the named firewalld zones, in the permanent and the runtime",
+        "# configuration, adding each rule only where it is missing. It never reloads firewalld",
+        "# (that would drop other services' runtime-only rules), changes no zone's target, opens",
+        "# no other port or service, and removes nothing.",
+        "set -eu",
+        "",
+        'if [ "$(id -u)" -ne 0 ]; then',
+        '    echo "aegis host setup: run this script with sudo" >&2',
+        "    exit 1",
+        "fi",
+        f'if [ "${{SUDO_USER:-}}" != {quote(login)} ]; then',
+        f"    echo {quote(f'aegis host setup: run it with sudo from the account {login}')} >&2",
+        "    exit 1",
+        "fi",
+        "",
+        f"if ! printf '%s  %s\\n' {module_digest} {quote(str(paths.selinux_module))} "
+        "| sha256sum --check --status -; then",
+        "    echo " + quote(
+            f"aegis host setup: {paths.selinux_module} changed since this script was written; "
+            "run aegis-podman host-setup again and review both"
+        ) + " >&2",
+        "    exit 1",
+        "fi",
+        "if ! rpm -q udica >/dev/null 2>&1; then",
+        "    dnf install -y udica",
+        "fi",
+        " ".join(["semodule", "-i", quote(str(paths.selinux_module)), *map(quote, templates)]),
+        f"echo {quote(f'loaded the SELinux module {paths.selinux_module}')}",
+        "",
+    ]
+    for zone in zones:
+        lines += [
+            f"target=$(firewall-cmd --permanent --zone={quote(zone)} --get-target)",
+            'if [ "$target" = ACCEPT ]; then',
+            "    echo " + quote(
+                f"aegis host setup: warning: zone {zone} accepts every connection (target "
+                f"ACCEPT), so port {port} is reachable from any source"
+            ) + " >&2",
+            "fi",
+            f"if firewall-cmd --zone={quote(zone)} --query-port={port}/tcp >/dev/null; then",
+            "    echo " + quote(
+                f"aegis host setup: warning: zone {zone} already opens {port}/tcp to every "
+                "source"
+            ) + " >&2",
+            "fi",
+        ]
+        for rule_zone, rule in _rich_rules([zone], port):
+            for scope, option in (("permanent", "--permanent "), ("runtime", "")):
+                command = f"firewall-cmd {option}--zone={quote(rule_zone)}"
+                lines += [
+                    f"if {command} --query-rich-rule={quote(rule)} >/dev/null; then",
+                    f"    echo {quote(f'already present ({scope}) in zone {zone}: {rule}')}",
+                    "else",
+                    f"    {command} --add-rich-rule={quote(rule)} >/dev/null",
+                    f"    echo {quote(f'added ({scope}) to zone {zone}: {rule}')}",
+                    "fi",
+                ]
+    return "\n".join(lines) + "\n"
+
+
+def command_host_setup(host: Host, paths: Paths, args: argparse.Namespace) -> int:
+    """Write the SELinux module and the host-setup script, for the operator to review and
+    run with sudo; the installer itself runs nothing privileged."""
+    zones = list(dict.fromkeys(_zone_argument(zone) for zone in args.zone))
+    _check_directories(paths, host.uid, create=False)
+    with _locked(paths):
+        state = _ready_state(paths, host.uid, args)
+        zones = zones or list(state.firewall_zones)
+        if not zones:
+            raise InstallError(
+                "name each firewalld zone to admit the HTTPS port in with --zone (repeat it "
+                "for more zones)"
+            )
+        login = _operator_login(host)
+        _check_directories(paths, host.uid, create=True)
+        _check_replaceable(state, paths.host_setup)
+        module = _write_module(host, paths, state)
+        script = _host_setup_script(
+            paths, login, _inherited_templates(module), zones, state.https_port,
+            hashlib.sha256(module.encode("utf-8")).hexdigest(),
+        )
+        state.firewall_zones = zones
+        _publish(paths, state, paths.host_setup, script.encode("utf-8"), "host-setup", 0o700)
+        _settle(paths, state)
+    _say(host, f"aegis-podman: wrote the SELinux module {paths.selinux_module}:")
+    _say(host)
+    host.out.write(module)
+    _say(host)
+    _say(host, f"and the host setup script {paths.host_setup}, which loads it:")
+    _say(host)
+    host.out.write(script)
+    _say(host)
+    _say(host, f"Review it and the SELinux module {paths.selinux_module}, then run it with: "
+               f"sudo sh {paths.host_setup}")
+    if state.selinux_pending:
+        _say(host, "Then rerun the aegis-podman roots add command that asked for it.")
+    return 0
+
+
 # -- commands ----------------------------------------------------------------------------------
 
 
@@ -2185,11 +3492,22 @@ def command_install(host: Host, paths: Paths, args: argparse.Namespace) -> int:
             _check_port(host, state.https_port, _containers(host))
         stale = _stale_units(state, units)
         _check_units(paths, state, units, stale)
+        # Roots recorded before an uninstall get their drop-ins back; ones in place are kept.
+        rendered = (
+            _render_roots(host, paths, state, state.roots, state.release, state.images)
+            if state.roots and _roots_need_render(paths, state) else None
+        )
+        leftover = _leftover_drop_ins(paths, state)
         changed = _write_units(host, paths, state, units, stale, DEFAULT_DEADLINE)
+        if rendered is not None:
+            _install_drop_ins(paths, state, rendered)
+        elif leftover:
+            _remove_roots(paths, state)
         _record_inventory(state, inventory, volumes, networks)
         state.installed = True
         _settle(paths, state)
         _check(host, [*SYSTEMCTL, "daemon-reload"], "systemctl --user daemon-reload", timeout=120)
+        _commit_roots(host, paths, state, state.roots)
         socket_unit = inventory["socket"]
         if state.install_sections:
             _check(host, [*SYSTEMCTL, "enable", socket_unit], f"enabling {socket_unit}",
@@ -2284,7 +3602,14 @@ def command_status(host: Host, paths: Paths, args: argparse.Namespace) -> int:
         state, states, observed, expect_running=state.desired == "running",
     )
     _print_status(host, state, states, observed, failed)
-    if state.pending is not None or pending or failed:
+    interrupted = state.mounts["installing"] is not None or (
+        _roots_need_render(paths, state) if state.roots else bool(_drop_in_paths(state))
+    )
+    if interrupted:
+        _say(host, "The roots' drop-ins are not all in place as recorded: an aegis-podman roots "
+                   "or install command was interrupted. Run it again, or run aegis-podman "
+                   "install to render them again.")
+    if state.pending is not None or pending or failed or interrupted:
         return 3
     return 0
 
@@ -2366,7 +3691,7 @@ def _abandon(host: Host, paths: Paths, args: argparse.Namespace, state: State) -
     state.pending = None
     _record_inventory(state, inventory, volumes, networks)
     _write_config(paths, state)
-    _settle(paths, state)
+    _commit_roots(host, paths, state, state.roots)
     _say(host, f"aegis-podman: abandoned the upgrade to {abandoned}; release {state.release}'s "
                "units are installed again")
     if not running:
@@ -2387,8 +3712,18 @@ def _abandon_units(
     stale = _stale_units(state, units)
     _check_units(paths, state, units, stale)
     _check_replaceable(state, paths.env_file)
+    # The drop-ins go back to the current release's aegisctl render too.
+    rendered = (
+        _render_roots(host, paths, state, state.roots, state.release, state.images)
+        if state.roots else None
+    )
+    leftover = _leftover_drop_ins(paths, state)
     running = state.desired == "running"
     changed = _write_units(host, paths, state, units, stale, args.timeout)
+    if rendered is not None:
+        _install_drop_ins(paths, state, rendered)
+    elif leftover:
+        _remove_roots(paths, state)
     _check(host, [*SYSTEMCTL, "daemon-reload"], "systemctl --user daemon-reload", timeout=120)
     if running:
         _queue_restart(host, inventory, changed)
@@ -2435,6 +3770,12 @@ def _upgrade(
     stale = _stale_units(state, units)
     _check_units(paths, state, units, stale)
     _check_replaceable(state, paths.env_file)
+    # The new release's aegisctl renders the drop-ins (their Exec= replaces the template's).
+    # Rendering first leaves nothing pending when a root cannot be observed.
+    rendered = (
+        _render_roots(host, paths, state, state.roots, release, images) if state.roots else None
+    )
+    leftover = _leftover_drop_ins(paths, state)
     state.pending = {"release": release, "images": images, "created": created}
     # Objects the new units may create are recorded now, so a purge finds them either way.
     state.volumes = list(dict.fromkeys([*state.volumes, *volumes]))
@@ -2445,6 +3786,10 @@ def _upgrade(
     running = state.desired == "running"
     try:
         changed = _write_units(host, paths, state, units, stale, args.timeout)
+        if rendered is not None:
+            _install_drop_ins(paths, state, rendered)
+        elif leftover:
+            _remove_roots(paths, state)
         _check(host, [*SYSTEMCTL, "daemon-reload"], "systemctl --user daemon-reload", timeout=120)
         if running:
             # From here on the new release's migrate may run, so going back is a downgrade.
@@ -2461,7 +3806,7 @@ def _upgrade(
     _record_history(state, release)
     _record_inventory(state, inventory, volumes, networks)
     _write_config(paths, state)
-    _settle(paths, state)
+    _commit_roots(host, paths, state, state.roots)
     _say(host, f"aegis-podman: release {release} is current; the previous release tree stays")
     if not running:
         _say(host, "Aegis is stopped, so nothing was restarted; start it with: "
@@ -2613,7 +3958,8 @@ def _uninstall_units(
     host: Host, paths: Paths, state: State, *, force: bool, timeout: float,
 ) -> None:
     units = [Path(path) for path, record in state.files.items() if record.get("kind") == "unit"]
-    for path in units:
+    drop_ins = _drop_in_paths(state)
+    for path in [*units, *drop_ins]:
         _check_removable(paths, state, path, force=force)
     # The recorded inventory, and every unit a recorded file defines, including units only a
     # pending upgrade wrote.
@@ -2637,6 +3983,8 @@ def _uninstall_units(
             wants.unlink()
     for path in units:
         _remove_recorded(paths, state, path)
+    # The roots stay recorded; install renders their drop-ins again.
+    _remove_drop_ins(paths, state, drop_ins)
     state.installed = False
     state.units = {}
     state.pending = None  # its units are gone with the others
@@ -2684,6 +4032,11 @@ def _purge(host: Host, paths: Paths, state: State, *, force: bool) -> list[Path]
                 f"{path} is not the secret aegis-podman created; rerun with --force-recorded "
                 "to remove it anyway"
             )
+    generation_files: list[Path] = []
+    for generation, record in state.mounts["generations"].items():
+        removable_files, found = _generation_files(paths, generation, record, force=force)
+        generation_files += removable_files
+        problems += found
     files = [Path(path) for path in state.files]
     for path in files:
         try:
@@ -2696,16 +4049,20 @@ def _purge(host: Host, paths: Paths, state: State, *, force: bool) -> list[Path]
     for kind, names in removable.items():
         for name in names:
             _check(host, [*PODMAN, kind, "rm", name], f"removing the {kind} {name}", timeout=120)
-    for path in [*secret_files, *files]:
+    for path in [*secret_files, *generation_files, *files]:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(path)
+    for path in _drop_in_paths(state):
+        with contextlib.suppress(OSError):
+            path.parent.rmdir()
     for release in state.releases:
         _remove_empty_directories(paths.releases / release)
     leftovers = _leftovers(paths, state.prefix)
     os.unlink(paths.state)
     with contextlib.suppress(FileNotFoundError):
         os.unlink(paths.lock)
-    for directory in (paths.secrets, paths.releases, paths.config_directory, paths.data):
+    for directory in (paths.secrets, paths.releases, paths.mounts, paths.selinux,
+                      paths.config_directory, paths.data):
         with contextlib.suppress(OSError):
             directory.rmdir()
     return leftovers
@@ -2730,6 +4087,17 @@ def command_uninstall(host: Host, paths: Paths, args: argparse.Namespace) -> int
         leftovers = _purge(host, paths, state, force=args.force_recorded)
     _say(host, "aegis-podman: removed the recorded volumes, networks, secrets and records; "
                "pulled images are kept")
+    if state.firewall_zones:
+        # The installer never runs anything privileged: the operator reviews and runs these.
+        _say(host, "The host setup's firewall rules and SELinux module stay loaded. To undo "
+                   "them, review these commands and run them with sudo. Remove only the rules "
+                   'the script reported as "added": one it found "already present" was there '
+                   "before Aegis and must stay.")
+        for zone, rule in _rich_rules(state.firewall_zones, state.https_port):
+            for option in ("--permanent ", ""):
+                _say(host, f"  firewall-cmd {option}--zone={shlex.quote(zone)} "
+                           f"--remove-rich-rule={shlex.quote(rule)}")
+        _say(host, "  semodule -r aegis_reader")
     if leftovers:
         _say(host, f"Left in place, from an interrupted run: {', '.join(map(str, leftovers))}")
     return 0
@@ -2744,6 +4112,8 @@ COMMANDS: dict[str, Callable[[Host, Paths, argparse.Namespace], int]] = {
     "upgrade": command_upgrade,
     "ca-cert": command_ca_cert,
     "bootstrap-password": command_bootstrap_password,
+    "roots": command_roots,
+    "host-setup": command_host_setup,
     "uninstall": command_uninstall,
 }
 
@@ -2791,7 +4161,7 @@ def _parser() -> argparse.ArgumentParser:
     init.add_argument("--release", required=True, help="the published tag, sha-<commit>")
     init.add_argument("--https-port", required=True, type=int, help="1024 or higher")
     init.add_argument("--name", required=True, action="append",
-                      help="a hostname clients use; repeat for more; the first is canonical")
+                      help="hostname or IP address (repeatable; the first is canonical)")
     init.add_argument("--address", action="append", default=[],
                       help="an IP address clients use; repeat for more")
     init.add_argument("--registry", default=DEFAULT_REGISTRY)
@@ -2825,6 +4195,33 @@ def _parser() -> argparse.ArgumentParser:
     bootstrap = command("bootstrap-password", "create the first administrator")
     bootstrap.add_argument("--username", required=True)
     bootstrap.add_argument("--email", required=True)
+    roots = commands.add_parser(
+        "roots", help="add or remove a read-only original root",
+        description="add or remove a read-only original root", allow_abbrev=False,
+    )
+    actions = roots.add_subparsers(dest="roots_command", required=True, metavar="action")
+    add = actions.add_parser(
+        "add", help="add a root, or render an existing one again", allow_abbrev=False,
+        description="Add a read-only root. When its SELinux type is new, the module is "
+                    "regenerated and the command stops with exit code 4 until a probe shows "
+                    "that the host setup has loaded it.", parents=[common],
+    )
+    add.add_argument("--slot", required=True, help="the root's slot ID, such as photos")
+    add.add_argument("--source", required=True,
+                     help="the existing directory; it is only ever mounted read-only")
+    add.add_argument("--identity",
+                     help="the expected identity, local:<device>:<inode> or "
+                          "remote:<host>:<path> (default: the source's identity now)")
+    deadline(add)
+    remove = actions.add_parser("remove", help="remove a root", description="remove a root",
+                                allow_abbrev=False, parents=[common])
+    remove.add_argument("--slot", required=True, help="the root's slot ID")
+    deadline(remove)
+    host_setup = command("host-setup", "write the SELinux module and the firewall and SELinux "
+                                       "host setup script, for you to review and run with sudo")
+    host_setup.add_argument("--zone", action="append", default=[],
+                            help="a firewalld zone to admit the HTTPS port in, from private "
+                                 "sources only; repeat for more (default: the recorded zones)")
     uninstall = command("uninstall", "stop and remove the recorded units")
     uninstall.add_argument("--purge-data", action="store_true",
                            help="also remove the recorded volumes, networks, secrets and records")

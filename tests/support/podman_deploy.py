@@ -6,12 +6,13 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import textwrap
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 from types import ModuleType
@@ -240,7 +241,11 @@ SAMPLE_CREATED = {
     SAMPLE_THIRD_RELEASE: "2026-10-08T08:15:42.123456789Z",
 }
 RELEASE_SOURCE_TREE = REPOSITORY / "deploy" / "podman"
+# The backend image carries the aegisctl package the installer runs on the host (roots).
+LIBRARY_SOURCE_TREE = REPOSITORY / "backend" / "aegisctl"
 PODMAN = ("podman", "--remote=false")
+# How the installer runs the release's aegisctl on the host Python.
+AEGISCTL = (sys.executable, "-B", "-P", "-S", "-m", "aegisctl")
 SYSTEMCTL = ("systemctl", "--user")
 # A structurally valid stand-in for Caddy's root certificate: one DER SEQUENCE, PEM-armored.
 SAMPLE_CERTIFICATE_DER = bytes([0x30, 0x82, 0x01, 0x00]) + bytes(range(256))
@@ -275,14 +280,21 @@ class FakeClock:
 
 
 class FakeSystem:
-    """Podman, systemd, loginctl, chcon and ip for the installer, as in-memory state.
+    """Podman, systemd, loginctl, chcon, ip and aegisctl for the installer, as in-memory state.
 
     It records every argument vector and refuses any program it does not know. It reports
     only states real systemd reports: a unit whose start fails on a dependency is left
     inactive with Result=success and no job, and an empty Job property is left out. Starting
     units reads the installed unit files the way Quadlet does: volumes and networks appear
     with their labels, and a container runs the image its unit file names when it is
-    (re)created. It writes nothing but the ``podman cp`` destination and ``--cidfile`` files.
+    (re)created. It writes nothing but the ``podman cp`` destination and ``--cidfile`` files,
+    and what aegisctl writes.
+
+    aegisctl runs against the extracted library: ``inspect`` and ``validate`` really run it on
+    this Python with the installer's argument vector and environment. ``preflight`` and
+    ``render`` parse their arguments with aegisctl's own parser and then call its library
+    directly, with made-up observer fingerprints in place of the podman-run observer and the
+    invoking group in place of the operator's (the record's group is a sample value).
     """
 
     def __init__(self) -> None:
@@ -313,7 +325,9 @@ class FakeSystem:
         self.created_labels: dict[str, str | None] = dict(SAMPLE_CREATED)
         self.missing_images: set[str] = set()
         self.release_tree = RELEASE_SOURCE_TREE
+        self.library_tree = LIBRARY_SOURCE_TREE
         self.tree_hook: Any = None
+        self.library_hook: Callable[[Path], None] | None = None
         self.release_hooks: dict[str, Callable[[Path], None]] = {}
         self.unit_directory: Path | None = None
         self.units: dict[str, dict[str, str]] = {}
@@ -329,20 +343,43 @@ class FakeSystem:
         self.ca_output = sample_certificate()
         self.run_output = "user_id=1 created=true\n"
         self.counter = 0
+        # What chcon labelled and podman unshare chown handed over, in order.
+        self.labelled: list[str] = []
+        self.chowned: dict[str, str] = {}
+        # Every aegisctl run: its argument vector and environment.
+        self.aegisctl_runs: list[tuple[tuple[str, ...], dict[str, str]]] = []
+        self.host_gid = SAMPLE_HOST_GID
+        # SELinux as the reader probe meets it: each source's label (shared with the test's
+        # fake xattrs) and the types whose read rules the loaded module grants.
+        self.labels: dict[str, bytes] = {}
+        self.loaded_types: set[str] = set()
+        # Probe containers that still exist, by name: an interrupted podman run leaves one.
+        self.probe_containers: dict[str, dict[str, Any]] = {}
+        self.probes: list[tuple[str, ...]] = []
 
     # -- plumbing --------------------------------------------------------------------------
     def __call__(
-        self, arguments: Sequence[str], *, timeout: float,
+        self, arguments: Sequence[str], *, timeout: float, env: Mapping[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         assert timeout > 0
         command = tuple(arguments)
         assert all(isinstance(word, str) for word in command), command
         self.calls.append(command)
+        if command[: len(AEGISCTL)] == AEGISCTL:
+            assert env is not None, command
+            self.aegisctl_runs.append((command, dict(env)))
+        else:
+            assert env is None, command
         if self.intercept is not None and (answer := self.intercept(command)) is not None:
             return subprocess.CompletedProcess(list(command), *answer)
         for prefix, (code, stdout, stderr) in self.failures.items():
             if command[: len(prefix)] == prefix:
                 return subprocess.CompletedProcess(list(command), code, stdout, stderr)
+        if command[: len(AEGISCTL)] == AEGISCTL:
+            assert env is not None
+            return subprocess.CompletedProcess(
+                list(command), *self.aegisctl(command[len(AEGISCTL):], env),
+            )
         if command[:2] == PODMAN:
             code, stdout = self.podman(command[2:])
         elif command[:2] == SYSTEMCTL:
@@ -354,6 +391,7 @@ class FakeSystem:
             code, stdout = 0, f"{self.linger}\n"
         elif command[:4] == ("chcon", "-h", "-t", "container_file_t") and len(command) == 5:
             assert Path(command[4]).is_file() and not Path(command[4]).is_symlink(), command
+            self.labelled.append(command[4])
             code, stdout = 0, ""
         elif command[:2] == ("ip", "-j"):
             code, stdout = self.routes(command[2:])
@@ -444,6 +482,9 @@ class FakeSystem:
             case ("cp", source, destination):
                 identifier, _, path = source.partition(":")
                 assert identifier in self.created and identifier not in self.removed, source
+                if path == "/app/backend/aegisctl":
+                    self.copy_library(Path(destination), self.created_from[identifier])
+                    return 0, ""
                 assert path == "/usr/share/aegis/podman", source
                 self.copy_release_tree(Path(destination), self.created_from[identifier])
                 return 0, ""
@@ -453,9 +494,12 @@ class FakeSystem:
                     return 1, ""
                 self.removed.append(identifier)
                 return 0, identifier + "\n"
-            case ("unshare", "chown", "-h", "10001:10001" | "10001:0", path):
+            case ("unshare", "chown", "-h", "10001:10001" | "10001:0" as owner, path):
                 assert Path(path).is_file() and not Path(path).is_symlink(), path
+                self.chowned[path] = owner
                 return 0, ""
+            case ("container", "inspect", name) if name in self.probe_containers:
+                return 0, json.dumps([self.probe_containers[name]])
             case ("container", "inspect", name):
                 service = f"{name}.service"
                 if self.units.get(service, {}).get("ActiveState") != "active":
@@ -467,6 +511,18 @@ class FakeSystem:
                 }])
             case ("exec", _container, "cat", "/data/caddy/pki/authorities/local/root.crt"):
                 return 0, self.ca_output
+            case ("run", "--rm", "--pull", "never", "--network", "none", "--name", name,
+                  "--label", label, *rest) if label.startswith("aegis.probe="):
+                return self.probe(name, label, tuple(rest))
+            case ("container", "exists", name):
+                return (0 if name in self.probe_containers else 1), ""
+            case ("rm", "--force", "--ignore", identifier):
+                found = [name for name, entry in self.probe_containers.items()
+                         if entry["Id"] == identifier]
+                assert found, f"removal of a foreign container {identifier}"
+                del self.probe_containers[found[0]]
+                self.removed.append(identifier)
+                return 0, identifier + "\n"
             case ("run", "--rm", *_rest):
                 return 0, self.run_output
         raise AssertionError(f"unexpected podman call {words}")
@@ -491,6 +547,95 @@ class FakeSystem:
                 if not (Path(directory) / name).is_symlink():
                     (Path(directory) / name).chmod(0o555)
         destination.chmod(0o555)
+
+    def probe(self, name: str, label: str, rest: tuple[str, ...]) -> tuple[int, str]:
+        """The reader probe: SELinux as ``loaded_types`` says, then the probe's own script,
+        run by this shell against the real source, so real permissions decide the rest."""
+        self.probes.append((name, label, *rest))
+        assert "label=type:aegis_reader.process" in rest, rest
+        volume = rest[rest.index("-v") + 1]
+        source = volume.split(":")[0]
+        assert volume == f"{source}:/srv/aegis/probe:ro", volume  # never a relabel option
+        selinux_type = self.labels[source].rstrip(b"\0").decode("ascii").split(":", 3)[2]
+        if selinux_type not in self.loaded_types:
+            return 1, ""
+        script_at = rest.index("-c")
+        script = rest[script_at + 1].replace("/srv/aegis/probe", source)
+        result = subprocess.run(
+            ["/bin/sh", "-c", script, *rest[script_at + 2:]], check=False,
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60,
+        )
+        return result.returncode, ""
+
+    def run_host_setup(self, module: Path) -> None:
+        """What the operator's sudo run of the script does to SELinux: load this module."""
+        self.loaded_types = set(re.findall(
+            r"\(allow process ([a-z0-9_]+) \(dir ", module.read_text(encoding="utf-8"),
+        ))
+
+    def copy_library(self, destination: Path, image: str) -> None:
+        """Copy the backend image's aegisctl package, read-only as the image ships it."""
+        assert not destination.exists(), destination
+        self.release_of(image)
+        shutil.copytree(
+            self.library_tree, destination,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
+        if self.library_hook is not None:
+            self.library_hook(destination)
+        for directory, subdirectories, files in os.walk(destination, topdown=False):
+            for name in files:
+                (Path(directory) / name).chmod(0o444)
+            for name in subdirectories:
+                (Path(directory) / name).chmod(0o555)
+        destination.chmod(0o555)
+
+    def aegisctl(self, words: tuple[str, ...], env: Mapping[str, str]) -> tuple[int, str, str]:
+        """``python -m aegisctl`` against the installer's extracted copy of the package."""
+        from aegisctl import cli, mounts
+
+        library = Path(env["PYTHONPATH"])
+        assert (library / "aegisctl" / "__main__.py").is_file(), library
+        assert env.get("AEGIS_CONTAINER_ENGINE") == "podman", env
+        assert not [key for key in env if key.startswith("PYTHON") and key != "PYTHONPATH"], env
+        try:
+            args = cli._parser().parse_args(list(words))
+            cli._check_choice_options(args)
+        except SystemExit:
+            raise AssertionError(f"aegisctl refuses the arguments {words}") from None
+        if args.mount_command in ("inspect", "validate"):
+            result = subprocess.run(
+                [*AEGISCTL, *words], env=dict(env), check=False, stdin=subprocess.DEVNULL,
+                capture_output=True, text=True, timeout=60,
+            )
+            return result.returncode, result.stdout, result.stderr
+        try:
+            if args.mount_command == "preflight":
+                assert args.observer == "podman-run" and args.host_gid == self.host_gid, args
+                assert not Path(args.manifest).exists(), "the manifest path is fresh"
+                validated = tuple(
+                    replace(slot, mount_fingerprint=hashlib.sha256(
+                        f"{slot.slot_id}:{slot.source}".encode()).hexdigest())
+                    for slot in mounts.preflight_slots(mounts.parse_config(args.config))
+                )
+                digest = mounts.write_manifest(
+                    args.manifest, validated, uid=os.geteuid(), gid=os.getegid(),
+                )
+                return 0, json.dumps({"status": "preflighted", "manifestSha256": digest}) + "\n", ""
+            assert args.mount_command == "render" and args.format == "quadlet", args
+            assert args.host_gid == self.host_gid, args
+            # aegisctl reads the manifest as the operator: it must not be handed over yet.
+            assert str(args.manifest) not in self.chowned, "render needs a fresh manifest"
+            result = mounts.render_quadlet_artifacts(
+                args.config, args.manifest, args.output_dir, args.gateway_attestation,
+                unit_prefix=args.unit_prefix, host_gid=os.getegid(),
+            )
+        except mounts.ConfigError as error:
+            return 2, "", json.dumps({"status": "error", "message": str(error)}) + "\n"
+        return 0, json.dumps({
+            "status": "rendered", "manifestSha256": result.manifest_digest,
+            "gatewayAttestationSha256": result.gateway_digest,
+        }) + "\n", ""
 
     def systemctl(self, words: tuple[str, ...]) -> tuple[int, str]:
         match words:
@@ -567,7 +712,8 @@ class FakeSystem:
         if self.unit_directory is None or not self.unit_directory.is_dir():
             return
         for path in sorted(self.unit_directory.iterdir()):
-            if not path.name.startswith(self.prefix):
+            # <unit>.container.d/ holds drop-ins, which extend a unit rather than define one.
+            if not path.name.startswith(self.prefix) or not path.is_file():
                 continue
             unit = parse_unit(path.read_text(encoding="utf-8"))
             if path.suffix == ".volume":

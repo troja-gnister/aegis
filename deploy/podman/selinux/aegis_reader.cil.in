@@ -1,0 +1,15 @@
+; The aegis_reader SELinux module (spec D6), rendered by aegis-podman. The containers that
+; mount originals (gateway, operations, indexer and media) run as aegis_reader.process.
+; The token in the block below becomes read-only rules (dir, file and lnk_file) for each
+; root type the module covers; nothing here may grant a write.
+;
+; It inherits udica's base container template and its full network template, net_container,
+; which gives the network access container_t normally has. The roles listen (the gateway on
+; 8080 and 8081) and connect on ports that are not http_port_t (web on 8000, PostgreSQL);
+; restricted_net_container allows name_connect to http_port_t only and no name_bind, so it
+; would deny them. The host-setup script loads exactly the udica templates inherited here.
+(block aegis_reader
+    (blockinherit container)
+    (blockinherit net_container)
+    @@READ_RULES@@
+)

@@ -245,7 +245,7 @@
 ```
 (block aegis_reader
     (blockinherit container)
-    (blockinherit restricted_net_container)
+    (blockinherit net_container)
     @@READ_RULES@@
 )
 ```
@@ -255,14 +255,15 @@
   - `(allow process T (file (getattr open read map ioctl lock)))`;
   - `(allow process T (lnk_file (getattr read)))`.
 - Process type name: `aegis_reader.process`.
-- Check `restricted_net_container` against udica's templates during the host run. If it blocks the gateway's or workers' network use, use `net_container`, and record the reason.
+- `net_container`, not `restricted_net_container`: the roles listen (PostgreSQL, web, the gateway) and connect on non-HTTP ports, which the restricted template denies (Task 5b review).
+- Whether the module is loaded is proven without root: a throwaway `podman run` with the reader type must succeed.
 
 **Host-setup script** (`aegis-podman host-setup` writes it to `~/.local/share/aegis/host-setup.sh`, mode 0700, and prints the path and its contents). It:
 - uses `set -eu`;
 - checks it runs as root via sudo with `SUDO_USER` equal to the operator;
 - installs `udica` if missing (`dnf install -y udica`);
 - runs `semodule -i <module> /usr/share/udica/templates/{base_container.cil,net_container.cil}`, with the exact templates used;
-- for each operator-named firewalld zone and each private source range, adds a permanent rich rule (`rule family=ipv4|ipv6 source address=<range> port port=<p> protocol=tcp accept`), then runs `firewall-cmd --reload`;
+- for each operator-named firewalld zone and each private source range, adds the rich rule (`rule family=ipv4|ipv6 source address=<range> port port=<p> protocol=tcp accept`) to both the permanent and the runtime configuration, idempotently. It never runs `--reload`, which would drop other services' runtime-only rules;
 - prints the rules it added.
 
 It never changes zone targets or services and never touches other rules. Zones are `host-setup --zone <z>` arguments, stored in state. The firewall ranges are those in D7.
