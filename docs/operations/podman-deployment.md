@@ -64,7 +64,7 @@ Commands that wait for systemd (`start`, `stop`, `upgrade`, `roots add`, `roots 
 | `~/.config/containers/systemd/` | The Quadlet units `aegis-*.container`, `.network` and `.volume`, and the root drop-ins `aegis-<role>.container.d/50-aegis-roots.conf`. |
 | `~/.config/systemd/user/aegis-caddy.socket` | The HTTPS socket unit. |
 
-The installer's own directories must be real directories owned by you, mode 0700. The configuration directory follows `XDG_CONFIG_HOME` when it is set; the data directory is always `~/.local/share/aegis`.
+The installer's own directories must be real directories owned by you, mode 0700. The configuration directory follows `XDG_CONFIG_HOME` when it is set to an absolute path (a relative value is ignored, as the systemd user manager ignores it); the data directory is always `~/.local/share/aegis`.
 
 ## Bootstrap
 

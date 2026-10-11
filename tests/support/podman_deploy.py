@@ -324,6 +324,8 @@ class FakeSystem:
         # The backend image's org.opencontainers.image.created label, per release.
         self.created_labels: dict[str, str | None] = dict(SAMPLE_CREATED)
         self.missing_images: set[str] = set()
+        # Images a deployment test built locally, by ID: their role and test release.
+        self.local_images: dict[str, tuple[str, str]] = {}
         self.release_tree = RELEASE_SOURCE_TREE
         self.library_tree = LIBRARY_SOURCE_TREE
         self.tree_hook: Any = None
@@ -332,6 +334,8 @@ class FakeSystem:
         self.unit_directory: Path | None = None
         self.units: dict[str, dict[str, str]] = {}
         self.running_images: dict[str, str] = {}
+        # The name Podman reports per container when it differs from the unit's reference.
+        self.reported_image_names: dict[str, str] = {}
         self.after_start: dict[str, dict[str, str]] = {}
         self.unhealthy: set[str] = set()
         self.created: list[str] = []
@@ -407,6 +411,8 @@ class FakeSystem:
         return f"{self.counter:064x}"
 
     def release_of(self, image: str) -> str:
+        if image in self.local_images:
+            return self.local_images[image][1]
         for release in self.published:
             if image.endswith(image_digest("backend", release)):
                 return release
@@ -455,6 +461,24 @@ class FakeSystem:
                 if release not in self.published:
                     return 125, ""
                 return 0, image_digest(repository, release)[7:] + "\n"
+            case ("image", "inspect", "--format", "{{.Id}}", reference):
+                if reference in self.missing_images or (
+                    re.fullmatch(r"[0-9a-f]{64}", reference) and reference not in self.local_images
+                ):
+                    return 125, ""
+                return 0, self.image_id_for(reference) + "\n"
+            case ("image", "inspect", reference) if re.fullmatch(r"[0-9a-f]{64}", reference):
+                if reference not in self.local_images:
+                    return 125, ""
+                role, release = self.local_images[reference]
+                created = self.created_labels.get(release)
+                return 0, json.dumps([{
+                    "Id": reference, "Digest": "sha256:" + "f" * 64, "RepoDigests": [],
+                    "RepoTags": [f"localhost/aegis-{role}:{release}"],
+                    "Labels": {} if created is None else {
+                        "org.opencontainers.image.created": created,
+                    },
+                }])
             case ("image", "inspect", reference):
                 repository, _, release = reference.rpartition(":")
                 role = repository.rpartition("/aegis-")[2]
@@ -468,7 +492,8 @@ class FakeSystem:
             case ("image", "exists", reference):
                 return (1 if reference in self.missing_images else 0), ""
             case ("create", "--pull=never", "--network=none", cidfile, image, "python3"):
-                assert "@sha256:" in image and cidfile.startswith("--cidfile="), words
+                assert "@sha256:" in image or image in self.local_images, words
+                assert cidfile.startswith("--cidfile="), words
                 identifier = self.new_id()
                 self.created.append(identifier)
                 self.created_from[identifier] = image
@@ -505,8 +530,12 @@ class FakeSystem:
                 if self.units.get(service, {}).get("ActiveState") != "active":
                     return 125, ""
                 status = "starting" if name in self.unhealthy else "healthy"
+                reference = self.running_images.get(name, "")
                 return 0, json.dumps([{
-                    "Name": name, "ImageName": self.running_images.get(name, ""),
+                    # Like Podman: the name it resolved (here a local tag stands in for a
+                    # digest or ID), plus the image ID the container actually runs.
+                    "Name": name, "ImageName": self.reported_image_names.get(name, reference),
+                    "Image": self.image_id_for(reference) if reference else "",
                     "State": {"Health": {"Status": status}},
                 }])
             case ("exec", _container, "cat", "/data/caddy/pki/authorities/local/root.crt"):
@@ -666,6 +695,13 @@ class FakeSystem:
                     blocks.append("\n".join(f"{key}={value}" for key, value in values.items()))
                 return 0, "\n\n".join(blocks) + "\n"
         raise AssertionError(f"unexpected systemctl call {words}")
+
+    @staticmethod
+    def image_id_for(reference: str) -> str:
+        """The image ID a reference resolves to: a local ID is itself, a digest its own hash."""
+        if re.fullmatch(r"[0-9a-f]{64}", reference):
+            return reference
+        return hashlib.sha256(reference.encode("utf-8")).hexdigest()
 
     def unit(self, name: str) -> dict[str, str]:
         default = {"Id": name, "LoadState": "loaded" if self.has_source(name) else "not-found",

@@ -76,6 +76,21 @@ GENERATED = {f"{SAMPLE_PREFIX}{name}-volume.service" for name in VOLUME_NAMES} |
     f"{SAMPLE_PREFIX}{name}-network.service" for name in NETWORK_NAMES
 }
 INSTALL_LABEL = "io.aegis.install"
+# A deployment-test stack (spec D12): its own prefix, images built locally and referenced by
+# ID, a test release literal and plain container_t readers. Synthetic values only.
+TEST_PREFIX = "aegis-test-0f3a-"
+TEST_RELEASE = "test-0f3a5c7e"
+TEST_OTHER_RELEASE = "test-9b2d4e6f"
+LOCAL_IDS = {role: hashlib.sha256(f"local:{role}".encode()).hexdigest() for role in ROLES}
+OTHER_LOCAL_IDS = {role: hashlib.sha256(f"other:{role}".encode()).hexdigest() for role in ROLES}
+LOCAL_IMAGES = ",".join(f"{role}={LOCAL_IDS[role]}" for role in ROLES)
+OTHER_LOCAL_IMAGES = ",".join(f"{role}={OTHER_LOCAL_IDS[role]}" for role in ROLES)
+DIGEST_D = f"sha256:{'d' * 64}"
+TEST_INIT = (
+    "init", "--release", TEST_RELEASE, "--https-port", str(SAMPLE_PORT),
+    "--name", NAMES[0], "--address", NAMES[1], "--local-images", LOCAL_IMAGES,
+    "--reader-type", "container_t",
+)
 
 
 def expected_image(role: str, release: str = SAMPLE_RELEASE) -> str:
@@ -723,7 +738,10 @@ def test_a_failed_record_write_keeps_the_previous_record(
 @pytest.mark.parametrize("damage", [
     "symlink", "shared", "unknown-version", "extra-key", "json", "wrong-type", "boolean-port",
     "installed-without-inventory", "malformed-file-entry", "malformed-pending", "empty-token",
-    "test-prefix-with-install-sections", "malformed-restart-flag",
+    "test-prefix-with-install-sections", "malformed-restart-flag", "production-local-images",
+    "production-container-t", "unknown-reader-type", "test-release-without-local-images",
+    "malformed-local-images", "production-pending-local-images",
+    "production-pending-test-release", "malformed-pending-local-images",
 ])
 def test_an_unsafe_or_unknown_record_is_refused(tmp_path: Path, damage: str) -> None:
     installer = load_installer()
@@ -741,6 +759,22 @@ def test_an_unsafe_or_unknown_record_is_refused(tmp_path: Path, damage: str) -> 
                                               "install_sections": True},
         "malformed-restart-flag": {"pending": {"release": SAMPLE_OTHER_RELEASE, "images": {},
                                                "restart_queued": "yes"}},
+        # The deployment test's options never apply to the production prefix.
+        "production-local-images": {"local_images": True},
+        "production-container-t": {"reader_type": "container_t"},
+        "unknown-reader-type": {"prefix": TEST_PREFIX, "install_sections": False,
+                                "reader_type": "unconfined_t"},
+        "test-release-without-local-images": {"prefix": TEST_PREFIX, "install_sections": False,
+                                              "release": TEST_RELEASE},
+        "malformed-local-images": {"local_images": "yes"},
+        "production-pending-local-images": {"pending": {
+            "release": SAMPLE_OTHER_RELEASE, "images": {}, "local_images": True,
+        }},
+        "production-pending-test-release": {"pending": {"release": TEST_RELEASE, "images": {}}},
+        "malformed-pending-local-images": {
+            "prefix": TEST_PREFIX, "install_sections": False,
+            "pending": {"release": SAMPLE_OTHER_RELEASE, "images": {}, "local_images": "yes"},
+        },
     }
     if damage == "symlink":
         target = tmp_path / "elsewhere.json"
@@ -909,10 +943,21 @@ def test_xdg_config_home_is_honored_and_xdg_data_home_is_not(rig: Rig, tmp_path:
     assert rig("status") == 3, rig.output()
 
 
-def test_a_relative_xdg_config_home_is_refused(rig: Rig) -> None:
-    rig.environ = {"XDG_CONFIG_HOME": "relative/place"}
-    rig.refused(*INIT, match="XDG_CONFIG_HOME")
-    assert not rig.system.calls
+def test_relative_xdg_directories_are_ignored_as_the_spec_says(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A relative XDG value is invalid and ignored, as systemd itself ignores it: units go
+    # where the user manager reads them, and nothing appears beside the working directory.
+    working = tmp_path / "working"
+    working.mkdir()
+    monkeypatch.chdir(working)
+    rig.environ = {"XDG_CONFIG_HOME": "relative/place", "XDG_DATA_HOME": "relative/data"}
+
+    rig.install()
+    assert (rig.home / ".config" / "containers" / "systemd" / f"{SAMPLE_PREFIX}web.container"
+            ).is_file()
+    assert rig.state_path == rig.home / ".local" / "share" / "aegis" / "state.json"
+    assert list(working.iterdir()) == []
 
 
 def test_a_user_manager_reading_units_elsewhere_is_refused(rig: Rig, tmp_path: Path) -> None:
@@ -961,8 +1006,10 @@ def test_a_relative_state_home_is_refused(rig: Rig) -> None:
 
 
 def no_install_sections(rig: Rig) -> None:
-    for path in [*rig.quadlet_units.iterdir(), *rig.user_units.iterdir()]:
-        assert "[Install]" not in path.read_text(encoding="utf-8"), path.name
+    """No unit file or drop-in has an [Install] section."""
+    for path in [*rig.quadlet_units.rglob("*"), *rig.user_units.iterdir()]:
+        if path.is_file():
+            assert "[Install]" not in path.read_text(encoding="utf-8"), path.name
 
 
 def test_install_can_leave_out_every_install_section_and_the_choice_sticks(rig: Rig) -> None:
@@ -1007,6 +1054,254 @@ def test_switching_install_sections_needs_an_explicit_flag(rig: Rig) -> None:
     no_install_sections(rig)
     # The link enable made goes again.
     assert (*SYSTEMCTL, "disable", SOCKET) in rig.system.calls[first:]
+
+
+# -- the deployment test's local images and container_t readers (spec D12) ---------------------
+
+
+def make_test_stack(rig: Rig, tmp_path: Path) -> None:
+    """Point the rig at a deployment-test stack: its own state home and prefix, and images
+    that exist only in local storage."""
+    rig.extra = ("--state-home", str(tmp_path / "harness"), "--prefix", TEST_PREFIX)
+    rig.data = rig.config_directory = tmp_path / "harness"
+    rig.system.prefix = TEST_PREFIX
+    rig.system.local_images = {LOCAL_IDS[role]: (role, TEST_RELEASE) for role in ROLES} | {
+        OTHER_LOCAL_IDS[role]: (role, TEST_OTHER_RELEASE) for role in ROLES
+    }
+
+
+def without(arguments: tuple[str, ...], flag: str) -> list[str]:
+    """``arguments`` without ``flag`` and its value."""
+    index = arguments.index(flag)
+    return [*arguments[:index], *arguments[index + 2:]]
+
+
+def replaced(arguments: tuple[str, ...], flag: str, value: str) -> list[str]:
+    changed = list(arguments)
+    changed[changed.index(flag) + 1] = value
+    return changed
+
+
+def test_a_test_stack_runs_local_images_as_container_t_without_pulling(
+    rig: Rig, tmp_path: Path,
+) -> None:
+    make_test_stack(rig, tmp_path)
+
+    assert rig(*TEST_INIT) == 0, rig.output()
+    state = rig.state()
+    assert state["release"] == TEST_RELEASE
+    assert state["images"] == LOCAL_IDS
+    assert state["local_images"] is True
+    assert state["reader_type"] == "container_t"
+    assert state["install_sections"] is False
+    assert not rig.system.commands(*PODMAN, "pull")
+    assert [call[4:] for call in rig.system.commands(*PODMAN, "image", "inspect")] == [
+        (LOCAL_IDS[role],) for role in ROLES
+    ]
+    # The release tree comes out of the local backend image, by its ID.
+    (create,) = rig.system.commands(*PODMAN, "create")
+    assert create[-2] == LOCAL_IDS["backend"]
+
+    assert rig("install", "--no-install-sections") == 0, rig.output()
+    assert rig("start") == 0, rig.output()
+    no_install_sections(rig)
+    assert not rig.system.commands(*SYSTEMCTL, "enable")
+    for service, role in (("web", "backend"), ("gateway", "gateway"), ("postgres", "postgres"),
+                          ("caddy", "caddy")):
+        unit = parse_unit((rig.quadlet_units / f"{TEST_PREFIX}{service}.container").read_text())
+        assert unit.value("Container", "Image") == LOCAL_IDS[role], service
+    for service in ("operations", "indexer", "media", "gateway"):
+        unit = parse_unit((rig.quadlet_units / f"{TEST_PREFIX}{service}.container").read_text())
+        assert unit.value("Container", "SecurityLabelType") == "container_t", service
+
+
+def test_readiness_compares_image_ids_not_the_name_podman_reports(
+    rig: Rig, tmp_path: Path,
+) -> None:
+    # Measured on the real host (deployment harness run 1): Podman reports a container created
+    # from an image ID by the image's local tag, so comparing names never saw a current one.
+    make_test_stack(rig, tmp_path)
+    assert rig(*TEST_INIT) == 0, rig.output()
+    assert rig("install", "--no-install-sections") == 0, rig.output()
+    roles = {"postgres": "postgres", "web": "backend", "operations": "backend",
+             "indexer": "backend", "media": "backend", "gateway": "gateway", "caddy": "caddy"}
+    for service, role in roles.items():
+        rig.system.reported_image_names[f"{TEST_PREFIX}{service}"] = (
+            f"localhost/aegis-{role}:deploy-check"
+        )
+
+    assert rig("start") == 0, rig.output()
+    assert "stale" not in rig.output()
+    assert rig("status") == 0, rig.output()
+    assert "image=current" in rig.output()
+
+
+def test_local_images_are_refused_for_the_production_prefix(rig: Rig) -> None:
+    rig.refused(*INIT, "--local-images", LOCAL_IMAGES, match="--local-images .*--prefix")
+    rig.fresh_output()
+    rig.refused(*INIT, "--prefix", SAMPLE_PREFIX, "--local-images", LOCAL_IMAGES,
+                match="--local-images .*--prefix")
+    assert not rig.system.calls
+
+
+@pytest.mark.parametrize("value", [
+    "",
+    ",".join(f"{role}={LOCAL_IDS[role]}" for role in ROLES[:3]),
+    f"{LOCAL_IMAGES},backend={LOCAL_IDS['backend']}",
+    f"{LOCAL_IMAGES},worker={'0' * 64}",
+    LOCAL_IMAGES.replace(LOCAL_IDS["caddy"], "A" * 64),
+    LOCAL_IMAGES.replace(LOCAL_IDS["caddy"], "0" * 63),
+    LOCAL_IMAGES.replace(LOCAL_IDS["caddy"], "g" * 64),
+    LOCAL_IMAGES.replace(LOCAL_IDS["caddy"], f"sha256:{'0' * 64}"),
+    LOCAL_IMAGES.replace(LOCAL_IDS["caddy"], f"registry.example.test/aegis-caddy@{DIGEST_D}"),
+    LOCAL_IMAGES.replace(f"caddy={LOCAL_IDS['caddy']}", LOCAL_IDS["caddy"]),
+], ids=["empty", "missing-role", "repeated-role", "unknown-role", "uppercase", "short",
+        "not-hex", "digest-prefix", "repository-digest", "no-role"])
+def test_malformed_local_images_are_refused_before_anything_runs(
+    rig: Rig, tmp_path: Path, value: str,
+) -> None:
+    make_test_stack(rig, tmp_path)
+
+    rig.refused(*replaced(TEST_INIT, "--local-images", value), match="--local-images")
+    assert not rig.system.calls
+    assert not (tmp_path / "harness").exists()
+
+
+def test_a_test_release_needs_local_images(rig: Rig, tmp_path: Path) -> None:
+    make_test_stack(rig, tmp_path)
+
+    rig.refused(*without(TEST_INIT, "--local-images"), match="test release.*--local-images")
+    assert not rig.system.calls
+
+
+def test_a_local_image_missing_from_local_storage_is_refused(rig: Rig, tmp_path: Path) -> None:
+    make_test_stack(rig, tmp_path)
+    del rig.system.local_images[LOCAL_IDS["gateway"]]
+
+    rig.refused(*TEST_INIT, match=f"{LOCAL_IDS['gateway']} .*not in local storage")
+    assert not rig.system.commands(*PODMAN, "create")
+    assert not (rig.data / "secrets").exists() or not any((rig.data / "secrets").iterdir())
+
+
+def test_container_t_readers_are_refused_for_the_production_prefix(rig: Rig) -> None:
+    rig.refused(*INIT, "--reader-type", "container_t", match="--reader-type container_t")
+    assert not rig.system.calls
+
+
+@pytest.mark.parametrize("reader_type", ["unconfined_t", "spc_t", "aegis_reader2.process", ""])
+def test_an_unknown_reader_type_is_refused(rig: Rig, tmp_path: Path, reader_type: str) -> None:
+    make_test_stack(rig, tmp_path)
+
+    rig.refused(*replaced(TEST_INIT, "--reader-type", reader_type), match="--reader-type")
+    assert not rig.system.calls
+
+
+def test_a_test_stack_may_name_the_production_reader_type(rig: Rig, tmp_path: Path) -> None:
+    make_test_stack(rig, tmp_path)
+
+    assert rig(*replaced(TEST_INIT, "--reader-type", "aegis_reader.process")) == 0, rig.output()
+    assert rig.state()["reader_type"] == "aegis_reader.process"
+
+
+def test_the_deployment_test_options_stay_out_of_the_help(
+    rig: Rig, capsys: pytest.CaptureFixture[str],
+) -> None:
+    for command in ("init", "upgrade"):
+        with pytest.raises(SystemExit):
+            rig(command, "--help")
+        text = capsys.readouterr().out
+        assert "--local-images" not in text and "--reader-type" not in text, command
+
+
+def test_a_container_t_stack_adds_a_container_file_t_root_without_probe_or_module(
+    rig: Rig, tmp_path: Path,
+) -> None:
+    make_test_stack(rig, tmp_path)
+    assert rig(*TEST_INIT) == 0, rig.output()
+    assert rig("install", "--no-install-sections") == 0, rig.output()
+    root = make_root(rig, label=CONTAINER_FILE)
+    first = len(rig.system.calls)
+
+    assert add_root(rig, root) == 0, rig.output()
+    state = rig.state()
+    assert state["selinux_covered"] == ["container_file_t"] and state["selinux_pending"] == []
+    assert state["roots"]["photos"]["selinux_type"] == "container_file_t"
+    assert not rig.system.probes
+    assert not (rig.data / "selinux" / "aegis_reader.cil").exists()
+    (preflight,) = [call for call in aegisctl_calls(rig, first) if call[1] == "preflight"]
+    assert preflight[preflight.index("--observer-image") + 1] == LOCAL_IDS["gateway"]
+    assert preflight[preflight.index("--reader-type") + 1] == "container_t"
+    assert "--allow-test-image-id" in preflight
+    for role in ROOT_ROLES:
+        assert (rig.quadlet_units / f"{TEST_PREFIX}{role}.container.d" / DROP_IN).is_file()
+    no_install_sections(rig)
+
+
+def test_a_container_t_stack_refuses_a_root_of_any_other_type(rig: Rig, tmp_path: Path) -> None:
+    make_test_stack(rig, tmp_path)
+    assert rig(*TEST_INIT) == 0, rig.output()
+    assert rig("install") == 0, rig.output()
+    root = make_root(rig)
+    first = len(rig.system.calls)
+
+    rig.refused("roots", "add", "--slot", "photos", "--source", str(root),
+                match="unlabeled_t.*container_t.*container_file_t")
+    assert rig.system.calls[first:] == []
+    assert not (rig.data / "selinux" / "aegis_reader.cil").exists()
+    assert rig.state()["selinux_pending"] == [] and rig.state()["roots"] == {}
+
+
+def test_a_production_stack_never_passes_the_test_image_flag(rig: Rig) -> None:
+    rig.install()
+    root = covered_root(rig)
+    assert root.is_dir()
+    preflights = [call for call in aegisctl_calls(rig) if call[1] == "preflight"]
+    assert preflights and all("--allow-test-image-id" not in call for call in preflights)
+
+
+def test_upgrade_moves_a_test_stack_to_other_local_images_without_ordering(
+    rig: Rig, tmp_path: Path,
+) -> None:
+    make_test_stack(rig, tmp_path)
+    assert rig(*TEST_INIT) == 0, rig.output()
+    assert rig("install") == 0, rig.output()
+    assert rig("start") == 0, rig.output()
+
+    # Neither test release carries a creation label, so ordering would refuse them both.
+    assert rig("upgrade", "--release", TEST_OTHER_RELEASE,
+               "--local-images", OTHER_LOCAL_IMAGES) == 0, rig.output()
+    state = rig.state()
+    assert state["release"] == TEST_OTHER_RELEASE and state["images"] == OTHER_LOCAL_IDS
+    assert state["local_images"] is True and state["pending"] is None
+    assert not rig.system.commands(*PODMAN, "pull")
+    web = parse_unit((rig.quadlet_units / f"{TEST_PREFIX}web.container").read_text())
+    assert web.value("Container", "Image") == OTHER_LOCAL_IDS["backend"]
+    no_install_sections(rig)
+
+
+def test_upgrade_to_local_images_is_refused_for_the_production_prefix(rig: Rig) -> None:
+    rig.install()
+    first = len(rig.system.calls)
+
+    rig.refused("upgrade", "--release", TEST_RELEASE, "--local-images", LOCAL_IMAGES,
+                match="--local-images .*--prefix")
+    rig.fresh_output()
+    rig.refused("upgrade", "--release", SAMPLE_OTHER_RELEASE, "--local-images", LOCAL_IMAGES,
+                match="--local-images .*--prefix")
+    assert rig.system.calls[first:] == []
+    assert rig.state()["release"] == SAMPLE_RELEASE
+
+
+def test_a_test_release_upgrade_needs_local_images(rig: Rig, tmp_path: Path) -> None:
+    make_test_stack(rig, tmp_path)
+    assert rig(*TEST_INIT) == 0, rig.output()
+    first = len(rig.system.calls)
+
+    rig.refused("upgrade", "--release", TEST_OTHER_RELEASE, match="test release.*--local-images")
+    rig.fresh_output()
+    rig.refused("upgrade", "--abandon", "--local-images", OTHER_LOCAL_IMAGES,
+                match="--local-images goes with --release")
+    assert rig.system.calls[first:] == []
 
 
 # -- preflight ---------------------------------------------------------------------------------
@@ -2325,6 +2620,8 @@ def test_purge_removes_an_extraction_container_an_interrupted_run_left(rig: Rig)
 
 
 UNLABELED = b"system_u:object_r:unlabeled_t:s0\x00"
+# A deployment test's synthetic root: labelled for containers, never an original.
+CONTAINER_FILE = b"unconfined_u:object_r:container_file_t:s0\x00"
 HOME_LABEL = b"unconfined_u:object_r:user_home_t:s0:c1,c2\x00"
 ROOT_ROLES = ("migrate", "web", "operations", "indexer", "media", "gateway")
 READER_ROLES = ("operations", "indexer", "media", "gateway")

@@ -345,6 +345,10 @@ def render_units(
 DEFAULT_REGISTRY = "ghcr.io/troja-gnister"
 PRODUCTION_PREFIX = "aegis-"
 PRODUCTION_READER_TYPE = "aegis_reader.process"
+# The deployment test (spec D12) only, never the production prefix: readers run as plain
+# container_t, so no module is loaded, and they read only container_file_t roots.
+TEST_READER_TYPE = "container_t"
+READER_TYPES = (PRODUCTION_READER_TYPE, TEST_READER_TYPE)
 ROLES = ("backend", "gateway", "postgres", "caddy")
 # Always the local engine: a CONTAINER_HOST in the environment would otherwise make Podman
 # talk to a remote service.
@@ -613,8 +617,11 @@ class Paths:
     def resolve(
         cls, home: Path, environ: Mapping[str, str], state_home: str | None = None,
     ) -> Paths:
+        # A relative XDG value is invalid and ignored, as the XDG base directory spec says
+        # and as the systemd user manager itself does.
         config_value = environ.get("XDG_CONFIG_HOME", "")
-        config = _absolute("XDG_CONFIG_HOME", config_value) if config_value else home / ".config"
+        config = (Path(os.path.normpath(config_value)) if os.path.isabs(config_value)
+                  else home / ".config")
         if state_home is not None:
             data = _absolute("--state-home", state_home)
             return cls(config=config, data=data, config_directory=data)
@@ -704,7 +711,7 @@ _STATE_TYPES: dict[str, type | tuple[type, ...]] = {
     "firewall_zones": list, "installed": bool, "history": list, "files": dict,
     "secrets": dict, "releases": dict, "units": dict, "volumes": list, "networks": list,
     "extractions": list, "roots": dict, "selinux_covered": list, "selinux_pending": list,
-    "mounts": dict, "version": int,
+    "mounts": dict, "local_images": bool, "version": int,
 }
 _INVENTORY_TYPES: dict[str, type] = {
     "files": list, "socket": str, "services": list, "oneshots": list, "generated": list,
@@ -733,6 +740,10 @@ class State:
     sha256). ``current`` is the generation the installed drop-ins bind; ``installing`` is set
     from the first drop-in written until systemd has loaded them all, so an interrupted
     switch is flagged, rendered again by the next command, and never pruned meanwhile.
+
+    ``local_images`` marks a deployment-test stack (spec D12) whose ``images`` are local image
+    IDs rather than pulled digests; like the ``container_t`` reader type, it never applies to
+    the production prefix.
     """
 
     phase: str
@@ -766,14 +777,18 @@ class State:
     mounts: dict[str, Any] = field(
         default_factory=lambda: {"current": None, "installing": None, "generations": {}},
     )
+    local_images: bool = False
     version: int = STATE_VERSION
 
     @classmethod
     def from_json(cls, data: object) -> State:
         if isinstance(data, dict):
-            # A record written before roots existed: it has no roots yet.
-            data = {"roots": {}, "selinux_covered": [], "selinux_pending": [],
-                    "mounts": {"current": None, "generations": {}}} | data
+            # A record written before roots or local images existed: it has neither yet.
+            defaults: dict[str, Any] = {
+                "roots": {}, "selinux_covered": [], "selinux_pending": [],
+                "mounts": {"current": None, "generations": {}}, "local_images": False,
+            }
+            data = defaults | data
             if isinstance(data["mounts"], dict):
                 data["mounts"] = {"installing": None} | data["mounts"]
             for key in ("selinux_covered", "selinux_pending"):
@@ -823,10 +838,25 @@ def _record_problem(data: object) -> str | None:
     if pending is not None and not (
         isinstance(pending.get("release"), str) and isinstance(pending.get("images"), dict)
         and isinstance(pending.get("restart_queued", False), bool)
+        and isinstance(pending.get("local_images", False), bool)
     ):
         return "malformed pending upgrade"
+    if pending is not None and data["prefix"] == PRODUCTION_PREFIX and (
+        pending.get("local_images", False) or TEST_RELEASE.fullmatch(pending["release"])
+    ):
+        return (f"a pending upgrade to local images or a test release is for the deployment "
+                f"test, never the {PRODUCTION_PREFIX} prefix")
     if data["install_sections"] and data["prefix"] != PRODUCTION_PREFIX:
         return f"a stack with the prefix {data['prefix']} must never have [Install] sections"
+    if data["reader_type"] not in READER_TYPES:
+        return "unknown reader type"
+    if data["prefix"] == PRODUCTION_PREFIX and (
+        data["local_images"] or data["reader_type"] == TEST_READER_TYPE
+    ):
+        return (f"local images and {TEST_READER_TYPE} readers are for the deployment test, "
+                f"never the {PRODUCTION_PREFIX} prefix")
+    if TEST_RELEASE.fullmatch(data["release"]) and not data["local_images"]:
+        return "a test release without local images"
     if data["installed"] and not all(
         isinstance(data["units"].get(key), expected) for key, expected in _INVENTORY_TYPES.items()
     ):
@@ -1200,9 +1230,55 @@ def _leftovers(paths: Paths, prefix: str) -> list[Path]:
 # -- validation and preflight ------------------------------------------------------------------
 
 
-def _release_argument(value: str) -> str:
-    if RELEASE.fullmatch(value) is None:
-        raise InstallError(f"release {value!r} is not sha-<40 hex>, the tag CI publishes")
+def _release_argument(value: str, *, local_images: bool = False) -> str:
+    """A published release; a test release literal only with the deployment test's images."""
+    if RELEASE.fullmatch(value) is not None:
+        return value
+    if TEST_RELEASE.fullmatch(value) is not None:
+        if local_images:
+            return value
+        raise InstallError(f"release {value!r} is a test release, which needs --local-images")
+    raise InstallError(f"release {value!r} is not sha-<40 hex>, the tag CI publishes")
+
+
+def _local_images_argument(value: str | None) -> dict[str, str] | None:
+    """``role=<image ID>`` for each role: images already in local storage, used in place of a
+    pull by the deployment test only."""
+    if value is None:
+        return None
+    images: dict[str, str] = {}
+    for item in value.split(","):
+        role, separator, identifier = item.partition("=")
+        if (
+            not separator or role not in ROLES or role in images
+            or LOCAL_IMAGE_ID.fullmatch(identifier) is None
+        ):
+            break
+        images[role] = identifier
+    else:
+        if set(images) == set(ROLES):
+            return images
+    raise InstallError(
+        "--local-images must name each of backend, gateway, postgres and caddy once, as "
+        "role=<64 hex image ID>, separated by commas"
+    )
+
+
+def _refuse_test_option(option: str, prefix: str) -> None:
+    if prefix == PRODUCTION_PREFIX:
+        raise InstallError(
+            f"{option} is for the deployment test only: it needs a --prefix other than "
+            f"{PRODUCTION_PREFIX}"
+        )
+
+
+def _reader_type_argument(value: str | None, prefix: str) -> str:
+    if value is None:
+        return PRODUCTION_READER_TYPE
+    if value not in READER_TYPES:
+        raise InstallError(f"--reader-type must be {' or '.join(READER_TYPES)}")
+    if value == TEST_READER_TYPE:
+        _refuse_test_option(f"--reader-type {TEST_READER_TYPE}", prefix)
     return value
 
 
@@ -1456,6 +1532,13 @@ def _created_time(value: object) -> datetime.datetime | None:
         return None
 
 
+def _created_label(entry: Mapping[str, Any]) -> str | None:
+    """An inspected image's org.opencontainers.image.created label, or None."""
+    labels = entry.get("Labels") or (entry.get("Config") or {}).get("Labels") or {}
+    value = labels.get(CREATED_LABEL) if isinstance(labels, dict) else None
+    return value if isinstance(value, str) else None
+
+
 def _pull(host: Host, registry: str, release: str) -> tuple[dict[str, str], str | None]:
     """Pull the four images by tag and pin each to its registry digest.
 
@@ -1480,10 +1563,30 @@ def _pull(host: Host, registry: str, release: str) -> tuple[dict[str, str], str 
             raise InstallError(f"{tag} has no registry digest for {repository}; refusing it")
         images[role] = reference
         if role == "backend":
-            labels = entry.get("Labels") or (entry.get("Config") or {}).get("Labels") or {}
-            value = labels.get(CREATED_LABEL) if isinstance(labels, dict) else None
-            created = value if isinstance(value, str) else None
+            created = _created_label(entry)
     return images, created
+
+
+def _local(host: Host, images: Mapping[str, str]) -> tuple[dict[str, str], str | None]:
+    """The deployment test's images, already in local storage, by ID: nothing is pulled.
+
+    Also returns the backend image's creation label, as ``_pull`` does.
+    """
+    created: str | None = None
+    for role in ROLES:
+        identifier = images[role]
+        result = _run(host, [*PODMAN, "image", "inspect", identifier], timeout=120)
+        entries: list[dict[str, Any]] = []
+        if result.returncode == 0:
+            with contextlib.suppress(json.JSONDecodeError):
+                entries = _entries(json.loads(result.stdout or "null"))
+        if len(entries) != 1 or entries[0].get("Id") != identifier:
+            raise InstallError(
+                f"the {role} image {identifier} is not in local storage; build it first"
+            )
+        if role == "backend":
+            created = _created_label(entries[0])
+    return dict(images), created
 
 
 def _check_order(state: State, release: str, created: str | None, allow: bool) -> None:
@@ -1754,6 +1857,7 @@ def _render(
             image_postgres=state.images["postgres"], image_caddy=state.images["caddy"],
             secrets_dir=str(paths.secrets), backend_subnet=state.backend_subnet,
             install_token=state.install_token, install_sections=state.install_sections,
+            allow_test_values=state.local_images,
         )
         texts = module.render_units(config, templates)
         units = {}
@@ -1923,9 +2027,25 @@ def _unit_states(host: Host, units: Sequence[str]) -> dict[str, dict[str, str]]:
     return {unit: found.get(unit, {"Id": unit, **missing}) for unit in units}
 
 
+def _image_id(host: Host, reference: str, cache: dict[str, str]) -> str:
+    """The local image ID ``reference`` resolves to, or "" when it resolves to none."""
+    if reference not in cache:
+        result = _run(host, [*PODMAN, "image", "inspect", "--format", "{{.Id}}", reference],
+                      timeout=60)
+        identifier = (result.stdout or "").strip() if result.returncode == 0 else ""
+        cache[reference] = identifier if re.fullmatch(r"[0-9a-f]{64}", identifier) else ""
+    return cache[reference]
+
+
 def _observe(host: Host, state: State) -> dict[str, dict[str, str]]:
-    """Each long-running service's container: its health and the image it runs."""
+    """Each long-running service's container: its health and the image it runs.
+
+    Whether a container runs its unit's image is decided by image ID. The reference Podman
+    reports for a container (``ImageName``) is whichever name it resolved, such as a local
+    tag, not necessarily the digest or ID the unit names.
+    """
     observed = {}
+    resolved: dict[str, str] = {}
     for service in state.units["services"]:
         container = state.units["containers"][service]
         result = _run(host, [*PODMAN, "container", "inspect", container], timeout=60)
@@ -1939,9 +2059,12 @@ def _observe(host: Host, state: State) -> dict[str, dict[str, str]]:
         details = entries[0].get("State") or {}
         health = details.get("Health") or details.get("Healthcheck") or {}
         status = str(health.get("Status") or "unknown")
+        expected = _image_id(host, state.units["images"].get(service, ""), resolved)
+        running = str(entries[0].get("Image", ""))
         observed[service] = {
             "health": status if service in state.units["health_checked"] else "-",
-            "image": str(entries[0].get("ImageName", "")),
+            "image": str(entries[0].get("ImageName", "")) or running,
+            "current": "yes" if expected and running == expected else "no",
         }
     return observed
 
@@ -1974,7 +2097,7 @@ def _readiness(
         seen = observed.get(unit)
         if ready and seen is not None:
             healthy = unit not in state.units["health_checked"] or seen["health"] == "healthy"
-            ready = healthy and seen["image"] == state.units["images"].get(unit)
+            ready = healthy and seen.get("current") == "yes"
         if not ready:
             pending.append(unit)
     return pending, failed
@@ -1991,7 +2114,7 @@ def _print_units(
         image = seen.get("image")
         if image is None or not image:
             running = "-"
-        elif image == state.units["images"].get(unit):
+        elif seen.get("current") == "yes":
             running = "current"
         else:
             running = f"stale ({image})"
@@ -2749,7 +2872,7 @@ def _read_drop_ins(
 
 def _render_roots(
     host: Host, paths: Paths, state: State, roots: Mapping[str, Mapping[str, str]],
-    release: str, images: Mapping[str, str],
+    release: str, images: Mapping[str, str], *, local_images: bool | None = None,
 ) -> RenderedRoots:
     """Validate, observe and render ``roots`` with ``release``'s aegisctl.
 
@@ -2758,8 +2881,10 @@ def _render_roots(
     their own generation until ``_install_drop_ins`` replaces them. The manifest is rendered
     right after a fresh preflight, while the operator still owns it, and only then handed to
     the group-mapped container user (spec D5). Both files are labelled container_file_t;
-    the originals themselves are never touched.
+    the originals themselves are never touched. ``local_images`` (default: the record's)
+    says that ``images`` are the deployment test's local image IDs.
     """
+    test_images = state.local_images if local_images is None else local_images
     for slot, root in sorted(roots.items()):
         selinux_type = _selinux_type(host, root["source"])
         if selinux_type not in state.selinux_covered:
@@ -2789,7 +2914,8 @@ def _render_roots(
     _aegisctl(
         host, library, "preflight", "--config", config, "--manifest", str(manifest),
         "--observer", "podman-run", "--observer-image", images["gateway"], "--host-gid", gid,
-        "--reader-type", state.reader_type, timeout=300,
+        "--reader-type", state.reader_type, *(["--allow-test-image-id"] if test_images else []),
+        timeout=300,
     )
     staging = paths.mounts / f".render.{secrets.token_hex(8)}.partial"
     staging.mkdir(mode=0o700)
@@ -3123,6 +3249,18 @@ def _roots_add(host: Host, paths: Paths, args: argparse.Namespace) -> int:
                 "directory, with its file system mounted?"
             )
         selinux_type = _selinux_type(host, source)
+        if state.reader_type == TEST_READER_TYPE:
+            # A deployment-test stack loads no module: its plain container_t readers read
+            # container_file_t, so there is nothing to probe or regenerate.
+            if selinux_type != CONTAINER_FILE_TYPE:
+                raise InstallError(
+                    f"{source} is labelled {selinux_type}, but this stack's readers run as "
+                    f"{TEST_READER_TYPE} with no module, which reads only {CONTAINER_FILE_TYPE} "
+                    "roots"
+                )
+            if selinux_type not in state.selinux_covered:
+                state.selinux_covered = sorted({*state.selinux_covered, selinux_type})
+                save_state(paths, state)
         was_pending = selinux_type in state.selinux_pending
         probe = None
         if selinux_type not in state.selinux_covered:
@@ -3393,9 +3531,13 @@ def _refuse_pending(state: State) -> None:
 
 
 def command_init(host: Host, paths: Paths, args: argparse.Namespace) -> int:
-    release = _release_argument(args.release)
-    registry = _registry_argument(args.registry)
     prefix = _prefix_argument(args.prefix)
+    local_images = _local_images_argument(args.local_images)
+    if local_images is not None:
+        _refuse_test_option("--local-images", prefix)
+    release = _release_argument(args.release, local_images=local_images is not None)
+    reader_type = _reader_type_argument(args.reader_type, prefix)
+    registry = _registry_argument(args.registry)
     port = _port_argument(args.https_port)
     names = _names_argument(args.name, args.address)
     requested_subnet = _subnet_argument(args.backend_subnet)
@@ -3413,19 +3555,21 @@ def command_init(host: Host, paths: Paths, args: argparse.Namespace) -> int:
         if previous is not None and previous.phase != "initializing":
             raise InstallError("aegis-podman is already initialized")
         return _initialize(host, paths, previous, release, registry, prefix, port, names,
-                           requested_subnet)
+                           requested_subnet, local_images=local_images, reader_type=reader_type)
 
 
 def _initialize(
     host: Host, paths: Paths, previous: State | None, release: str, registry: str, prefix: str,
-    port: int, names: list[str], requested_subnet: str | None,
+    port: int, names: list[str], requested_subnet: str | None, *,
+    local_images: Mapping[str, str] | None = None, reader_type: str = PRODUCTION_READER_TYPE,
 ) -> int:
     state = State(
         phase="initializing", release=release, registry=registry, prefix=prefix, names=names,
         https_port=port, host_gid=host.gid, backend_subnet="",
-        reader_type=PRODUCTION_READER_TYPE, install_token=secrets.token_hex(16),
+        reader_type=reader_type, install_token=secrets.token_hex(16),
         # Only the production prefix may start at boot; a test stack never does.
         install_sections=prefix == PRODUCTION_PREFIX,
+        local_images=local_images is not None,
     )
     if previous is not None:  # resume an interrupted init with what it recorded
         state.files, state.secrets, state.releases, state.extractions = (
@@ -3439,7 +3583,9 @@ def _initialize(
     _check_port(host, port, containers)
     state.backend_subnet = _choose_subnet(host, requested_subnet)
     save_state(paths, state)
-    state.images, state.created = _pull(host, registry, release)
+    state.images, state.created = (
+        _pull(host, registry, release) if local_images is None else _local(host, local_images)
+    )
     save_state(paths, state)
     _extract_release(host, paths, state, release, state.images["backend"])
     module, templates = _release_renderer(paths, state, release)
@@ -3615,10 +3761,17 @@ def command_status(host: Host, paths: Paths, args: argparse.Namespace) -> int:
 
 
 def command_upgrade(host: Host, paths: Paths, args: argparse.Namespace) -> int:
-    release = None if args.abandon else _release_argument(args.release)
+    local_images = _local_images_argument(args.local_images)
+    if args.abandon and local_images is not None:
+        raise InstallError("--local-images goes with --release, not --abandon")
+    release = None if args.abandon else _release_argument(
+        args.release, local_images=local_images is not None,
+    )
     _check_directories(paths, host.uid, create=False)
     with _locked(paths):
         state = _ready_state(paths, host.uid, args)
+        if local_images is not None:
+            _refuse_test_option("--local-images", state.prefix)
         if args.abandon:
             if state.pending is None:
                 raise InstallError("no upgrade is pending, so there is nothing to abandon")
@@ -3626,13 +3779,13 @@ def command_upgrade(host: Host, paths: Paths, args: argparse.Namespace) -> int:
         elif state.pending is not None:
             if release != state.pending["release"]:
                 _refuse_pending(state)
-            wait = _upgrade(host, paths, args, state, state.pending["release"], resume=True)
+            wait = _upgrade(host, paths, args, state, state.pending["release"], None, resume=True)
         elif release == state.release:
             _say(host, f"aegis-podman: release {release} is already current; nothing to do")
             return 0
         else:
             assert release is not None
-            wait = _upgrade(host, paths, args, state, release, resume=False)
+            wait = _upgrade(host, paths, args, state, release, local_images, resume=False)
     # The wait changes nothing, so other commands may read the record meanwhile.
     if not wait:
         return 0
@@ -3731,35 +3884,43 @@ def _abandon_units(
 
 
 def _upgrade(
-    host: Host, paths: Paths, args: argparse.Namespace, state: State, release: str, *,
-    resume: bool,
+    host: Host, paths: Paths, args: argparse.Namespace, state: State, release: str,
+    local_images: Mapping[str, str] | None, *, resume: bool,
 ) -> bool:
     """Move to ``release`` in two phases; True when a wait for readiness follows.
 
     Phase one records the release as pending and writes its units; phase two, after
     ``daemon-reload`` succeeded and any restart is queued, makes it current. A run that
     stops in between leaves the pending record: the same command finishes it, and
-    ``upgrade --abandon`` goes back.
+    ``upgrade --abandon`` goes back. ``local_images`` are the deployment test's images,
+    used by ID in place of a pull; a test release is never ordered by its creation label.
     """
     _preflight(host, paths)
     if resume:
         assert state.pending is not None
         images, created = dict(state.pending["images"]), state.pending.get("created")
+        local = bool(state.pending.get("local_images", False))
         for reference in images.values():
             if _run(host, [*PODMAN, "image", "exists", reference], timeout=60).returncode:
                 raise InstallError(f"{reference} is not local; fetch it with: podman pull "
                                    f"{reference}")
     else:
-        images, created = _pull(host, state.registry, release)
-        _check_order(state, release, created, args.allow_downgrade)
+        local = local_images is not None
+        if local_images is None:
+            images, created = _pull(host, state.registry, release)
+        else:
+            images, created = _local(host, local_images)
+        if not (TEST_RELEASE.fullmatch(release) or TEST_RELEASE.fullmatch(state.release)):
+            _check_order(state, release, created, args.allow_downgrade)
     _extract_release(host, paths, state, release, images["backend"])
-    candidate = dataclasses.replace(state, release=release, images=images)
+    candidate = dataclasses.replace(state, release=release, images=images, local_images=local)
     module, templates = _release_renderer(paths, state, release)
     units = _render(module, templates, candidate, paths)
     inventory, volumes, networks = _inventory(units)
     _check_backend_network(host, state)
     if not state.installed:
         state.release, state.images, state.created = release, images, created
+        state.local_images = local
         state.pending = None
         _record_history(state, release)
         _check_replaceable(state, paths.env_file)
@@ -3773,10 +3934,13 @@ def _upgrade(
     # The new release's aegisctl renders the drop-ins (their Exec= replaces the template's).
     # Rendering first leaves nothing pending when a root cannot be observed.
     rendered = (
-        _render_roots(host, paths, state, state.roots, release, images) if state.roots else None
+        _render_roots(host, paths, state, state.roots, release, images, local_images=local)
+        if state.roots else None
     )
     leftover = _leftover_drop_ins(paths, state)
-    state.pending = {"release": release, "images": images, "created": created}
+    state.pending = {
+        "release": release, "images": images, "created": created, "local_images": local,
+    }
     # Objects the new units may create are recorded now, so a purge finds them either way.
     state.volumes = list(dict.fromkeys([*state.volumes, *volumes]))
     state.networks = list(dict.fromkeys([*state.networks, *networks]))
@@ -3802,6 +3966,7 @@ def _upgrade(
         print(f"aegis-podman: stopped part-way{finish}", file=host.err)
         raise
     state.release, state.images, state.created = release, images, created
+    state.local_images = local
     state.pending = None
     _record_history(state, release)
     _record_inventory(state, inventory, volumes, networks)
@@ -4167,6 +4332,10 @@ def _parser() -> argparse.ArgumentParser:
     init.add_argument("--registry", default=DEFAULT_REGISTRY)
     init.add_argument("--backend-subnet", help="a free private /24 instead of the first free "
                                                "candidate")
+    # The deployment test's options (spec D12), hidden from help and refused for the
+    # production prefix: images built locally, used by ID, and plain container_t readers.
+    init.add_argument("--local-images", help=argparse.SUPPRESS)
+    init.add_argument("--reader-type", help=argparse.SUPPRESS)
     install = command("install", "render the release's units and install them for systemd")
     sections = install.add_mutually_exclusive_group()
     sections.add_argument(
@@ -4190,6 +4359,7 @@ def _parser() -> argparse.ArgumentParser:
     upgrade.add_argument("--allow-downgrade", action="store_true",
                          help="allow an older release, one that cannot be ordered, or "
                               "--abandon after the restart into the new release was queued")
+    upgrade.add_argument("--local-images", help=argparse.SUPPRESS)
     deadline(upgrade)
     command("ca-cert", "print Caddy's local root certificate for client devices")
     bootstrap = command("bootstrap-password", "create the first administrator")

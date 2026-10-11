@@ -12,7 +12,9 @@ import pytest
 REPOSITORY = Path(__file__).resolve().parents[2]
 
 
-@pytest.mark.parametrize("target", ["test", "lint", "typecheck", "verify-compose"])
+@pytest.mark.parametrize(
+    "target", ["test", "lint", "typecheck", "verify-compose", "verify-podman-deploy"],
+)
 def test_local_make_commands_refuse_metadata_drift_without_mutating_lock(
     tmp_path: Path, target: str,
 ) -> None:

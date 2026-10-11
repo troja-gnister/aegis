@@ -1,4 +1,4 @@
-.PHONY: test lint typecheck check verify verify-compose test-e2e benchmark-catalog
+.PHONY: test lint typecheck check verify verify-compose verify-podman-deploy test-e2e benchmark-catalog
 
 test:
 	uv run --locked pytest
@@ -27,6 +27,12 @@ verify:
 verify-compose:
 	uv run --locked python scripts/verify.py compose
 	uv run --locked python scripts/verify.py deployment
+
+# Rootless Podman hosts only: builds the images, installs a run-unique test stack through
+# deploy/podman/aegis-podman (no [Install] sections, nothing enabled), checks it and removes
+# exactly what it recorded. --cleanup <record> finishes an interrupted run's cleanup.
+verify-podman-deploy:
+	uv run --locked python scripts/podman_deploy_check.py
 
 test-e2e:
 	bash scripts/test-e2e.sh
