@@ -309,6 +309,14 @@ def run_worker(
 
             run_indexer(identity, _shutdown_requested)
             return
+        if identity.role == "media" and not once:
+            # The media pipeline (discovery, both lanes, processor dispatch, eviction). It
+            # claims this role's jobs itself, with the same authorization re-check and start
+            # gate, and runs the foundation probe through _execute_claim.
+            from aegis_apps.media.worker import run_media_worker
+
+            run_media_worker(identity, _shutdown_requested)
+            return
         while not _shutdown_requested():
             monotonic_now = monotonic()
             if monotonic_now >= next_heartbeat:

@@ -284,6 +284,7 @@ EXPECTED_TABLE_COLUMNS = {
         "created_at",
         "updated_at",
         "root_id",
+        "environment_failures",
     ),
     "media_mediaderivative": (
         "id",

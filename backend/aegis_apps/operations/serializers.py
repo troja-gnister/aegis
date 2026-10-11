@@ -37,6 +37,7 @@ _METRIC_KEYS = (
     "mediaInFlight",
     "mediaAssets",
     "mediaAssetsComplete",
+    "mediaProcessorFailures",
     "mediaLastErrorCode",
 )
 _METRIC_CODE_KEYS = frozenset({"mediaLastErrorCode"})

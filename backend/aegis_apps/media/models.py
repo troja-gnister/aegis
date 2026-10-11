@@ -33,6 +33,10 @@ from .keys import HEX_DIGEST_PATTERN, PROCESSOR_VERSION_PATTERN, UINT64_MAX
 # The database bound on MediaAsset.attempts, the count of consecutive failed attempts for
 # the current fingerprint. The worker's quarantine threshold (3, spec M2) is far below it.
 MAX_ASSET_ATTEMPTS: Final = 16
+# The database bound on MediaAsset.environment_failures, the count of consecutive failures
+# that were not the file's fault (the source volume, the processor, the derivatives volume).
+# The worker saturates it well below this bound; it only lengthens the retry backoff.
+MAX_ENVIRONMENT_FAILURES: Final = 1_000
 MAX_MEDIA_DIMENSION: Final = 1 << 20
 MAX_DURATION_MS: Final = 100 * 24 * 60 * 60 * 1000
 MAX_DERIVATIVE_BYTES: Final = 1 << 40
@@ -116,6 +120,10 @@ class MediaAsset(models.Model):
     # (3), long before the MAX_ASSET_ATTEMPTS CHECK could reject a write.
     attempts = models.PositiveSmallIntegerField(default=0)
     attempt_token = models.PositiveBigIntegerField(default=0)
+    # Consecutive environmental failures (never the file's fault), kept apart from attempts:
+    # they grow the retry backoff (capped at an hour) and never quarantine. Reset by every
+    # recorded result and by every reset or park.
+    environment_failures = models.PositiveSmallIntegerField(default=0, db_default=0)
     next_attempt_at = models.DateTimeField(default=timezone.now)
     lease_owner = models.UUIDField(null=True)
     lease_expires_at = models.DateTimeField(null=True)
@@ -257,6 +265,13 @@ class MediaAsset(models.Model):
             models.CheckConstraint(
                 condition=models.Q(attempts__gte=0, attempts__lte=MAX_ASSET_ATTEMPTS),
                 name="media_asset_attempts_bounded",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    environment_failures__gte=0,
+                    environment_failures__lte=MAX_ENVIRONMENT_FAILURES,
+                ),
+                name="media_asset_environment_failures_bounded",
             ),
             models.CheckConstraint(
                 condition=models.Q(attempt_token__gte=models.F("attempts")),

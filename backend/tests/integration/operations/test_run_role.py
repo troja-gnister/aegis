@@ -5,6 +5,7 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 
@@ -317,8 +318,25 @@ def test_dispatch_revalidates_authorization_before_handler_work() -> None:
     assert job.result is None
 
 
+@contextmanager
+def _media_volumes(tmp_path: Path) -> Iterator[tuple[Path, Path]]:
+    """Point the continuous media worker at test-owned scratch and derivatives directories."""
+    from aegis_apps.media import worker as media_worker
+
+    scratch, derivatives = tmp_path / "scratch", tmp_path / "derivatives"
+    scratch.mkdir(mode=0o770)
+    derivatives.mkdir(mode=0o770)
+    with (
+        patch.object(media_worker, "SCRATCH_DIR", str(scratch)),
+        patch.object(media_worker, "DERIVATIVES_DIR", str(derivatives)),
+    ):
+        yield scratch, derivatives
+
+
 @override_settings(AEGIS_PROCESS_ROLE="media")
-def test_shutdown_requested_during_handler_finishes_job_stops_claiming_and_heartbeats() -> None:
+def test_shutdown_requested_during_handler_finishes_job_stops_claiming_and_heartbeats(
+    tmp_path: Path,
+) -> None:
     _actor, _operation_record, media_job = _operation(role="media")
     handled: list[uuid.UUID] = []
 
@@ -327,18 +345,20 @@ def test_shutdown_requested_during_handler_finishes_job_stops_claiming_and_heart
         worker_command.request_shutdown()
         return {"ok": True}
 
-    with (
-        patch.dict(
-            worker_command.ROLE_HANDLERS["media"],
-            {"foundation.probe": handler},
-        ),
-        patch.object(signal, "signal", wraps=signal.signal) as install_signal,
-        patch(
-            "aegis_apps.operations.management.commands.run_role.claim_next_job",
-            wraps=claim_next_job,
-        ) as claim,
-    ):
-        _call_worker("media", once=False)
+    try:
+        with (
+            _media_volumes(tmp_path),
+            patch.dict(
+                worker_command.ROLE_HANDLERS["media"],
+                {"foundation.probe": handler},
+            ),
+            patch.object(signal, "signal", wraps=signal.signal) as install_signal,
+            # The continuous media role claims through its pipeline loop.
+            patch("aegis_apps.media.worker.claim_next_job", wraps=claim_next_job) as claim,
+        ):
+            _call_worker("media", once=False)
+    finally:
+        worker_command._reset_shutdown()
 
     assert handled == [media_job.id]
     assert claim.call_count == 1
@@ -770,3 +790,67 @@ def test_signal_handlers_are_restored_after_once_run() -> None:
         call(signal.SIGINT, previous_int),
         call(signal.SIGTERM, previous_term),
     ]
+
+
+@override_settings(AEGIS_PROCESS_ROLE="media")
+def test_continuous_media_role_runs_the_pipeline_against_a_processor_in_scratch(
+    browse_fixture: object, tmp_path: Path,
+) -> None:
+    """``run_role --role media``: startup checks, then the pipeline loop until SIGTERM.
+
+    A fake processor (standing in for the media-processor service) answers job files in the
+    scratch volume while the worker sleeps between passes.
+    """
+    from aegis_apps.media import worker as media_worker
+    from aegis_apps.media.enums import StageState
+    from aegis_apps.media.models import MediaAsset, MediaDerivative
+
+    from ..media.worker_support import FakeProcessor, make_library
+
+    library = make_library(browse_fixture)
+    photo = library.photo()
+    passes = 0
+
+    with _media_volumes(tmp_path) as (scratch, derivatives):
+        processor = FakeProcessor(scratch)
+
+        def sleep(seconds: float) -> None:
+            nonlocal passes
+            assert 0 < seconds <= media_worker.IDLE_TICK_SECONDS
+            passes += 1
+            processor.serve()
+            ready = MediaAsset.objects.filter(
+                pk=photo.pk, thumbnail_state=StageState.READY,
+            ).exists()
+            if ready or passes > 200:
+                worker_command.request_shutdown()
+
+        try:
+            with (
+                patch.object(worker_command, "attest_mounts") as attest,
+                patch.object(media_worker, "_default_sleep", side_effect=sleep),
+            ):
+                _call_worker("media", once=False)
+        finally:
+            worker_command._reset_shutdown()
+
+    attest.assert_called_once()
+    assert passes <= 200
+    asset = MediaAsset.objects.get(pk=photo.pk)
+    assert (asset.probe_state, asset.thumbnail_state) == (StageState.READY, StageState.READY)
+    assert [job.op for job in processor.served] == ["probe", "thumbnail"]
+    (row,) = MediaDerivative.objects.filter(asset_id=photo.pk)
+    assert (derivatives / row.key[0:2] / row.key[2:4] / f"{row.key}.webp").is_file()
+    assert sorted(p.name for p in (scratch / "done").iterdir()) == []
+    heartbeat = WorkerHeartbeat.objects.get(role="media", worker_id=WORKER_ID)
+    assert heartbeat.status == HeartbeatStatus.STOPPING
+
+
+@override_settings(AEGIS_PROCESS_ROLE="media")
+def test_once_media_role_keeps_the_generic_single_claim(tmp_path: Path) -> None:
+    _actor, _operation_record, media_job = _operation(role="media")
+    with patch("aegis_apps.media.worker.run_media_worker") as pipeline:
+        _call_worker("media", once=True)
+    pipeline.assert_not_called()
+    media_job.refresh_from_db()
+    assert media_job.state == JobState.SUCCEEDED
