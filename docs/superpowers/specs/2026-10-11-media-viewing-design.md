@@ -173,6 +173,18 @@ Delivery rules:
   - It prepares it the same way it prepares files for mapped containers (container uid, the operator's group, `container_file_t`, mode 2770).
   - This is a parity-allowed difference.
 
+### M8a. One SELinux level per install
+
+Podman gives each container a random MCS category pair, and files a container creates carry its pair. Containers that share volumes therefore could not read each other's files:
+- media and the processor (scratch);
+- media and the gateway (derivatives);
+- web and operations (staging).
+
+The fix:
+- **Quadlet:** every Aegis container in an install runs at one level, `s0:cX,cY`, chosen at random at `init` and recorded. Aegis containers can exchange files while staying isolated from every other container on the host.
+- **Podman compose (dev/test):** the overlay uses one fixed, documented level.
+- **Verification:** the deployment harness checks the exchange.
+
 ### M9. Image hygiene
 
 Published images must never contain host data or media.
