@@ -67,6 +67,11 @@ The processor:
 - has no network (`network_mode: none` / `Network=none`) and no database or secret material;
 - mounts the roots read-only and one scratch volume read-write. It gets the same group mapping and SELinux reader type as the other original readers;
 - runs one tool child per job with argument arrays and a scrubbed environment, under `RLIMIT_AS`, `RLIMIT_CPU`, `RLIMIT_FSIZE` and `RLIMIT_NOFILE`, a wall-clock timeout and a low CPU priority;
+- confines that child further, after the security review:
+  - the loop opens the input file and passes the child only the open descriptor;
+  - Landlock restricts the child to reading system libraries and writing its own fresh output directory, and denies network access where the kernel supports that;
+  - the processor refuses to start without Landlock;
+  - the loop is a subreaper and kills every leftover descendant after each job;
 - before decoding, checks that the input matches the expected fingerprint (device, inode, size, mtime). If it doesn't, it reports "changed".
 
 The processor and the media worker communicate only through the scratch volume:
