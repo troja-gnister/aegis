@@ -1,3 +1,6 @@
+import {useId} from "react";
+import {mediaKindOf} from "../media/classify";
+import {MediaThumbnail} from "../media/MediaThumbnail";
 import type {EntrySummary} from "./types";
 
 type FileRowProps = {
@@ -7,8 +10,6 @@ type FileRowProps = {
 
 function iconFor(entry: EntrySummary): string {
   if (entry.kind === "directory") return "▣";
-  if (entry.typeHint === "image") return "▧";
-  if (entry.typeHint === "video") return "▶";
   return entry.kind === "file" ? "□" : "◇";
 }
 
@@ -19,18 +20,28 @@ function entryMetadata(entry: EntrySummary): string {
 }
 
 export function FileRow({entry, onOpen}: FileRowProps) {
+  const thumbnailDescriptionId = useId();
+  const mediaKind = mediaKindOf(entry);
   const action = entry.kind === "directory" ? "Open directory" : "Select file";
   return (
     <button
       className="file-row interactive"
       type="button"
       aria-label={`${action} ${entry.displayName}`}
+      // A button's content is presentational; a hidden text node describes the thumbnail state.
+      aria-describedby={mediaKind ? thumbnailDescriptionId : undefined}
       title={entry.displayName}
       onClick={() => onOpen(entry)}
     >
-      <span className={`file-row__icon file-row__icon--${entry.kind}`} aria-hidden="true">
-        {iconFor(entry)}
-      </span>
+      {mediaKind ? (
+        <span className="file-row__icon file-row__icon--media">
+          <MediaThumbnail entry={entry} descriptionId={thumbnailDescriptionId} />
+        </span>
+      ) : (
+        <span className={`file-row__icon file-row__icon--${entry.kind}`} aria-hidden="true">
+          {iconFor(entry)}
+        </span>
+      )}
       <span className="file-row__body">
         <span className="file-row__name" dir="auto">{entry.displayName}</span>
         <span className="file-row__metadata">{entryMetadata(entry)}</span>

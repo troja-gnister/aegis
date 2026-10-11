@@ -60,6 +60,7 @@ function responsePage(
       modifiedNs: null,
       sourceState: "present",
       version: "1",
+      media: null,
     })),
     nextCursor: pageNumber < 20 ? `cursor:${cursorGeneration}:${pageNumber + 1}` : null,
     previousCursor: pageNumber > 0 ? `cursor:${cursorGeneration}:${pageNumber - 1}` : null,

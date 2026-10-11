@@ -1,13 +1,15 @@
 import {QueryClient, QueryClientProvider} from "@tanstack/react-query";
-import {fireEvent, render, screen, waitFor} from "@testing-library/react";
+import {fireEvent, render, screen, waitFor, within} from "@testing-library/react";
 import {http, HttpResponse} from "msw";
 import {useState} from "react";
-import {afterEach, describe, expect, it} from "vitest";
+import {MemoryRouter, Route, Routes, useLocation} from "react-router";
+import {afterEach, describe, expect, it, vi} from "vitest";
 import {server} from "../../test/server";
 import {activateCacheNamespace, purgePrivateBrowserState} from "../auth/cache";
 import {AuthSessionContext, isSessionAccessOpen} from "../auth/session";
 import type {SessionResponse} from "../auth/types";
-import {EntryDetailsPanel} from "./EntryDetailsPanel";
+import {derivativeUrlFor, entryMediaFixture, mediaDetailsBody, originalUrlFor} from "../media/test-fixtures";
+import {EntryDetailsPanel, type EntryDetailsPanelProps} from "./EntryDetailsPanel";
 import {createFileNavigation} from "./navigation";
 import {FIXTURE_ROOT_ID} from "./test-fixtures";
 
@@ -31,6 +33,7 @@ function details(overrides: Record<string, unknown> = {}) {
     modifiedNs: "1799999999123456789",
     sourceState: "present",
     version: "9223372036854775807",
+    media: null,
     parentId: PARENT_ID,
     ancestors: [
       {id: FIXTURE_ROOT_ID, displayName: ""},
@@ -41,18 +44,69 @@ function details(overrides: Record<string, unknown> = {}) {
   };
 }
 
-async function renderPanel(entryId = ENTRY_ID, onClose = () => undefined) {
+function LocationProbe() {
+  const location = useLocation();
+  return (
+    <>
+      <output aria-label="Current route">{location.pathname}</output>
+      <output aria-label="History state">{JSON.stringify(location.state)}</output>
+    </>
+  );
+}
+
+type PanelOptions = Partial<Omit<EntryDetailsPanelProps, "entryId">>;
+
+const OPENER_CONTEXT = {
+  source: "directory", rootId: FIXTURE_ROOT_ID, parentId: PARENT_ID, returnKey: "opener0",
+} as const;
+
+function panelTree(queryClient: QueryClient, entryId: string, options: PanelOptions = {}) {
+  const props: PanelOptions = {viewerContext: OPENER_CONTEXT, ...options};
+  return (
+    <QueryClientProvider client={queryClient}>
+      <AuthSessionContext.Provider value={{session: SESSION}}>
+        <MemoryRouter initialEntries={[`/files/${FIXTURE_ROOT_ID}/directories/${PARENT_ID}`]}>
+          <Routes>
+            <Route
+              path="*"
+              element={(
+                <>
+                  <EntryDetailsPanel entryId={entryId} onClose={() => undefined} {...props} />
+                  <LocationProbe />
+                </>
+              )}
+            />
+          </Routes>
+        </MemoryRouter>
+      </AuthSessionContext.Provider>
+    </QueryClientProvider>
+  );
+}
+
+async function renderPanel(entryId = ENTRY_ID, options: PanelOptions = {}) {
   const queryClient = new QueryClient({defaultOptions: {queries: {retry: false}}});
   clients.add(queryClient);
   await activateCacheNamespace(queryClient, SESSION.cacheNamespace);
-  const view = render(
-    <QueryClientProvider client={queryClient}>
-      <AuthSessionContext.Provider value={{session: SESSION}}>
-        <EntryDetailsPanel entryId={entryId} onClose={onClose} />
-      </AuthSessionContext.Provider>
-    </QueryClientProvider>,
-  );
+  const view = render(panelTree(queryClient, entryId, options));
   return {queryClient, ...view};
+}
+
+function mediaEntry(overrides: Record<string, unknown> = {}) {
+  return details({media: entryMediaFixture(ENTRY_ID), ...overrides});
+}
+
+function serveMedia(entry: Record<string, unknown>, media: Record<string, unknown> | (() => Response)) {
+  server.use(
+    http.get(`/api/v1/entries/${ENTRY_ID}`, () => HttpResponse.json(entry)),
+    http.get(`/api/v1/entries/${ENTRY_ID}/media`, () =>
+      typeof media === "function" ? media() : HttpResponse.json(media),
+    ),
+  );
+}
+
+function descriptionFor(term: string): HTMLElement {
+  const label = screen.getByText(term, {selector: "dt"});
+  return label.nextElementSibling as HTMLElement;
 }
 
 afterEach(async () => {
@@ -113,6 +167,18 @@ describe("EntryDetailsPanel", () => {
     expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual(["Close details"]);
     expect(screen.queryByRole("link")).not.toBeInTheDocument();
     expect(screen.queryByText(/thumbnail/i)).not.toBeInTheDocument();
+    // A .jpg the media catalog has not described yet.
+    expect(screen.getByText(/not available for this file yet/i)).toBeVisible();
+    expect(screen.queryByText(/not available in this version/i)).not.toBeInTheDocument();
+  });
+
+  it("keeps the version note for files that are not photos or videos", async () => {
+    server.use(http.get(`/api/v1/entries/${ENTRY_ID}`, () =>
+      HttpResponse.json(details({displayName: "Notes.pdf", typeHint: "pdf"})),
+    ));
+    await renderPanel();
+    await screen.findByRole("heading", {name: "Notes.pdf"});
+    expect(screen.getByText(/not available in this version/i)).toBeVisible();
   });
 
   it("cancels the in-flight details request when closed", async () => {
@@ -162,13 +228,7 @@ describe("EntryDetailsPanel", () => {
       ),
     );
     const {rerender, queryClient} = await renderPanel();
-    rerender(
-      <QueryClientProvider client={queryClient}>
-        <AuthSessionContext.Provider value={{session: SESSION}}>
-          <EntryDetailsPanel entryId={OTHER_ID} onClose={() => undefined} />
-        </AuthSessionContext.Provider>
-      </QueryClientProvider>,
-    );
+    rerender(panelTree(queryClient, OTHER_ID));
     expect(await screen.findByRole("heading", {name: "Second.pdf"})).toBeVisible();
     releaseFirst();
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -211,5 +271,254 @@ describe("EntryDetailsPanel", () => {
     expect(navigation.size).toBe(0);
     expect(screen.queryByText("Holiday album.jpg")).not.toBeInTheDocument();
     navigation.dispose();
+  });
+});
+
+describe("EntryDetailsPanel media details", () => {
+  it("labels a recorded capture time as Captured and keeps it apart from the file modified time", async () => {
+    serveMedia(mediaEntry(), mediaDetailsBody(ENTRY_ID, {
+      metadata: {capturedAt: "2026-12-24T18:30:00+00:00", capturedAtSource: "exif"},
+    }));
+    await renderPanel();
+
+    const section = await screen.findByRole("region", {name: "Photo details"});
+    await within(section).findByText("Captured", {selector: "dt"});
+    const captured = descriptionFor("Captured");
+    expect(captured.querySelector("time")).toHaveAttribute("dateTime", "2026-12-24T18:30:00+00:00");
+    expect(captured).toHaveTextContent("Exact: 2026-12-24T18:30:00+00:00");
+    expect(captured).toHaveTextContent("(UTC)");
+    expect(captured).toHaveTextContent(/EXIF metadata/);
+    expect(captured).not.toHaveTextContent("2027-01-15");
+    const modified = descriptionFor("File modified");
+    expect(modified).toHaveTextContent("2027-01-15T07:59:59.123456789Z");
+    expect(modified).toHaveTextContent(/not a capture time/i);
+    expect(modified).not.toHaveTextContent("2026-12-24");
+    expect(descriptionFor("Media")).toHaveTextContent("Photo");
+    expect(descriptionFor("Dimensions")).toHaveTextContent("4,032 × 3,024 pixels");
+    expect(descriptionFor("Camera")).toHaveTextContent("Synthetic Optics Model 7");
+    expect(within(section).queryByText("Duration", {selector: "dt"})).not.toBeInTheDocument();
+  });
+
+  it("never fills a missing capture time from the file modified time", async () => {
+    serveMedia(mediaEntry(), mediaDetailsBody(ENTRY_ID, {
+      metadata: {capturedAt: null, capturedAtSource: null, cameraMake: null, cameraModel: null},
+    }));
+    await renderPanel();
+
+    const section = await screen.findByRole("region", {name: "Photo details"});
+    await within(section).findByText("Captured", {selector: "dt"});
+    const captured = descriptionFor("Captured");
+    expect(captured).toHaveTextContent("Capture time unknown");
+    expect(captured.querySelector("time")).toBeNull();
+    expect(captured).not.toHaveTextContent("2027");
+    expect(within(section).queryByText("Camera", {selector: "dt"})).not.toBeInTheDocument();
+  });
+
+  it("shows a capture time in its recorded offset rather than the viewer's zone", async () => {
+    serveMedia(mediaEntry(), mediaDetailsBody(ENTRY_ID, {
+      metadata: {capturedAt: "2026-12-24T18:30:00+09:00", capturedAtSource: "exif"},
+    }));
+    await renderPanel();
+    await screen.findByText("Captured", {selector: "dt"});
+    const wallClock = new Intl.DateTimeFormat(undefined, {
+      dateStyle: "medium", timeStyle: "medium", timeZone: "UTC",
+    }).format(Date.UTC(2026, 11, 24, 18, 30, 0));
+    expect(descriptionFor("Captured").querySelector("time")).toHaveTextContent(`${wallClock} (UTC+09:00)`);
+  });
+
+  it("shows the reported display dimensions without swapping them for the orientation", async () => {
+    serveMedia(mediaEntry(), mediaDetailsBody(ENTRY_ID, {
+      metadata: {width: 3024, height: 4032, orientation: 6},
+    }));
+    await renderPanel();
+    await screen.findByText("Dimensions", {selector: "dt"});
+    expect(descriptionFor("Dimensions")).toHaveTextContent("3,024 × 4,032 pixels");
+  });
+
+  it("shows a video's duration and container capture source", async () => {
+    serveMedia(
+      mediaEntry({
+        displayName: "Synthetic clip.mp4",
+        typeHint: "mp4",
+        media: entryMediaFixture(ENTRY_ID, {kind: "video", durationMs: 3_723_000}),
+      }),
+      mediaDetailsBody(ENTRY_ID, {kind: "video"}),
+    );
+    await renderPanel();
+
+    const section = await screen.findByRole("region", {name: "Video details"});
+    await within(section).findByText("Duration", {selector: "dt"});
+    expect(descriptionFor("Duration")).toHaveTextContent("1:02:03");
+    expect(descriptionFor("Captured")).toHaveTextContent("Recorded in the video container.");
+    expect(within(section).queryByText("Camera", {selector: "dt"})).not.toBeInTheDocument();
+  });
+
+  it("offers Download as an attachment link only with EXPORT", async () => {
+    serveMedia(mediaEntry(), mediaDetailsBody(ENTRY_ID, {permissions: {preview: true, export: true}}));
+    const {unmount} = await renderPanel();
+
+    const download = await screen.findByRole("link", {name: "Download original"});
+    expect(download).toHaveAttribute("href", originalUrlFor(ENTRY_ID, "attachment"));
+    expect(download).toHaveAttribute("download");
+    expect(download.getAttribute("href")).not.toMatch(/^blob:/);
+    unmount();
+
+    serveMedia(mediaEntry(), mediaDetailsBody(ENTRY_ID, {permissions: {preview: true, export: false}}));
+    await renderPanel();
+    await screen.findByRole("link", {name: "Open photo"});
+    expect(screen.queryByRole("link", {name: "Download original"})).not.toBeInTheDocument();
+  });
+
+  it("opens the viewer route with opaque context in history state only with PREVIEW", async () => {
+    const onOpenMedia = vi.fn();
+    serveMedia(mediaEntry(), mediaDetailsBody(ENTRY_ID));
+    await renderPanel(ENTRY_ID, {onOpenMedia});
+
+    fireEvent.click(await screen.findByRole("link", {name: "Open photo"}));
+
+    expect(onOpenMedia).toHaveBeenCalledExactlyOnceWith(ENTRY_ID);
+    expect(screen.getByLabelText("Current route")).toHaveTextContent(
+      `/files/${FIXTURE_ROOT_ID}/view/${ENTRY_ID}`,
+    );
+    const stateText = screen.getByLabelText("History state").textContent ?? "";
+    expect(JSON.parse(stateText)).toEqual({
+      aegisMediaViewer: {
+        v: 1,
+        entryId: ENTRY_ID,
+        context: OPENER_CONTEXT,
+      },
+    });
+    expect(stateText).not.toContain("Holiday");
+  });
+
+  it("passes the opener's viewer context through history state", async () => {
+    serveMedia(mediaEntry(), mediaDetailsBody(ENTRY_ID));
+    await renderPanel(ENTRY_ID, {
+      viewerContext: {source: "directory", rootId: FIXTURE_ROOT_ID, parentId: null, returnKey: "opener1"},
+    });
+    fireEvent.click(await screen.findByRole("link", {name: "Open photo"}));
+    const stateText = screen.getByLabelText("History state").textContent ?? "";
+    expect(JSON.parse(stateText).aegisMediaViewer.context).toEqual({
+      source: "directory", rootId: FIXTURE_ROOT_ID, parentId: null, returnKey: "opener1",
+    });
+  });
+
+  it("hides Open and Download without PREVIEW or EXPORT and says why", async () => {
+    serveMedia(mediaEntry(), mediaDetailsBody(ENTRY_ID, {permissions: {preview: false, export: false}}));
+    await renderPanel();
+    await screen.findByText("Dimensions", {selector: "dt"});
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+    expect(screen.getByText("Your access to this file does not include viewing or downloading it.")).toBeVisible();
+  });
+
+  it("names Open by kind for videos", async () => {
+    serveMedia(
+      mediaEntry({typeHint: "mp4", media: entryMediaFixture(ENTRY_ID, {kind: "video", durationMs: 1000})}),
+      mediaDetailsBody(ENTRY_ID, {kind: "video"}),
+    );
+    await renderPanel();
+    expect(await screen.findByRole("link", {name: "Open video"})).toBeVisible();
+  });
+
+  it("offers no Open without the opener's viewer context", async () => {
+    serveMedia(mediaEntry(), mediaDetailsBody(ENTRY_ID));
+    await renderPanel(ENTRY_ID, {viewerContext: undefined});
+    await screen.findByRole("link", {name: "Download original"});
+    expect(screen.queryByRole("link", {name: /^Open/})).not.toBeInTheDocument();
+  });
+
+  it("hides Open for an asset the viewer cannot show", async () => {
+    serveMedia(mediaEntry(), mediaDetailsBody(ENTRY_ID, {
+      derivatives: {thumbnail: {state: "unsupported", url: null}, preview: {state: "unsupported", url: null}},
+      original: {inlineUrl: null},
+    }));
+    await renderPanel();
+    expect(await screen.findByText("This photo cannot be shown in the viewer.")).toBeVisible();
+    expect(screen.queryByRole("link", {name: /^Open/})).not.toBeInTheDocument();
+    expect(screen.getByRole("link", {name: "Download original"})).toBeVisible();
+  });
+
+  it("hides Open when the original is missing and no preview is ready", async () => {
+    serveMedia(mediaEntry({sourceState: "missing"}), mediaDetailsBody(ENTRY_ID));
+    await renderPanel();
+    expect(await screen.findByText("The original is not available right now, so this photo cannot be opened."))
+      .toBeVisible();
+    expect(screen.queryByRole("link", {name: /^Open/})).not.toBeInTheDocument();
+  });
+
+  it("still opens a missing original whose preview is ready", async () => {
+    serveMedia(mediaEntry({sourceState: "missing"}), mediaDetailsBody(ENTRY_ID, {
+      derivatives: {
+        thumbnail: {state: "ready", url: derivativeUrlFor(ENTRY_ID, "thumbnail")},
+        preview: {state: "ready", url: derivativeUrlFor(ENTRY_ID, "preview")},
+      },
+    }));
+    await renderPanel();
+    expect(await screen.findByRole("link", {name: "Open photo"})).toBeVisible();
+  });
+
+  it("drops the unavailable-actions text for media entries only", async () => {
+    serveMedia(mediaEntry(), mediaDetailsBody(ENTRY_ID));
+    await renderPanel();
+    await screen.findByRole("region", {name: "Photo details"});
+    expect(screen.getByText("Originals remain read only.")).toBeVisible();
+    expect(screen.queryByText(/not available in this version/i)).not.toBeInTheDocument();
+  });
+
+  it("requests no media details for non-media entries", async () => {
+    let mediaRequests = 0;
+    server.use(
+      http.get(`/api/v1/entries/${ENTRY_ID}`, () => HttpResponse.json(details())),
+      http.get(`/api/v1/entries/${ENTRY_ID}/media`, () => {
+        mediaRequests += 1;
+        return HttpResponse.json(mediaDetailsBody(ENTRY_ID));
+      }),
+    );
+    await renderPanel();
+    await screen.findByRole("heading", {name: "Holiday album.jpg"});
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(mediaRequests).toBe(0);
+    expect(screen.queryByRole("region", {name: /Photo details/})).not.toBeInTheDocument();
+  });
+
+  it("explains media details that are not available without offering a retry", async () => {
+    serveMedia(
+      mediaEntry(),
+      () => HttpResponse.json({type: "catalog_not_found", title: "Catalog item not found"}, {status: 404}),
+    );
+    await renderPanel();
+    expect(await screen.findByText("Media details are not available for this file.")).toBeVisible();
+    expect(screen.queryByRole("button", {name: "Retry media details"})).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", {name: "Holiday album.jpg"})).toBeVisible();
+  });
+
+  it("offers a retry after a failed media details request", async () => {
+    let calls = 0;
+    server.use(
+      http.get(`/api/v1/entries/${ENTRY_ID}`, () => HttpResponse.json(mediaEntry())),
+      http.get(`/api/v1/entries/${ENTRY_ID}/media`, () => {
+        calls += 1;
+        return calls === 1
+          ? HttpResponse.json({type: "media_unavailable", title: "Media unavailable"}, {status: 503})
+          : HttpResponse.json(mediaDetailsBody(ENTRY_ID));
+      }),
+    );
+    await renderPanel();
+    expect(await screen.findByText("Media details could not be loaded.")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", {name: "Retry media details"}));
+    expect(await screen.findByText("Dimensions", {selector: "dt"})).toBeVisible();
+  });
+
+  it("closes private access and clears media details on a media 401", async () => {
+    serveMedia(
+      mediaEntry(),
+      () => HttpResponse.json({type: "authentication_required", title: "Authentication required"}, {status: 401}),
+    );
+    const {queryClient} = await renderPanel();
+    await waitFor(() => expect(isSessionAccessOpen()).toBe(false));
+    // A still-mounted observer may rebuild an empty, refused query; no media data survives.
+    expect(queryClient.getQueryCache().findAll({queryKey: ["media"]})
+      .filter((query) => query.state.data !== undefined)).toHaveLength(0);
+    expect(screen.queryByText("Dimensions", {selector: "dt"})).not.toBeInTheDocument();
   });
 });

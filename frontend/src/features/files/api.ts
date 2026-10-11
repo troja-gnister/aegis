@@ -1,11 +1,14 @@
 import {apiRequest} from "../../api/http";
-import {genericApiProblem} from "../../api/problem";
 import {
-  capturePrivateState,
-  isPrivateStateCurrent,
-  type PrivateStateSnapshot,
-} from "../auth/cache";
-import {isSessionAccessOpen} from "../auth/session";
+  invalidResponse,
+  objectWithKeys,
+  TIMESTAMP,
+  timestamp,
+  uuid,
+} from "../../api/validate";
+import {assertAuthority, authorityBoundRequest} from "../auth/authority";
+import {capturePrivateState} from "../auth/cache";
+import {validatedEntryMedia} from "../media/validate";
 import type {
   BrowseInput,
   DirectoryPage,
@@ -21,12 +24,10 @@ const FILE_RESPONSE_BYTES = 1024 * 1024;
 const MAX_CURSOR_BYTES = 8192;
 const MAX_FILTER_BYTES = 8192;
 const MAX_LABEL_LENGTH = 4096;
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const UNSIGNED_DECIMAL = /^(?:0|[1-9][0-9]*)$/;
 const SIGNED_DECIMAL = /^(?:0|-?[1-9][0-9]*)$/;
 const TYPE_HINT = /^[a-z0-9]{1,16}$/;
 const REQUEST_ID = /^[A-Za-z0-9_-]{8,64}$/;
-const TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$/;
 const MAX_U64 = 18_446_744_073_709_551_615n;
 const MAX_I64 = 9_223_372_036_854_775_807n;
 const MIN_I64 = -9_223_372_036_854_775_808n;
@@ -36,26 +37,6 @@ const statusStates = new Set<IndexStatus["state"]>([
   "not_indexed", "queued", "scanning", "ready", "degraded", "unavailable",
 ]);
 const encoder = new TextEncoder();
-
-function invalidResponse(): never {
-  throw genericApiProblem(502);
-}
-
-function objectWithKeys(value: unknown, expected: readonly string[]): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) invalidResponse();
-  const fields = value as Record<string, unknown>;
-  const keys = Object.keys(fields).sort();
-  const sortedExpected = [...expected].sort();
-  if (keys.length !== sortedExpected.length || keys.some((key, index) => key !== sortedExpected[index])) {
-    invalidResponse();
-  }
-  return fields;
-}
-
-function uuid(value: unknown): string {
-  if (typeof value !== "string" || !UUID.test(value)) invalidResponse();
-  return value;
-}
 
 function label(value: unknown, allowEmpty = false): string {
   if (typeof value !== "string" || (!allowEmpty && value.length < 1) || value.length > MAX_LABEL_LENGTH) {
@@ -88,26 +69,6 @@ function nullableDecimal(
   return unsigned ? unsignedDecimal(value, maximum) : decimal(value, minimum, maximum);
 }
 
-function timestamp(value: unknown): string | null {
-  if (value === null) return null;
-  if (typeof value !== "string") invalidResponse();
-  const match = TIMESTAMP.exec(value);
-  if (!match) invalidResponse();
-  const [, year, month, day, hour, minute, second, , zone] = match;
-  const offset = zone === "Z" ? [0, 0] : zone.slice(1).split(":").map(Number);
-  if (
-    Number(month) < 1 || Number(month) > 12 || Number(day) < 1 || Number(day) > 31 ||
-    Number(hour) > 23 || Number(minute) > 59 || Number(second) > 59 ||
-    offset[0]! > 23 || offset[1]! > 59
-  ) invalidResponse();
-  const calendar = new Date(0);
-  calendar.setUTCFullYear(Number(year), Number(month) - 1, Number(day));
-  calendar.setUTCHours(0, 0, 0, 0);
-  if (calendar.getUTCFullYear() !== Number(year) || calendar.getUTCMonth() !== Number(month) - 1 ||
-      calendar.getUTCDate() !== Number(day)) invalidResponse();
-  return value;
-}
-
 function timestampNanoseconds(value: unknown): bigint {
   const validated = timestamp(value);
   if (validated === null) invalidResponse();
@@ -132,12 +93,14 @@ function cursor(value: unknown): string | null {
   return value;
 }
 
-const SUMMARY_KEYS = [
-  "displayName", "id", "kind", "modifiedNs", "rootId", "size", "sourceState", "typeHint", "version",
+export const SUMMARY_KEYS = [
+  "displayName", "id", "kind", "media", "modifiedNs", "rootId", "size", "sourceState", "typeHint", "version",
 ] as const;
 
-function validatedSummary(value: unknown, expectedRootId?: string): EntrySummary {
+/** Validate one entry summary (entries list, details, timeline items) with its `media` field. */
+export function validatedSummary(value: unknown, expectedRootId?: string): EntrySummary {
   const fields = objectWithKeys(value, SUMMARY_KEYS);
+  const id = uuid(fields.id);
   const rootId = uuid(fields.rootId);
   if (expectedRootId !== undefined && rootId !== expectedRootId) invalidResponse();
   if (typeof fields.kind !== "string" || !entryKinds.has(fields.kind as EntryKind)) invalidResponse();
@@ -148,7 +111,7 @@ function validatedSummary(value: unknown, expectedRootId?: string): EntrySummary
     invalidResponse();
   }
   return {
-    id: uuid(fields.id),
+    id,
     rootId,
     displayName: label(fields.displayName),
     kind: fields.kind as EntryKind,
@@ -157,6 +120,7 @@ function validatedSummary(value: unknown, expectedRootId?: string): EntrySummary
     modifiedNs: nullableDecimal(fields.modifiedNs, MIN_I64, MAX_I64),
     sourceState: fields.sourceState as SourceState,
     version: unsignedDecimal(fields.version, MAX_I64),
+    media: fields.media === null ? null : validatedEntryMedia(fields.media, id),
   };
 }
 
@@ -298,30 +262,6 @@ function assertInput(input: BrowseInput): void {
   if (input.parentId !== null) uuid(input.parentId);
   validatedFilters(input.filters);
   if (input.cursor !== undefined) cursor(input.cursor);
-}
-
-async function authorityBoundRequest<T>(
-  request: Promise<T>,
-  snapshot: PrivateStateSnapshot,
-  signal?: AbortSignal,
-  namespace = snapshot.namespace,
-): Promise<T> {
-  try {
-    return await request;
-  } catch (error) {
-    assertAuthority(snapshot, signal, namespace);
-    throw error;
-  }
-}
-
-function assertAuthority(
-  snapshot: PrivateStateSnapshot,
-  signal?: AbortSignal,
-  namespace = snapshot.namespace,
-): void {
-  if (signal?.aborted || !isSessionAccessOpen() || !isPrivateStateCurrent(snapshot, namespace)) {
-    throw genericApiProblem();
-  }
 }
 
 export async function fetchDirectory(input: BrowseInput, signal: AbortSignal): Promise<DirectoryPage> {

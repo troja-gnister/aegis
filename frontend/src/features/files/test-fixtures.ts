@@ -10,11 +10,12 @@ export function fixtureEntry(index: number): EntrySummary {
     rootId: FIXTURE_ROOT_ID,
     displayName: `Synthetic file ${index.toString().padStart(4, "0")}.jpg`,
     kind: "file",
-    typeHint: "image",
+    typeHint: "jpg",
     size: String(index * 1024),
     modifiedNs: String(1_800_000_000_000_000_000n + BigInt(index)),
     sourceState: "present",
     version: String(index + 1),
+    media: null,
   };
 }
 

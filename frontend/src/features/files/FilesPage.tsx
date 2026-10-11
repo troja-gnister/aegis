@@ -452,6 +452,9 @@ export function FilesPage() {
         <EntryDetailsPanel
           key={selectedFileId}
           entryId={selectedFileId}
+          viewerContext={{source: "directory", rootId: root.id, parentId: parentId ?? null, returnKey: routeKey}}
+          // The viewer's Back returns here; record the visible anchor like a directory open does.
+          onOpenMedia={() => remember()}
           onClose={() => {
             const target = detailsReturnRef.current;
             setSelection(null);

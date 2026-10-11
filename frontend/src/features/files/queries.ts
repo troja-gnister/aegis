@@ -4,9 +4,9 @@ import {
   type InfiniteData,
   type QueryClient,
 } from "@tanstack/react-query";
-import {ApiProblem, genericApiProblem} from "../../api/problem";
+import {ApiProblem} from "../../api/problem";
+import {assertQueryAuthority, captureQueryAuthority} from "../auth/authority";
 import {
-  capturePrivateState,
   isPrivateStateCurrent,
   purgePrivateBrowserState,
   type PrivateStateSnapshot,
@@ -17,7 +17,12 @@ import {fetchDirectory, fetchEntry, fetchIndexStatus, requestScan} from "./api";
 import {clearFileNavigationRoot} from "./navigation";
 import type {BrowseInput, DirectoryPage} from "./types";
 
-async function handleCatalogFailure(
+/**
+ * Shared failure handling for catalog and media requests. A 401 closes private
+ * access, cancels file and media queries and purges private state; a 404 for
+ * a root drops that root's retained navigation and refreshes the root list.
+ */
+export async function handleCatalogFailure(
   error: unknown,
   queryClient: QueryClient,
   namespace: string,
@@ -28,7 +33,10 @@ async function handleCatalogFailure(
   assertQueryAuthority(authority, namespace, signal);
   if (error instanceof ApiProblem && error.status === 401) {
     const generation = beginSignOut();
-    const cancellation = queryClient.cancelQueries({queryKey: ["files"]});
+    const cancellation = Promise.all([
+      queryClient.cancelQueries({queryKey: ["files"]}),
+      queryClient.cancelQueries({queryKey: ["media"]}),
+    ]);
     const cleanup = purgePrivateBrowserState(queryClient).then(() => true, () => false);
     const [cleanupSucceeded] = await Promise.all([cleanup, cancellation]);
     completeSignOut(generation, true, cleanupSucceeded);
@@ -37,22 +45,6 @@ async function handleCatalogFailure(
     await queryClient.invalidateQueries({queryKey: ["roots", namespace]});
   }
   throw error;
-}
-
-function assertQueryAuthority(
-  authority: PrivateStateSnapshot,
-  namespace: string,
-  signal: AbortSignal,
-): void {
-  if (signal.aborted || !isSessionAccessOpen() || !isPrivateStateCurrent(authority, namespace)) {
-    throw genericApiProblem();
-  }
-}
-
-function captureQueryAuthority(namespace: string, signal: AbortSignal): PrivateStateSnapshot {
-  const authority = capturePrivateState();
-  assertQueryAuthority(authority, namespace, signal);
-  return authority;
 }
 
 function deduplicateWindow(

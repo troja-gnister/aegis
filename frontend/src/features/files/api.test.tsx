@@ -9,6 +9,7 @@ import {
   fetchIndexStatus,
   requestScan,
 } from "./api";
+import {entryMediaFixture, thumbnailUrlFor} from "../media/test-fixtures";
 import {emptyFilterDraft, filtersFromDraft} from "./filter-state";
 import {setTestTimeZone} from "./test-fixtures";
 import type {BrowseInput, DirectoryPage} from "./types";
@@ -51,6 +52,7 @@ function summary(id = ENTRY_ID) {
     modifiedNs: "-9223372036854775808",
     sourceState: "present" as const,
     version: "9223372036854775807",
+    media: null,
   };
 }
 
@@ -106,6 +108,66 @@ describe("file API guards", () => {
     await expect(fetchDirectory(input, new AbortController().signal)).rejects.toMatchObject({
       status: 502,
     });
+  });
+
+  it("accepts a media summary with a ready, same-origin thumbnail for the same entry", async () => {
+    const body = page();
+    body.entries[0]!.media = entryMediaFixture(ENTRY_ID);
+    server.use(http.get(`/api/v1/roots/${ROOT_ID}/entries`, () => HttpResponse.json(body)));
+
+    const result = await fetchDirectory(input, new AbortController().signal);
+    expect(result.entries[0]!.media).toEqual(entryMediaFixture(ENTRY_ID));
+  });
+
+  it("nulls a malformed optional media dimension instead of failing the page", async () => {
+    const body = page();
+    (body.entries[0]!.media as unknown) = {...entryMediaFixture(ENTRY_ID), width: "wide", durationMs: -5};
+    server.use(http.get(`/api/v1/roots/${ROOT_ID}/entries`, () => HttpResponse.json(body)));
+
+    const result = await fetchDirectory(input, new AbortController().signal);
+    expect(result.entries[0]!.media).toMatchObject({width: null, height: 3024, durationMs: null});
+    expect(result.entries[0]!.media?.thumbnailUrl).toBe(thumbnailUrlFor(ENTRY_ID));
+  });
+
+  it.each([
+    ["a thumbnail URL without the fingerprint parameter", (value: DirectoryPage) => {
+      value.entries[0]!.media = entryMediaFixture(ENTRY_ID, {
+        thumbnailUrl: `/media/v1/derivatives/${ENTRY_ID}/thumbnail?n=x&e=4`,
+      });
+    }],
+    ["a summary without the media field", (value: DirectoryPage) => {
+      delete (value.entries[0] as Partial<DirectoryPage["entries"][number]>).media;
+    }],
+    ["a thumbnail URL before the thumbnail is ready", (value: DirectoryPage) => {
+      value.entries[0]!.media = entryMediaFixture(ENTRY_ID, {thumbnail: "pending"});
+    }],
+    ["another entry's thumbnail URL", (value: DirectoryPage) => {
+      value.entries[0]!.media = entryMediaFixture(ENTRY_ID, {
+        thumbnailUrl: thumbnailUrlFor("44444444-4444-4444-8444-444444444444"),
+      });
+    }],
+    ["a cross-origin thumbnail URL", (value: DirectoryPage) => {
+      value.entries[0]!.media = entryMediaFixture(ENTRY_ID, {
+        thumbnailUrl: `https://elsewhere.test${thumbnailUrlFor(ENTRY_ID)}`,
+      });
+    }],
+    ["a blob thumbnail URL", (value: DirectoryPage) => {
+      value.entries[0]!.media = entryMediaFixture(ENTRY_ID, {thumbnailUrl: "blob:http://localhost/private"});
+    }],
+    ["an unknown thumbnail state", (value: DirectoryPage) => {
+      (value.entries[0]!.media as unknown) = {...entryMediaFixture(ENTRY_ID), thumbnail: "building"};
+    }],
+    ["a missing sort date", (value: DirectoryPage) => {
+      (value.entries[0]!.media as unknown) = {...entryMediaFixture(ENTRY_ID), sortDate: null};
+    }],
+    ["an extra media field", (value: DirectoryPage) => {
+      (value.entries[0]!.media as unknown) = {...entryMediaFixture(ENTRY_ID), gps: "51.5,-0.1"};
+    }],
+  ])("rejects %s", async (_name, mutate) => {
+    const body = page();
+    mutate(body);
+    server.use(http.get(`/api/v1/roots/${ROOT_ID}/entries`, () => HttpResponse.json(body)));
+    await expect(fetchDirectory(input, new AbortController().signal)).rejects.toMatchObject({status: 502});
   });
 
   it("accepts every filter shape the filter panel can produce under the shared bounds", async () => {

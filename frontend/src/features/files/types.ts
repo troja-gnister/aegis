@@ -1,3 +1,5 @@
+import type {EntryMedia} from "../media/types";
+
 export type EntryKind = "directory" | "file" | "symlink" | "special";
 export type SourceState = "present" | "missing" | "inaccessible" | "unsupported";
 
@@ -21,6 +23,8 @@ export type EntrySummary = {
   modifiedNs: string | null;
   sourceState: SourceState;
   version: string;
+  /** Media summary for photo and video files; null for every other entry. */
+  media: EntryMedia | null;
 };
 
 export type IndexStatus = {

@@ -2,6 +2,9 @@ import {useQuery, useQueryClient} from "@tanstack/react-query";
 import {useEffect, useRef} from "react";
 import {ApiProblem} from "../../api/problem";
 import {useAuthSession} from "../auth/session";
+import {mediaKindOf} from "../media/classify";
+import {MediaDetailsSection} from "../media/MediaDetailsSection";
+import type {MediaViewerContext} from "../media/types";
 import {approximateBytes, formatExactCount, formatLocalDateTime, nanosecondsToInstant} from "./format";
 import {entryQueryOptions} from "./queries";
 import type {EntryDetails, EntryKind, SourceState} from "./types";
@@ -9,6 +12,10 @@ import type {EntryDetails, EntryKind, SourceState} from "./types";
 export type EntryDetailsPanelProps = {
   entryId: string;
   onClose(): void;
+  /** The opener's context for the media viewer's history state; without one, Open is not offered. */
+  viewerContext?: MediaViewerContext;
+  /** Called when Open is activated for a media entry, before the viewer route is entered. */
+  onOpenMedia?(entryId: string): void;
 };
 
 const KIND_TEXT: Record<EntryKind, string> = {
@@ -60,6 +67,15 @@ function ModifiedValue({modifiedNs}: {modifiedNs: string | null}) {
   );
 }
 
+function readOnlyText(entry: EntryDetails): string {
+  if (entry.media !== null) return "Originals remain read only.";
+  // A photo or video the media catalog has not described yet.
+  if (mediaKindOf(entry) !== null) {
+    return "Originals remain read only. Opening, preview and download are not available for this file yet.";
+  }
+  return "Originals remain read only. Opening, preview and download are not available in this version.";
+}
+
 function detailsError(error: unknown): string {
   if (error instanceof ApiProblem && error.status === 404) {
     return "This entry is no longer in the index, or it is no longer available to you.";
@@ -67,7 +83,7 @@ function detailsError(error: unknown): string {
   return "File details could not be loaded.";
 }
 
-export function EntryDetailsPanel({entryId, onClose}: EntryDetailsPanelProps) {
+export function EntryDetailsPanel({entryId, onClose, viewerContext, onOpenMedia}: EntryDetailsPanelProps) {
   const {session} = useAuthSession();
   const queryClient = useQueryClient();
   const options = entryQueryOptions(session.cacheNamespace, entryId);
@@ -131,6 +147,13 @@ export function EntryDetailsPanel({entryId, onClose}: EntryDetailsPanelProps) {
             <div><dt>Availability</dt><dd>{SOURCE_TEXT[entry.sourceState]}</dd></div>
             <div><dt>Catalog version</dt><dd>{formatExactCount(entry.version)}</dd></div>
           </dl>
+          {entry.media !== null ? (
+            <MediaDetailsSection
+              entry={{id: entry.id, rootId: entry.rootId, sourceState: entry.sourceState, media: entry.media}}
+              viewerContext={viewerContext}
+              onOpenMedia={onOpenMedia}
+            />
+          ) : null}
           {notes.map((note) => <p key={note} className="notice">{note}</p>)}
           <ol className="entry-details__location" aria-label="Location">
             {entry.ancestorsTruncated ? <li>… earlier folders omitted</li> : null}
@@ -138,9 +161,7 @@ export function EntryDetailsPanel({entryId, onClose}: EntryDetailsPanelProps) {
               <li key={ancestor.id} dir="auto">{ancestor.displayName === "" ? "Root" : ancestor.displayName}</li>
             ))}
           </ol>
-          <p className="entry-details__read-only">
-            Originals remain read only. Opening, preview and download are not available in this version.
-          </p>
+          <p className="entry-details__read-only">{readOnlyText(entry)}</p>
         </>
       ) : null}
     </section>

@@ -119,6 +119,10 @@
   background: rgb(34 211 238 / 10%);
 }
 
+.file-row__icon--media {
+  overflow: hidden;
+}
+
 .file-row__icon--directory {
   color: var(--color-primary);
   background: rgb(129 140 248 / 12%);
