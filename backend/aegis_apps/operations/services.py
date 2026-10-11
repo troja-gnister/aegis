@@ -32,12 +32,16 @@ from .models import (
 )
 from .serializers import (
     canonical_json_bytes,
+    normalize_media_request_payload,
     normalize_probe_intent,
 )
 from .serializers import validate_authorization_snapshot as validate_snapshot_schema
 
 DEFAULT_MAX_ATTEMPTS: Final = 5
 MAX_JOB_SCHEDULE_DELTA: Final = timedelta(days=366)
+# Interactive media requests: one media-role job whose payload names the entry, bound to
+# an intent with that entry's single root (operations.serializers).
+MEDIA_REQUEST_KINDS: Final = frozenset({JobKind.MEDIA_PREVIEW, JobKind.MEDIA_TRANSCODE})
 
 
 class _Unset:
@@ -116,6 +120,35 @@ def _validate_max_attempts(value: object) -> int:
     if type(value) is not int or not 1 <= value <= MAX_JOB_ATTEMPTS:
         raise ValueError("invalid maximum attempts")
     return value
+
+
+def _job_payload(
+    kind: JobKind,
+    role: WorkerRole,
+    intent: dict[str, object],
+    payload: Mapping[str, object] | None,
+) -> dict[str, object]:
+    """The exact payload a job of *kind* for *role* carries.
+
+    Foundation jobs carry their operation's intent. Media request jobs exist only for the
+    media role and carry a media request payload bound to the intent.
+    """
+    if kind in MEDIA_REQUEST_KINDS:
+        if role != WorkerRole.MEDIA or payload is None:
+            raise ValueError("invalid job payload")
+        try:
+            return normalize_media_request_payload(payload, intent=intent)
+        except ValueError as exc:
+            raise ValueError("invalid job payload") from exc
+    if payload is None:
+        return intent
+    try:
+        supplied = normalize_probe_intent(payload)
+    except ValueError as exc:
+        raise ValueError("invalid job payload") from exc
+    if supplied != intent:
+        raise ValueError("job payload does not match operation")
+    return intent
 
 
 def _validate_available_at(value: object, *, reference: datetime) -> datetime:
@@ -246,6 +279,8 @@ def _existing_idempotent_operation(
     kind: JobKind,
     request_hash: bytes,
     intent: Mapping[str, object],
+    role: WorkerRole = WorkerRole.OPERATIONS,
+    payload: Mapping[str, object] | None = None,
 ) -> Operation | None:
     matching = Operation.objects.select_for_update().filter(
         actor_id=actor_id,
@@ -274,15 +309,15 @@ def _existing_idempotent_operation(
     )
     initial = Job.objects.filter(
         operation=operation,
-        target_role=WorkerRole.OPERATIONS,
+        target_role=role,
     ).first()
     if initial is None:
         raise ValueError("operation initial job is missing")
     _verify_existing_job(
         initial,
-        role=WorkerRole.OPERATIONS,
+        role=role,
         kind=kind,
-        payload=intent,
+        payload=intent if payload is None else payload,
         priority=0,
         max_attempts=DEFAULT_MAX_ATTEMPTS,
         explicit_available_at=None,
@@ -306,10 +341,8 @@ def enqueue_job(
     if not isinstance(operation, Operation) or not isinstance(operation.pk, uuid.UUID):
         raise ValueError("invalid operation")
     supplied_kind = _validate_kind(kind) if kind is not None else None
-    try:
-        supplied_payload = normalize_probe_intent(payload) if payload is not None else None
-    except ValueError as exc:
-        raise ValueError("invalid job payload") from exc
+    if payload is not None and not isinstance(payload, Mapping):
+        raise ValueError("invalid job payload")
     reference = timezone.now()
     explicit_available = (
         None
@@ -322,11 +355,11 @@ def enqueue_job(
         if stored is None:
             raise ValueError("invalid operation")
         stored_kind = _validate_kind(stored.kind)
-        stored_payload = normalize_probe_intent(stored.intent)
         if supplied_kind is not None and supplied_kind != stored_kind:
             raise ValueError("job kind does not match operation")
-        if supplied_payload is not None and supplied_payload != stored_payload:
-            raise ValueError("job payload does not match operation")
+        stored_payload = _job_payload(
+            stored_kind, role, normalize_probe_intent(stored.intent), payload,
+        )
         existing = Job.objects.filter(operation=stored, target_role=role).first()
         if existing is not None:
             _verify_existing_job(
@@ -358,20 +391,38 @@ def create_operation(
     request_id: str,
     kind: str,
     intent: object,
+    target_role: str = WorkerRole.OPERATIONS,
+    payload: Mapping[str, object] | None = None,
+    shared_root_locks: bool = False,
 ) -> Operation:
+    """Create an operation and its initial job, idempotently per actor and request ID.
+
+    The initial job targets *target_role* and carries the intent, except for media
+    request kinds, whose media-role job carries *payload* (bound to the intent). Their
+    request hash covers the payload as well.
+
+    With *shared_root_locks*, the intent's roots are locked FOR SHARE instead of FOR
+    UPDATE: grant and root changes are still excluded while the snapshot is captured,
+    readers are not blocked, and the actor's FOR UPDATE lock serializes the actor's own
+    requests. A caller that already holds these locks keeps them (no lock upgrade).
+    """
     bounded_request_id = _validate_request_id(request_id)
     operation_kind = _validate_kind(kind)
+    role = _validate_role(target_role)
     normalized_intent = normalize_probe_intent(intent)
     canonical = canonical_json_bytes(normalized_intent, maximum_bytes=16_384)
+    job_payload = _job_payload(operation_kind, role, normalized_intent, payload)
     actor_id = _validate_actor(actor)
     requirements = _authorization_requirements(normalized_intent)
-    request_hash = hashlib.sha256(
-        b"\x00".join((str(actor_id).encode(), operation_kind.encode(), canonical))
-    ).digest()
+    hashed = [str(actor_id).encode(), operation_kind.encode(), canonical]
+    if operation_kind in MEDIA_REQUEST_KINDS:
+        hashed.append(canonical_json_bytes(job_payload, maximum_bytes=16_384))
+    request_hash = hashlib.sha256(b"\x00".join(hashed)).digest()
+    media_payload = job_payload if operation_kind in MEDIA_REQUEST_KINDS else None
 
     with transaction.atomic():
         authorization_locks = AuthorizationLocks()
-        locked_roots = authorization_locks.roots(requirements)
+        locked_roots = authorization_locks.roots(requirements, shared=shared_root_locks)
         locked_actor = _active_actor(
             actor_id,
             locked_users=authorization_locks.users((actor_id,)),
@@ -382,6 +433,8 @@ def create_operation(
             kind=operation_kind,
             request_hash=request_hash,
             intent=normalized_intent,
+            role=role,
+            payload=media_payload,
         )
         if existing is not None:
             return existing
@@ -404,7 +457,8 @@ def create_operation(
                 )
                 enqueue_job(
                     operation=operation,
-                    target_role=WorkerRole.OPERATIONS,
+                    target_role=role,
+                    payload=media_payload,
                 )
                 return operation
         except IntegrityError:
@@ -414,6 +468,8 @@ def create_operation(
                 kind=operation_kind,
                 request_hash=request_hash,
                 intent=normalized_intent,
+                role=role,
+                payload=media_payload,
             )
             if conflicting is None:
                 raise

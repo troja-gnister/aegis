@@ -394,3 +394,149 @@ def test_enqueue_job_rejects_unbounded_values(kwargs: dict[str, object]) -> None
     )
     with pytest.raises(ValueError):
         enqueue_job(operation=operation, **cast(dict[str, Any], kwargs))
+
+
+MEDIA_FINGERPRINT = "0123456789abcdef" * 4
+
+
+def _media_request(root: Root, *, entry_id: uuid.UUID | None = None) -> dict[str, object]:
+    return {
+        "v": 1,
+        "rootId": str(root.id),
+        "entryId": str(entry_id or uuid.UUID("2da07a6e-9b5c-4e30-9c77-5e9f4b3a2c33")),
+        "fingerprint": MEDIA_FINGERPRINT,
+    }
+
+
+def _media_actor(root: Root) -> User:
+    actor = _actor(username=f"media-{uuid.uuid4().hex[:8]}")
+    RootGrant.objects.create(
+        root=root, user=actor, permissions=int(Permission.BROWSE | Permission.PREVIEW),
+    )
+    return actor
+
+
+@pytest.mark.parametrize("kind", ["media.preview", "media.transcode"])
+def test_media_request_operation_targets_media_with_a_bound_payload(kind: str) -> None:
+    root = _root(epoch=3)
+    actor = _media_actor(root)
+    intent = {"roots": [{"id": str(root.id), "permissions": 3}]}
+    payload = _media_request(root)
+
+    operation = create_operation(
+        actor=actor, request_id="media_request_0001", kind=kind, intent=intent,
+        target_role="media", payload=payload,
+    )
+
+    job = operation.jobs.get()
+    assert job.target_role == "media"
+    assert job.kind == kind
+    assert job.payload == payload
+    assert operation.intent == intent
+    assert operation.authorization_snapshot == {
+        "userEpoch": actor.authorization_epoch, "rootEpochs": {str(root.id): 3},
+    }
+    canonical = [
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+        for value in (intent, payload)
+    ]
+    assert bytes(operation.request_hash) == hashlib.sha256(
+        b"\x00".join((str(actor.id).encode(), kind.encode(), *canonical))
+    ).digest()
+    repeated = create_operation(
+        actor=actor, request_id="media_request_0001", kind=kind, intent=intent,
+        target_role="media", payload=payload,
+    )
+    assert repeated.id == operation.id
+    assert Job.objects.count() == 1
+
+
+def test_media_request_with_another_payload_conflicts_with_its_request_id() -> None:
+    root = _root()
+    actor = _media_actor(root)
+    intent = {"roots": [{"id": str(root.id), "permissions": 3}]}
+    create_operation(
+        actor=actor, request_id="media_request_0002", kind="media.preview", intent=intent,
+        target_role="media", payload=_media_request(root),
+    )
+
+    with pytest.raises(ValueError, match="idempotency conflict"):
+        create_operation(
+            actor=actor, request_id="media_request_0002", kind="media.preview", intent=intent,
+            target_role="media", payload=_media_request(root, entry_id=uuid.uuid4()),
+        )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"target_role": "operations"},
+        {"target_role": "indexer"},
+        {"payload": None},
+        {"payload": {"roots": []}},
+        {"intent": {"roots": []}},
+        {"intent": "other-root"},
+        {"intent": "browse-only"},
+    ],
+)
+def test_media_request_operations_reject_unbound_shapes(overrides: dict[str, object]) -> None:
+    root = _root()
+    other = _root()
+    actor = _media_actor(root)
+    RootGrant.objects.create(root=other, user=actor, permissions=3)
+    values: dict[str, Any] = {
+        "actor": actor,
+        "request_id": "media_request_0003",
+        "kind": "media.preview",
+        "intent": {"roots": [{"id": str(root.id), "permissions": 3}]},
+        "target_role": "media",
+        "payload": _media_request(root),
+    }
+    values.update(overrides)
+    if overrides.get("intent") == "other-root":
+        values["intent"] = {"roots": [{"id": str(other.id), "permissions": 3}]}
+    elif overrides.get("intent") == "browse-only":
+        values["intent"] = {"roots": [{"id": str(root.id), "permissions": 1}]}
+
+    with pytest.raises(ValueError, match="payload"):
+        create_operation(**values)
+    assert not Operation.objects.exists()
+
+
+def test_media_request_needs_the_actor_to_hold_browse_and_preview() -> None:
+    root = _root()
+    actor = _actor(username="media-browse-only")
+    RootGrant.objects.create(root=root, user=actor, permissions=int(Permission.BROWSE))
+
+    with pytest.raises(ValueError, match="authorization"):
+        create_operation(
+            actor=actor, request_id="media_request_0004", kind="media.preview",
+            intent={"roots": [{"id": str(root.id), "permissions": 3}]},
+            target_role="media", payload=_media_request(root),
+        )
+    assert not Operation.objects.exists()
+
+
+def test_enqueue_job_keeps_media_payloads_on_the_media_role_only() -> None:
+    root = _root()
+    actor = _media_actor(root)
+    payload = _media_request(root)
+    operation = create_operation(
+        actor=actor, request_id="media_request_0005", kind="media.preview",
+        intent={"roots": [{"id": str(root.id), "permissions": 3}]},
+        target_role="media", payload=payload,
+    )
+
+    assert enqueue_job(operation=operation, target_role="media", payload=payload).payload == (
+        payload
+    )
+    with pytest.raises(ValueError, match="payload"):
+        enqueue_job(operation=operation, target_role="media")
+    with pytest.raises(ValueError, match="payload"):
+        enqueue_job(operation=operation, target_role="operations", payload=payload)
+    with pytest.raises(ValueError, match="payload conflict"):
+        enqueue_job(
+            operation=operation, target_role="media",
+            payload=_media_request(root, entry_id=uuid.uuid4()),
+        )
+    assert Job.objects.count() == 1

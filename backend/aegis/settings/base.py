@@ -4,6 +4,7 @@ from pathlib import Path
 
 from aegis_apps.indexing.config import ScanPolicy
 from aegis_apps.media.config import MediaPolicy
+from aegis_apps.media.request_policy import MediaRequestPolicy
 from aegis_apps.operations.config import WorkerRuntimeConfig
 
 from aegis.config import RuntimeConfig, read_secret, web_database_pool_options
@@ -18,6 +19,7 @@ RUNTIME_CONFIG = RuntimeConfig.from_environ(_runtime_environ)
 WORKER_RUNTIME_CONFIG = WorkerRuntimeConfig.from_environ(_runtime_environ)
 AEGIS_SCAN_POLICY = ScanPolicy.from_environment(_runtime_environ)
 AEGIS_MEDIA_POLICY = MediaPolicy.from_environ(_runtime_environ)
+AEGIS_MEDIA_REQUEST_POLICY = MediaRequestPolicy.from_environ(_runtime_environ)
 AEGIS_AUTH_THROTTLE_HMAC_KEY = read_secret(
     _runtime_environ,
     "AEGIS_AUTH_THROTTLE_HMAC_KEY",

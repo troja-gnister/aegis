@@ -41,7 +41,7 @@ Entry summaries (from the entries list, entry details and the timeline) gain `me
 Requires BROWSE; returns 404 for non-media entries. Response:
 
 ```json
-{"entryId": "<uuid>", "kind": "photo" | "video", "fingerprint": "<64 hex>",
+{"entryId": "<uuid>", "kind": "photo" | "video", "fingerprint": "<32 hex HMAC token of the source fingerprint>",
  "metadata": {"width": int|null, "height": int|null, "orientation": int|null,  // display dimensions: orientation/rotation already applied
               "capturedAt": str|null, "capturedAtSource": "exif"|"container"|null,
               "cameraMake": str|null, "cameraModel": str|null, "durationMs": int|null,

@@ -9,6 +9,7 @@ from typing import Any, ClassVar
 from django.conf import settings
 from django.db import models
 from django.db.models.expressions import RawSQL
+from django.db.models.fields.json import KeyTransform
 
 from .enums import HeartbeatStatus, JobKind, JobState, SafeErrorCode, WorkerRole
 
@@ -17,6 +18,8 @@ MAX_JOB_PRIORITY = 32_767
 MAX_JOB_ATTEMPTS = 100
 UNCONFIGURED_MANIFEST_IDENTITY = "unconfigured:v1"
 OPERATION_IDEMPOTENCY_NAMESPACE_V1 = "v1"
+MEDIA_REQUEST_ACTIVE_STATES = (JobState.QUEUED, JobState.RUNNING, JobState.RETRY_WAIT)
+MEDIA_REQUEST_INDEXED_STATES = (*MEDIA_REQUEST_ACTIVE_STATES, JobState.FAILED)
 
 IMMUTABLE_JOB_FIELDS = frozenset(
     {"operation", "operation_id", "target_role", "kind", "payload", "priority", "max_attempts"}
@@ -473,6 +476,19 @@ class Job(models.Model):
                 name="operations_job_claim_idx",
             ),
             models.Index(fields=("lease_expires_at",), name="operations_job_lease_idx"),
+            # Interactive media requests: idempotency, the per-actor cap and the failure
+            # backoff look up a kind, a state and the payload's entry. Only open or
+            # failed media-role jobs are indexed.
+            models.Index(
+                "kind",
+                "state",
+                KeyTransform("entryId", "payload"),
+                condition=models.Q(
+                    target_role=WorkerRole.MEDIA,
+                    state__in=MEDIA_REQUEST_INDEXED_STATES,
+                ),
+                name="operations_job_media_req_idx",
+            ),
         ]
 
     def save(self, *args: Any, **kwargs: Any) -> None:

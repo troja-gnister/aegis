@@ -107,7 +107,8 @@ def test_seed_creates_exact_identities_roots_and_grants_idempotently(
     assert all(root.active and root.mode == Root.Mode.READ_ONLY for root in (alice_root, bob_root))
     assert RootGrant.objects.count() == 2
     assert RootGrant.objects.filter(
-        root=alice_root, user=alice, group=None, permissions=int(Permission.BROWSE)
+        root=alice_root, user=alice, group=None,
+        permissions=int(Permission.BROWSE | Permission.PREVIEW | Permission.EXPORT),
     ).count() == 1
     assert RootGrant.objects.filter(
         root=bob_root, user=None, group=group, permissions=int(Permission.BROWSE)
@@ -146,7 +147,10 @@ def test_seed_fails_closed_on_existing_identity_drift(
     assert Root.objects.count() == 0
 
 
-@pytest.mark.parametrize("drift", ("manifest", "group_permissions", "grant", "password"))
+@pytest.mark.parametrize(
+    "drift",
+    ("manifest", "group_permissions", "grant", "grant_browse_only", "bob_media", "password"),
+)
 def test_seed_rerun_rejects_drift_without_repairing_existing_records(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, drift: str
 ) -> None:
@@ -165,6 +169,13 @@ def test_seed_rerun_rejects_drift_without_repairing_existing_records(
             Group.objects.get(name="e2e-bob").permissions.add(permission)
         elif drift == "grant":
             RootGrant.objects.filter(user=alice).update(permissions=int(Permission.EXPORT))
+        elif drift == "grant_browse_only":
+            # The pre-media fixture shape is drift too: it is never silently widened.
+            RootGrant.objects.filter(user=alice).update(permissions=int(Permission.BROWSE))
+        elif drift == "bob_media":
+            RootGrant.objects.filter(group__name="e2e-bob").update(
+                permissions=int(Permission.BROWSE | Permission.PREVIEW),
+            )
         else:
             _secret(tmp_path / "alice-password", "A-different-new-password-987!")
 

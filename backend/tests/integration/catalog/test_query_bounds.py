@@ -130,7 +130,7 @@ def test_wire_fields_and_index_status_preserve_integer_precision(browse_fixture:
         "id": str(entry.pk), "rootId": str(browse_fixture.root.pk), "displayName": "wire",
         "kind": "file", "typeHint": None, "size": "18446744073709551615",
         "modifiedNs": "9223372036854775807", "sourceState": "present",
-        "version": "9007199254740993",
+        "version": "9007199254740993", "media": None,
     }
     status = page["indexStatus"]
     assert status["state"] == "scanning"

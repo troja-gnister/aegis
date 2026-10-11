@@ -297,6 +297,7 @@ def test_details_are_allowlisted_and_query_parameters_are_rejected(api_catalog: 
         "modifiedNs": str(2**62 + 9),
         "sourceState": "present",
         "version": "0",
+        "media": None,
         "parentId": str(api_catalog.anchor.pk),
         "ancestors": [{"id": str(api_catalog.anchor.pk), "displayName": ""}],
         "ancestorsTruncated": False,

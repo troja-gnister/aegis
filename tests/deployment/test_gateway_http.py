@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import ipaddress
 import json
 import os
@@ -9,15 +10,18 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from email.message import Message
 from pathlib import Path
 
 import pytest
+from aegis_apps.media.disposition import content_disposition
+from aegis_apps.media.paths import derivative_redirect, original_redirect
 from aegisctl.container_engine import container_command
 
 from tests.support.container_runtime import (
+    FreshTestTree,
     OwnedDirectResource,
     OwnedDirectScope,
     cleanup_owned_resources,
@@ -48,6 +52,31 @@ NGINX_IMAGE = (
     "sha256:45ce1e2e699234253d1def7baa96218a5d00b498d1ba0cbb1a17b6bdf73d1351"
 )
 SAFE_REQUEST_ID = re.compile(r"[A-Za-z0-9_-]{8,64}\Z")
+MEDIA_SLOT = "gateway-test"
+DERIVATIVE_KEY = "ab" + "cd" + "0123456789abcdef" * 3 + "0123456789ab"
+DERIVATIVE_BYTES = b"RIFF\x10\x00\x00\x00WEBPsynthetic-derivative-bytes"
+# web's validator: the key, the published size and the row's creation time.
+DERIVATIVE_ETAG = f'"{DERIVATIVE_KEY}.{len(DERIVATIVE_BYTES)}.1760000000000000"'
+DIRECTORY_KEY = "ab" + "cd" + "f" * 60
+VIDEO_BYTES = bytes(range(256)) * 16
+SECRET_BYTES = b"outside-the-slot"
+LONG_NAMES = (b"\xe9" * 240,) * 11 + (b"long.bin",)
+LONG_BYTES = b"long-path-original"
+# Raw name paths below the slot and their synthetic contents. The names cover a space,
+# "%", "?", "#", "+", a literal percent sequence, a "..." directory, non-UTF-8 and
+# Unicode bytes, and a path the hashed-asset regex location would otherwise claim.
+ORIGINAL_VECTORS: dict[str, tuple[tuple[bytes, ...], bytes]] = {
+    "space": ((b"space name.jpg",), b"vector-space"),
+    "percent": ((b"100%.jpg",), b"vector-percent"),
+    "question": ((b"what?.jpg",), b"vector-question"),
+    "hash": ((b"hash#tag.jpg",), b"vector-hash"),
+    "plus": ((b"plus+sign.jpg",), b"vector-plus"),
+    "literal-escape": ((b"dir with space", b"inner%3F.jpg"), b"vector-literal-escape"),
+    "dots": ((b"...", b"dots.jpg"), b"vector-dots"),
+    "non-utf8": ((b"latin\xe9\xff.jpg",), b"vector-non-utf8"),
+    "unicode": (("caf\u00e9 \u6771\u4eac.jpg".encode(),), b"vector-unicode"),
+    "asset-shaped": ((b"assets", b"photo-12345678.png"), b"vector-asset-shaped"),
+}
 SECURITY_HEADERS = {
     "Content-Security-Policy": (
         "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
@@ -75,6 +104,24 @@ class GatewayHarness:
     internal_base_url: str
     resource_prefix: str
     container_name: str
+
+    def accel(
+        self,
+        status: int,
+        headers: Sequence[tuple[str, str]],
+        *,
+        request_headers: Mapping[str, str] | None = None,
+        path: str = "/media/accel",
+        method: str = "GET",
+    ) -> HttpResponse:
+        """Request *path* with the echo upstream answering exactly *status* and *headers*."""
+        specification = json.dumps({"status": status, "headers": [list(h) for h in headers]})
+        encoded = base64.urlsafe_b64encode(specification.encode()).decode("ascii")
+        return self.request(
+            path,
+            method=method,
+            headers={**(request_headers or {}), "X-Test-Upstream-Response": encoded},
+        )
 
     def request(
         self,
@@ -383,6 +430,63 @@ def test_network_identity_is_recovered_before_failed_create_returns(
     )]
 
 
+def _created_directory(tree: FreshTestTree, path: Path) -> Path:
+    path.mkdir(mode=0o755)
+    path.chmod(0o755)
+    record_created_test_path(tree, path)
+    return path
+
+
+def _created_file(tree: FreshTestTree, path: Path, contents: bytes) -> Path:
+    path.write_bytes(contents)
+    path.chmod(0o644)
+    record_created_test_path(tree, path)
+    return path
+
+
+def _raw_path(base: Path, names: Sequence[bytes]) -> Path:
+    return base.joinpath(*(os.fsdecode(name) for name in names))
+
+
+def create_media_trees(roots: Path, derivatives: Path) -> None:
+    """Synthetic originals below one slot, plus one published derivative.
+
+    Every file is world-readable, so the unprivileged gateway reads it through its
+    read-only binds; nothing here is host data.
+    """
+    roots_tree = record_fresh_test_tree(roots)
+    roots.chmod(0o755)
+    _created_file(roots_tree, roots / "secret.txt", SECRET_BYTES)
+    slot = _created_directory(roots_tree, roots / MEDIA_SLOT)
+    for names, contents in ORIGINAL_VECTORS.values():
+        for depth in range(1, len(names)):
+            directory = _raw_path(slot, names[:depth])
+            if not directory.exists():
+                _created_directory(roots_tree, directory)
+        _created_file(roots_tree, _raw_path(slot, names), contents)
+    _created_file(roots_tree, slot / "page.html", b"<script>alert(1)</script>")
+    _created_file(roots_tree, slot / "video.mp4", VIDEO_BYTES)
+    for depth in range(1, len(LONG_NAMES)):
+        _created_directory(roots_tree, _raw_path(slot, LONG_NAMES[:depth]))
+    _created_file(roots_tree, _raw_path(slot, LONG_NAMES), LONG_BYTES)
+    link = slot / "link.jpg"
+    link.symlink_to("space name.jpg")
+    record_created_test_path(roots_tree, link)
+    # A name the catalog still calls a file, now a directory on disk.
+    replaced = _created_directory(roots_tree, slot / "now-a-directory.jpg")
+    _created_file(roots_tree, replaced / "inner.jpg", b"inside-a-directory")
+    prepare_owned_test_inventory(record_test_tree_inventory(roots_tree))
+
+    derivatives_tree = record_fresh_test_tree(derivatives)
+    derivatives.chmod(0o755)
+    first = _created_directory(derivatives_tree, derivatives / DERIVATIVE_KEY[0:2])
+    second = _created_directory(derivatives_tree, first / DERIVATIVE_KEY[2:4])
+    _created_file(derivatives_tree, second / f"{DERIVATIVE_KEY}.webp", DERIVATIVE_BYTES)
+    directory = _created_directory(derivatives_tree, second / f"{DIRECTORY_KEY}.webp")
+    _created_file(derivatives_tree, directory / "inner.webp", b"inside-a-directory")
+    prepare_owned_test_inventory(record_test_tree_inventory(derivatives_tree))
+
+
 def wait_for_gateway(base_url: str, container_name: str) -> None:
     deadline = time.monotonic() + 15
     last_error: Exception | None = None
@@ -433,6 +537,9 @@ def gateway(tmp_path_factory: pytest.TempPathFactory) -> Iterator[GatewayHarness
         target.write_text(contents, encoding="utf-8")
         record_created_test_path(static_tree, target)
     prepare_owned_test_inventory(record_test_tree_inventory(static_tree))
+    media_roots = tmp_path_factory.mktemp("gateway-roots")
+    derivatives = tmp_path_factory.mktemp("gateway-derivatives")
+    create_media_trees(media_roots, derivatives)
     bind_root = tmp_path_factory.mktemp("gateway-binds")
     bind_inputs = copy_bind_inputs(bind_root, {
         "nginx.conf": NGINX_CONFIG,
@@ -506,6 +613,10 @@ def gateway(tmp_path_factory: pytest.TempPathFactory) -> Iterator[GatewayHarness
             ),
             "--mount",
             f"type=bind,src={static_root},dst=/usr/share/nginx/html,readonly",
+            "--mount",
+            f"type=bind,src={media_roots},dst=/srv/aegis/roots,readonly",
+            "--mount",
+            f"type=bind,src={derivatives},dst=/srv/aegis/derivatives,readonly",
             NGINX_IMAGE,
         ], bind_root / "gateway.cid", suffix, recorded_containers)
         binding = docker("port", gateway_name, "8080/tcp").stdout.strip()
@@ -743,14 +854,441 @@ def test_hashed_asset_is_cached_immutably(gateway: GatewayHarness) -> None:
     }
 
 
-@pytest.mark.parametrize("path", ["/__aegis_roots/file", "/__aegis_derivatives/file"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/__aegis_roots/file",
+        "/__aegis_derivatives/file",
+        # Files that exist behind the aliases are still unreachable from outside.
+        f"/__aegis_roots/{MEDIA_SLOT}/space%20name.jpg",
+        f"/__aegis_roots/{MEDIA_SLOT}/assets/photo-12345678.png",
+        f"/__aegis_derivatives/ab/cd/{DERIVATIVE_KEY}.webp",
+    ],
+)
+@pytest.mark.parametrize("internal", [False, True])
 def test_protected_aliases_cannot_be_requested_directly(
-    gateway: GatewayHarness, path: str
+    gateway: GatewayHarness, path: str, internal: bool,
 ) -> None:
-    response = gateway.request(path)
+    headers = {"X-Forwarded-For": "198.51.100.42"} if internal else None
+    response = gateway.request(path, headers=headers, internal=internal)
 
     assert response.status == 404
+    assert response.body not in {DERIVATIVE_BYTES, b"vector-space", b"vector-asset-shaped"}
     assert_security_headers(response)
+
+
+# Media delivery. On an X-Accel-Redirect, nginx copies only the upstream headers whose
+# handlers are marked "redirect" (Content-Type, Content-Disposition, Cache-Control,
+# Expires, Accept-Ranges, Set-Cookie); every other upstream header is dropped, and the
+# static handler then sets its own ETag and Last-Modified. These tests pin which of web's
+# headers reach the browser, and the configuration that keeps web's ETag and Vary.
+
+DERIVATIVE_HEADERS = (
+    ("X-Accel-Redirect", derivative_redirect(DERIVATIVE_KEY, "webp")),
+    ("Content-Type", "image/webp"),
+    ("Cache-Control", "private, no-cache"),
+    ("ETag", DERIVATIVE_ETAG),
+    ("Vary", "Cookie"),
+    ("X-Upstream-Only", "dropped-on-redirect"),
+    ("X-Content-Type-Options", "nosniff"),
+)
+
+
+def _original_headers(
+    names: Sequence[bytes], *, content_type: str | None = "image/jpeg",
+) -> list[tuple[str, str]]:
+    headers = [
+        ("X-Accel-Redirect", original_redirect(MEDIA_SLOT, names)),
+        ("Cache-Control", "private, no-store"),
+        ("Content-Disposition", content_disposition("attachment", names[-1])),
+    ]
+    if content_type is not None:
+        headers.append(("Content-Type", content_type))
+    return headers
+
+
+def test_media_location_proxies_like_api_without_forcing_cache_control(
+    gateway: GatewayHarness,
+) -> None:
+    request_id = "MediaRequest_1234"
+    response = gateway.request(
+        "/media/v1/echo",
+        headers={
+            "Host": "localhost:18080",
+            "X-Request-ID": request_id,
+            "X-Forwarded-For": "203.0.113.10, 127.0.0.1",
+            "X-Forwarded-Proto": "https",
+            "X-Aegis-Proxy-Attestation": "startup-v1",
+        },
+    )
+    payload = response.json()
+
+    assert response.status == 200
+    assert payload["path"] == "/media/v1/echo"
+    assert payload["host"] == "localhost:18080"
+    assert payload["request_id"] == request_id
+    assert payload["forwarded_for"] != "203.0.113.10, 127.0.0.1"
+    ipaddress.ip_address(str(payload["forwarded_for"]))
+    assert payload["forwarded_proto"] == "http"
+    assert payload["proxy_attestation"] is None
+    assert response.headers["X-Request-ID"] == request_id
+    # Unlike /api/, the gateway adds no Cache-Control: web decides per response.
+    assert response.headers.get_all("Cache-Control") is None
+    assert_security_headers(response)
+
+
+def test_media_upstream_cache_control_and_errors_pass_through_unchanged(
+    gateway: GatewayHarness,
+) -> None:
+    revalidate = gateway.accel(200, [("Cache-Control", "private, no-cache")])
+    missing = gateway.accel(404, [("Cache-Control", "private, no-store")])
+
+    assert revalidate.status == 200
+    assert revalidate.headers.get_all("Cache-Control") == ["private, no-cache"]
+    assert missing.status == 404
+    assert missing.headers.get_all("Cache-Control") == ["private, no-store"]
+    assert_security_headers(revalidate)
+    assert_security_headers(missing)
+
+
+def test_derivative_redirect_keeps_web_headers_and_drops_the_rest(
+    gateway: GatewayHarness,
+) -> None:
+    response = gateway.accel(200, DERIVATIVE_HEADERS)
+
+    assert response.status == 200
+    assert response.body == DERIVATIVE_BYTES
+    assert response.headers.get_all("Content-Type") == ["image/webp"]
+    assert response.headers.get_all("Cache-Control") == ["private, no-cache"]
+    # Restored from web by add_header: the static handler's own ETag is off.
+    assert response.headers.get_all("ETag") == [DERIVATIVE_ETAG]
+    assert response.headers.get_all("Vary") == ["Cookie"]
+    assert response.headers["Content-Length"] == str(len(DERIVATIVE_BYTES))
+    assert response.headers.get("X-Accel-Redirect") is None
+    assert response.headers.get("X-Upstream-Only") is None
+    # Exactly one nosniff: web's copy is dropped on the redirect, the gateway's stays.
+    assert_security_headers(response)
+
+
+def test_gateway_never_answers_a_derivative_304_by_itself(gateway: GatewayHarness) -> None:
+    # web decides conditional requests; a redirect it chose to send is always delivered.
+    response = gateway.accel(
+        200,
+        DERIVATIVE_HEADERS,
+        request_headers={
+            "If-None-Match": DERIVATIVE_ETAG,
+            "If-Modified-Since": "Fri, 31 Dec 9999 23:59:59 GMT",
+        },
+    )
+
+    assert response.status == 200
+    assert response.body == DERIVATIVE_BYTES
+    assert response.headers.get_all("ETag") == [DERIVATIVE_ETAG]
+
+
+def test_web_304_passes_through_with_its_validators(gateway: GatewayHarness) -> None:
+    response = gateway.accel(
+        304,
+        [
+            ("ETag", DERIVATIVE_ETAG),
+            ("Cache-Control", "private, no-cache"),
+            ("Vary", "Cookie"),
+        ],
+        request_headers={"If-None-Match": DERIVATIVE_ETAG},
+    )
+
+    assert response.status == 304
+    assert response.body == b""
+    assert response.headers.get_all("ETag") == [DERIVATIVE_ETAG]
+    assert response.headers.get_all("Cache-Control") == ["private, no-cache"]
+    assert response.headers.get_all("Vary") == ["Cookie"]
+    assert_security_headers(response)
+
+
+def test_derivative_ranges_are_single_and_bound_to_the_web_etag(
+    gateway: GatewayHarness,
+) -> None:
+    total = len(DERIVATIVE_BYTES)
+    partial = gateway.accel(200, DERIVATIVE_HEADERS, request_headers={"Range": "bytes=0-3"})
+    matching = gateway.accel(
+        200, DERIVATIVE_HEADERS,
+        request_headers={"Range": "bytes=4-7", "If-Range": DERIVATIVE_ETAG},
+    )
+    stale = gateway.accel(
+        200, DERIVATIVE_HEADERS,
+        request_headers={"Range": "bytes=4-7", "If-Range": '"another-validator"'},
+    )
+    multiple = gateway.accel(
+        200, DERIVATIVE_HEADERS, request_headers={"Range": "bytes=0-1,4-5"},
+    )
+
+    assert partial.status == 206
+    assert partial.body == DERIVATIVE_BYTES[0:4]
+    assert partial.headers["Content-Range"] == f"bytes 0-3/{total}"
+    assert partial.headers.get_all("ETag") == [DERIVATIVE_ETAG]
+    assert partial.headers.get_all("Cache-Control") == ["private, no-cache"]
+    assert matching.status == 206
+    assert matching.body == DERIVATIVE_BYTES[4:8]
+    assert stale.status == 200
+    assert stale.body == DERIVATIVE_BYTES
+    # max_ranges 1: a multi-range request is answered with the whole representation.
+    assert multiple.status == 200
+    assert multiple.body == DERIVATIVE_BYTES
+    for response in (partial, matching, stale, multiple):
+        assert_security_headers(response)
+
+
+@pytest.mark.parametrize("vector", sorted(ORIGINAL_VECTORS))
+def test_encoded_original_paths_resolve_to_the_exact_file(
+    gateway: GatewayHarness, vector: str,
+) -> None:
+    names, contents = ORIGINAL_VECTORS[vector]
+    headers = _original_headers(names)
+    response = gateway.accel(200, headers)
+
+    assert response.status == 200
+    assert response.body == contents
+    assert response.headers.get_all("Content-Type") == ["image/jpeg"]
+    assert response.headers.get_all("Cache-Control") == ["private, no-store"]
+    assert response.headers.get_all("Content-Disposition") == [dict(headers)[
+        "Content-Disposition"
+    ]]
+    assert_security_headers(response)
+
+
+def test_original_redirect_encodes_reserved_bytes_for_one_nginx_decode() -> None:
+    assert original_redirect(MEDIA_SLOT, (b"what?.jpg",)).endswith("/what%3F.jpg")
+    assert original_redirect(MEDIA_SLOT, (b"hash#tag.jpg",)).endswith("/hash%23tag.jpg")
+    assert original_redirect(MEDIA_SLOT, (b"100%.jpg",)).endswith("/100%25.jpg")
+    assert original_redirect(MEDIA_SLOT, (b"dir with space", b"inner%3F.jpg")).endswith(
+        "/dir%20with%20space/inner%253F.jpg"
+    )
+    assert original_redirect(MEDIA_SLOT, (b"latin\xe9\xff.jpg",)).endswith(
+        "/latin%E9%FF.jpg"
+    )
+
+
+def test_long_encoded_original_path_fits_the_media_proxy_buffer(
+    gateway: GatewayHarness,
+) -> None:
+    from tests.deployment.fixtures.gateway_upstream import LONG_PATH, LONG_REDIRECT
+
+    # The fixture's redirect is exactly what web emits for this path, and it is larger
+    # than nginx's default (one page) upstream header buffer.
+    assert original_redirect(MEDIA_SLOT, LONG_NAMES) == LONG_REDIRECT
+    assert len(LONG_REDIRECT) > 7000
+    response = gateway.request(LONG_PATH)
+
+    assert response.status == 200
+    assert response.body == LONG_BYTES
+    assert response.headers.get_all("Cache-Control") == ["private, no-store"]
+
+
+def test_original_ranges_keep_no_store(gateway: GatewayHarness) -> None:
+    headers = _original_headers((b"video.mp4",), content_type="video/mp4")
+    partial = gateway.accel(200, headers, request_headers={"Range": "bytes=16-31"})
+    tail = gateway.accel(200, headers, request_headers={"Range": "bytes=-8"})
+
+    assert partial.status == 206
+    assert partial.body == VIDEO_BYTES[16:32]
+    assert partial.headers["Content-Range"] == f"bytes 16-31/{len(VIDEO_BYTES)}"
+    assert partial.headers.get_all("Content-Type") == ["video/mp4"]
+    assert partial.headers.get_all("Cache-Control") == ["private, no-store"]
+    assert tail.status == 206
+    assert tail.body == VIDEO_BYTES[-8:]
+    assert_security_headers(partial)
+
+
+def test_internal_redirect_type_is_web_s_and_never_derived_from_the_name(
+    gateway: GatewayHarness,
+) -> None:
+    labeled = gateway.accel(200, _original_headers((b"page.html",), content_type="image/png"))
+    unlabeled = gateway.accel(200, _original_headers((b"page.html",), content_type=None))
+
+    assert labeled.status == 200
+    assert labeled.headers.get_all("Content-Type") == ["image/png"]
+    # "types {}" and default_type: never text/html from the ".html" extension.
+    assert unlabeled.status == 200
+    assert unlabeled.headers.get_all("Content-Type") == ["application/octet-stream"]
+    assert_security_headers(unlabeled)
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        f"/__aegis_roots/{MEDIA_SLOT}/%2E%2E/secret.txt",
+        f"/__aegis_roots/{MEDIA_SLOT}/../secret.txt",
+        f"/__aegis_roots/{MEDIA_SLOT}/link.jpg",
+        f"/__aegis_roots/{MEDIA_SLOT}/missing.jpg",
+        f"/__aegis_roots/{MEDIA_SLOT}/space%00name.jpg",
+    ],
+)
+def test_internal_redirect_refuses_traversal_symlinks_and_missing_files(
+    gateway: GatewayHarness, target: str,
+) -> None:
+    response = gateway.accel(
+        200, [("X-Accel-Redirect", target), ("Content-Type", "image/jpeg")],
+    )
+
+    assert response.status in {403, 404}
+    assert response.body not in {SECRET_BYTES, b"vector-space"}
+    # nginx's own error pages carry no validators a browser could revalidate with.
+    assert response.headers.get("ETag") is None
+    assert response.headers.get("Last-Modified") is None
+    assert_security_headers(response)
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        f"/__aegis_roots/{MEDIA_SLOT}/now-a-directory.jpg",
+        f"/__aegis_roots/{MEDIA_SLOT}",
+        "/__aegis_derivatives/ab/cd/" + DIRECTORY_KEY + ".webp",
+    ],
+)
+def test_a_directory_target_is_404_without_a_location(
+    gateway: GatewayHarness, target: str,
+) -> None:
+    # Without the guard, the static handler answers a directory with a 301 whose Location
+    # names the internal alias, the slot and the raw path.
+    response = gateway.accel(
+        200, [("X-Accel-Redirect", target), ("Content-Type", "image/jpeg")],
+    )
+
+    assert response.status == 404
+    assert response.headers.get("Location") is None
+    assert b"inside-a-directory" not in response.body
+    assert b"__aegis" not in response.body
+    assert MEDIA_SLOT.encode() not in response.body
+    assert_security_headers(response)
+
+
+@pytest.mark.parametrize(
+    ("path", "method"),
+    [
+        # The rate-limited locations are covered by the static shape test, so this test
+        # never depends on a limit_req zone's state.
+        ("/api/v1/entries/accel", "GET"),
+        ("/api/v1/entries/accel", "POST"),
+        ("/health/accel", "GET"),
+        ("/admin/accel/", "GET"),
+        ("/admin", "GET"),
+    ],
+)
+def test_only_media_can_trigger_an_internal_redirect(
+    gateway: GatewayHarness, path: str, method: str,
+) -> None:
+    response = gateway.accel(
+        200,
+        [("X-Accel-Redirect", derivative_redirect(DERIVATIVE_KEY, "webp")),
+         ("Content-Type", "image/webp")],
+        path=path,
+        method=method,
+    )
+
+    assert response.status == 200
+    assert response.body != DERIVATIVE_BYTES
+    assert response.headers.get("X-Accel-Redirect") is None
+    assert_security_headers(response)
+
+
+def test_media_request_rate_limit_is_per_client_and_spares_other_media_api(
+    gateway: GatewayHarness,
+) -> None:
+    path = f"/api/v1/entries/{uuid.UUID(int=9)}/media/requests"
+    responses = [gateway.request(path, method="POST") for _ in range(45)]
+    rejected = next(response for response in responses if response.status != 200)
+    assert rejected.status == 429
+    assert rejected.headers.get("Retry-After") == "60"
+
+    assert sum(response.status == 200 for response in responses) >= 30
+    assert_security_headers(rejected)
+    assert_private_no_store(rejected)
+    accepted = next(response for response in responses if response.status == 200)
+    assert accepted.json()["path"] == path
+    assert accepted.headers.get("Retry-After") is None
+    assert_private_no_store(accepted)
+    assert gateway.request(f"/api/v1/entries/{uuid.UUID(int=9)}/media").status == 200
+
+
+def _location_blocks(text: str) -> dict[str, list[str]]:
+    """Top-level location blocks and their directive lines (nested blocks inlined)."""
+    blocks: dict[str, list[str]] = {}
+    current: str | None = None
+    depth = 0
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if current is None:
+            if line.startswith("location ") and line.endswith("{"):
+                current = line[len("location "):-1].strip()
+                blocks[current] = []
+                depth = 1
+            continue
+        if line == "}":
+            depth -= 1
+            if depth == 0:
+                current = None
+            continue
+        if line.endswith("{"):
+            depth += 1
+        blocks[current].append(line)
+    return blocks
+
+
+PROXY_HEADERS = {
+    "proxy_set_header Host $http_host;",
+    "proxy_set_header X-Request-ID $aegis_request_id;",
+    "proxy_set_header X-Forwarded-For $remote_addr;",
+    "proxy_set_header X-Forwarded-Proto $aegis_forwarded_proto;",
+    'proxy_set_header X-Aegis-Proxy-Attestation "";',
+    "proxy_pass http://web:8000;",
+}
+
+
+def test_media_and_internal_locations_have_the_reviewed_shape() -> None:
+    text = NGINX_SERVER_CONFIG.read_text(encoding="utf-8")
+    blocks = _location_blocks(text)
+    media = blocks["/media/"]
+
+    assert set(media) == PROXY_HEADERS | {"proxy_buffer_size 16k;", "proxy_buffers 8 16k;"}
+    assert not any("Cache-Control" in line or "proxy_ignore_headers" in line for line in media)
+    # Every other proxied location ignores an upstream X-Accel-Redirect.
+    proxied = [name for name, lines in blocks.items() if "proxy_pass http://web:8000;" in lines]
+    assert set(proxied) == {
+        "= /admin/login/", "= /admin", "/admin/", "= /api/v1/auth/login",
+        "~ ^/api/v1/entries/[^/]+/media/requests$", "/api/", "/media/", "/health/",
+    }
+    for name in proxied:
+        if name != "/media/":
+            assert "proxy_ignore_headers X-Accel-Redirect;" in blocks[name], name
+            assert set(blocks[name]) >= PROXY_HEADERS, name
+    assert "limit_req zone=media_requests burst=30 nodelay;" in blocks[
+        "~ ^/api/v1/entries/[^/]+/media/requests$"
+    ]
+    assert "proxy_hide_header X-Frame-Options;" in text.splitlines()
+    assert "proxy_hide_header X-Content-Type-Options;" in text.splitlines()
+    zone = "limit_req_zone $binary_remote_addr zone=media_requests:10m rate=30r/m;"
+    assert zone in NGINX_CONFIG.read_text(encoding="utf-8")
+    common = {
+        "internal;",
+        "disable_symlinks on;",
+        "if (-d $request_filename) {",
+        "return 404;",
+        "sendfile on;",
+        "max_ranges 1;",
+        "types { }",
+        "default_type application/octet-stream;",
+    }
+    assert set(blocks["^~ /__aegis_roots/"]) == common | {"alias /srv/aegis/roots/;"}
+    assert set(blocks["^~ /__aegis_derivatives/"]) == common | {
+        "alias /srv/aegis/derivatives/;",
+        "etag off;",
+        "if_modified_since off;",
+        "add_header ETag $upstream_http_etag;",
+        "add_header Vary $upstream_http_vary;",
+    }
 
 
 def test_every_gateway_log_line_is_bounded_json_without_canaries(

@@ -6,9 +6,12 @@ from typing import Any
 from uuid import UUID
 
 from aegis_apps.indexing.models import RootIndexState
+from aegis_apps.media.links import MediaLinks, entry_media
 
 
-def entry_summary(row: dict[str, Any], *, available: bool) -> dict[str, object]:
+def entry_summary(
+    row: dict[str, Any], *, available: bool, links: MediaLinks,
+) -> dict[str, object]:
     state = row["source_state"]
     if not available and state == "present":
         state = "inaccessible"
@@ -19,6 +22,7 @@ def entry_summary(row: dict[str, Any], *, available: bool) -> dict[str, object]:
         "size": None if row["size"] is None else str(row["size"]),
         "modifiedNs": None if row["mtime_ns"] is None else str(row["mtime_ns"]),
         "sourceState": state, "version": str(row["catalog_version"]),
+        "media": entry_media(row, available=state == "present", links=links),
     }
 
 

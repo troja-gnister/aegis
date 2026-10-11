@@ -79,11 +79,26 @@ class AuthorizationLocks:
             .order_by("pk")
         }
 
-    def roots(self, root_ids: Iterable[uuid.UUID]) -> dict[uuid.UUID, Root]:
+    def roots(
+        self, root_ids: Iterable[uuid.UUID], *, shared: bool = False,
+    ) -> dict[uuid.UUID, Root]:
+        """Lock roots FOR UPDATE, or FOR SHARE when *shared*.
+
+        A shared lock still excludes every grant or root change (they take FOR UPDATE)
+        but lets browsing readers, which also share, proceed.
+        """
         self._enter(_ROOT_PHASE)
         ids = tuple(sorted(set(root_ids)))
         if not ids:
             return {}
+        if shared:
+            return {
+                root.pk: root
+                for root in Root.objects.raw(
+                    "SELECT * FROM roots_root WHERE id = ANY(%s) ORDER BY id FOR SHARE",
+                    [list(ids)],
+                )
+            }
         return {
             root.pk: root
             for root in Root.objects.select_for_update()

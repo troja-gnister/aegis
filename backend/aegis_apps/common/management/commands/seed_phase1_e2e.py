@@ -18,6 +18,11 @@ from aegis_apps.roots.permissions import Permission
 from aegis_apps.roots.services import create_root, set_group_grant, set_user_grant
 
 _FIXTURE_ERROR = "phase1 fixture configuration is invalid"
+# Alice's media journeys (thumbnails, the viewer, downloads, and revocation) need PREVIEW
+# and EXPORT on her root. Bob's group keeps BROWSE only: the Phase 2A journey toggles that
+# grant between 0 and 1, and the privacy journeys check that he never sees Alice's media.
+ALICE_PERMISSIONS = Permission.BROWSE | Permission.PREVIEW | Permission.EXPORT
+BOB_GROUP_PERMISSIONS = Permission.BROWSE
 
 
 class FixtureDrift(ValueError):
@@ -116,14 +121,14 @@ def _ensure_root(*, actor: User, slot_id: str, display_name: str) -> Root:
 def _ensure_user_grant(*, actor: User, root: Root, user: User) -> RootGrant:
     grant = RootGrant.objects.filter(root=root, user=user).first()
     if grant is not None:
-        if grant.group_id is not None or grant.permissions != int(Permission.BROWSE):
+        if grant.group_id is not None or grant.permissions != int(ALICE_PERMISSIONS):
             raise FixtureDrift
         return grant
     return set_user_grant(
         actor=actor,
         root_id=root.pk,
         user_id=user.pk,
-        permissions=Permission.BROWSE,
+        permissions=ALICE_PERMISSIONS,
         request_id="phase1_e2e_alice_grant",
     )
 
@@ -131,14 +136,14 @@ def _ensure_user_grant(*, actor: User, root: Root, user: User) -> RootGrant:
 def _ensure_group_grant(*, actor: User, root: Root, group: Group) -> RootGrant:
     grant = RootGrant.objects.filter(root=root, group=group).first()
     if grant is not None:
-        if grant.user_id is not None or grant.permissions != int(Permission.BROWSE):
+        if grant.user_id is not None or grant.permissions != int(BOB_GROUP_PERMISSIONS):
             raise FixtureDrift
         return grant
     return set_group_grant(
         actor=actor,
         root_id=root.pk,
         group_id=group.pk,
-        permissions=Permission.BROWSE,
+        permissions=BOB_GROUP_PERMISSIONS,
         request_id="phase1_e2e_bob_group_grant",
     )
 

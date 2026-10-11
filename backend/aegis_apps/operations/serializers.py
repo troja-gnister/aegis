@@ -9,14 +9,19 @@ from typing import Any, Final
 
 from rest_framework import serializers
 
-from aegis_apps.roots.permissions import validate_permission_mask
+from aegis_apps.roots.permissions import Permission, validate_permission_mask
 
 MAX_OPERATION_JSON_BYTES: Final = 16_384
+MEDIA_REQUEST_PAYLOAD_VERSION: Final = 1
+# An interactive media request needs both bits on its single root.
+MEDIA_REQUEST_PERMISSIONS: Final = int(Permission.BROWSE | Permission.PREVIEW)
 MAX_HEARTBEAT_METRICS_BYTES: Final = 1_024
 MAX_POSTGRES_BIGINT: Final = 9_223_372_036_854_775_807
 MAX_ROOTS_PER_OPERATION: Final = 128
 
 _IDENTITY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+-]{0,95}$")
+_FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}")
+_MEDIA_REQUEST_FIELDS = frozenset({"v", "rootId", "entryId", "fingerprint"})
 _METRIC_KEYS = (
     "queueAgeSeconds",
     "scanProgress",
@@ -25,7 +30,17 @@ _METRIC_KEYS = (
     "scanObservedEntries",
     "scanCompletedDirectories",
     "scanDegradedDirectories",
+    # Media worker counts (aegis_apps.media.worker.media_metrics) and its last safe error
+    # code: never a name or a path.
+    "mediaInteractiveQueued",
+    "mediaBackgroundPending",
+    "mediaInFlight",
+    "mediaAssets",
+    "mediaAssetsComplete",
+    "mediaLastErrorCode",
 )
+_METRIC_CODE_KEYS = frozenset({"mediaLastErrorCode"})
+_METRIC_CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,31}")
 
 
 def canonical_json_bytes(value: object, *, maximum_bytes: int) -> bytes:
@@ -92,6 +107,58 @@ def normalize_probe_intent(value: object) -> dict[str, object]:
     return normalized
 
 
+def _exact_uuid(value: object) -> str:
+    if not isinstance(value, str) or len(value) != 36:
+        raise ValueError("invalid media request payload")
+    try:
+        parsed = uuid.UUID(value)
+    except (ValueError, AttributeError):
+        raise ValueError("invalid media request payload") from None
+    if str(parsed) != value:
+        raise ValueError("invalid media request payload")
+    return value
+
+
+def normalize_media_request_payload(value: object, *, intent: object) -> dict[str, object]:
+    """The job payload of an interactive media request (``media.preview``/``transcode``).
+
+    ``{"v": 1, "rootId": <uuid>, "entryId": <uuid>, "fingerprint": <64 hex>}``. The
+    payload is bound to its operation intent: the intent names exactly that one root and
+    requires BROWSE and PREVIEW on it, so the worker's authorization re-check (which only
+    reads the intent and snapshot) covers the entry it is asked to process. The worker
+    must still check that the entry belongs to ``rootId`` and that the asset's current
+    fingerprint equals ``fingerprint``.
+    """
+    normalized_intent = normalize_probe_intent(intent)
+    if not isinstance(value, Mapping) or set(value) != _MEDIA_REQUEST_FIELDS:
+        raise ValueError("invalid media request payload")
+    version = value["v"]
+    if type(version) is not int or version != MEDIA_REQUEST_PAYLOAD_VERSION:
+        raise ValueError("invalid media request payload")
+    root_id = _exact_uuid(value["rootId"])
+    entry_id = _exact_uuid(value["entryId"])
+    fingerprint = value["fingerprint"]
+    if not isinstance(fingerprint, str) or _FINGERPRINT_RE.fullmatch(fingerprint) is None:
+        raise ValueError("invalid media request payload")
+    roots = normalized_intent["roots"]
+    if (
+        not isinstance(roots, list)
+        or len(roots) != 1
+        or roots[0]["id"] != root_id
+        or type(roots[0]["permissions"]) is not int
+        or roots[0]["permissions"] & MEDIA_REQUEST_PERMISSIONS != MEDIA_REQUEST_PERMISSIONS
+    ):
+        raise ValueError("media request payload does not match its intent")
+    normalized: dict[str, object] = {
+        "v": MEDIA_REQUEST_PAYLOAD_VERSION,
+        "rootId": root_id,
+        "entryId": entry_id,
+        "fingerprint": fingerprint,
+    }
+    canonical_json_bytes(normalized, maximum_bytes=MAX_OPERATION_JSON_BYTES)
+    return normalized
+
+
 def validate_authorization_snapshot(
     value: object,
     *,
@@ -145,15 +212,19 @@ def _finite_number(value: object, *, minimum: float, maximum: float | None) -> i
     return value
 
 
-def validate_heartbeat_metrics(value: object) -> dict[str, int | float]:
+def validate_heartbeat_metrics(value: object) -> dict[str, int | float | str]:
     if not isinstance(value, Mapping) or any(key not in _METRIC_KEYS for key in value):
         raise ValueError("invalid heartbeat metrics")
-    normalized: dict[str, int | float] = {}
+    normalized: dict[str, int | float | str] = {}
     for key in _METRIC_KEYS:
         if key not in value:
             continue
         metric = value[key]
-        if key == "queueAgeSeconds":
+        if key in _METRIC_CODE_KEYS:
+            if not isinstance(metric, str) or _METRIC_CODE_RE.fullmatch(metric) is None:
+                raise ValueError("invalid heartbeat metric")
+            normalized[key] = metric
+        elif key == "queueAgeSeconds":
             normalized[key] = _finite_number(metric, minimum=0, maximum=None)
         elif key in {"scanProgress", "diskPressure"}:
             normalized[key] = _finite_number(metric, minimum=0, maximum=1)

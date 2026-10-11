@@ -16,7 +16,10 @@ from aegis_apps.identity.models import User
 from aegis_apps.indexing.models import IndexDeployment
 from aegis_apps.roots.manifest import ManifestError, configured_manifest
 from aegis_apps.roots.models import Root, RootGrant
-from aegis_apps.roots.permissions import Permission
+from aegis_apps.roots.permissions import Permission, validate_permission_mask
+from aegis_apps.roots.selectors import authorized_roots
+
+from .models import CatalogEntry
 
 
 class CatalogNotFound(RuntimeError):
@@ -49,6 +52,8 @@ class BrowseContext:
     binding_epoch: int
     manifest_identity: str
     _connection: object
+    # The caller's effective grant mask on this root, read under the same locks.
+    permissions: int = 0
     _active: bool = True
 
     def require_active(self) -> None:
@@ -56,6 +61,10 @@ class BrowseContext:
             self._connection is not connection.connection
         ):
             raise CatalogNotFound()
+
+    def allows(self, permission: Permission) -> bool:
+        """Whether the locked grant mask includes every bit of *permission*."""
+        return int(self.permissions) & int(permission) == int(permission)
 
 
 @contextmanager
@@ -95,8 +104,49 @@ def reject_not_found(user: User, requested_epoch: int) -> Never:
     raise CatalogNotFound() from None
 
 
+def require_current_binding(slot_id: str) -> tuple[int, str]:
+    """The index binding's epoch and manifest identity, if it binds *slot_id* now.
+
+    The binding must match the configured manifest exactly; otherwise the root is
+    treated as unknown. Callers hold the root's lock.
+    """
+    try:
+        manifest = configured_manifest()
+    except ManifestError:
+        raise CatalogNotFound() from None
+    binding = IndexDeployment.objects.filter(pk=1).values(
+        "manifest_identity", "slot_ids", "epoch",
+    ).first()
+    if (
+        manifest is None or manifest.get(slot_id) is None or binding is None
+        or binding["manifest_identity"] != manifest.digest
+        or binding["slot_ids"] != sorted(manifest.slots)
+    ):
+        raise CatalogNotFound()
+    return binding["epoch"], binding["manifest_identity"]
+
+
+def effective_mask(user: User, root_id: UUID) -> int:
+    """The additive grant mask of the user (directly and through groups) on one root."""
+    mask = RootGrant.objects.filter(root_id=root_id).filter(
+        Q(user_id=user.pk) | Q(group__user=user.pk),
+    ).aggregate(mask=BitOr("permissions"))["mask"]
+    return int(validate_permission_mask(int(mask or 0)))
+
+
 @contextmanager
-def browse_context(user: User, root_id: UUID, namespace: str) -> Iterator[BrowseContext]:
+def root_context(
+    user: User, root_id: UUID, namespace: str, *, required: Permission = Permission.BROWSE,
+) -> Iterator[BrowseContext]:
+    """Authorize *required* on one root under the foundation's shared locks.
+
+    BROWSE is always required as well: PREVIEW and EXPORT add to it and never
+    replace it. The root and the user are locked FOR SHARE (root first), the
+    captured user epoch and the root's active flag are rechecked, the index
+    binding must match the configured manifest, and the grant mask is read inside
+    the same transaction. Every failure is indistinguishable from an unknown root.
+    """
+    needed = int(validate_permission_mask(Permission.BROWSE | required))
     # Capture before waiting for locks. Never replace the request's identity epoch.
     requested_epoch = user.authorization_epoch
     with bounded_read():
@@ -109,32 +159,53 @@ def browse_context(user: User, root_id: UUID, namespace: str) -> Iterator[Browse
         _lock_current_user(user, requested_epoch)
         if root_row is None or not root_row[2]:
             raise CatalogNotFound()
-        try:
-            manifest = configured_manifest()
-        except ManifestError:
-            raise CatalogNotFound() from None
-        binding = IndexDeployment.objects.filter(pk=1).values(
-            "manifest_identity", "slot_ids", "epoch",
-        ).first()
-        if (
-            manifest is None or manifest.get(root_row[1]) is None or binding is None
-            or binding["manifest_identity"] != manifest.digest
-            or binding["slot_ids"] != sorted(manifest.slots)
-        ):
-            raise CatalogNotFound()
-        mask = RootGrant.objects.filter(root_id=root_id).filter(
-            Q(user_id=user.pk) | Q(group__user=user.pk),
-        ).aggregate(mask=BitOr("permissions"))["mask"]
-        if not (mask or 0) & int(Permission.BROWSE):
+        binding_epoch, manifest_identity = require_current_binding(root_row[1])
+        effective = effective_mask(user, root_id)
+        if effective & needed != needed:
             raise CatalogNotFound()
         context = BrowseContext(
             Root(id=root_row[0], slot_id=root_row[1], active=True,
                  authorization_epoch=root_row[3]),
             User(id=user.pk, is_active=True, authorization_epoch=requested_epoch),
-            root_row[3], requested_epoch, namespace, binding["epoch"],
-            binding["manifest_identity"], connection.connection,
+            root_row[3], requested_epoch, namespace, binding_epoch,
+            manifest_identity, connection.connection,
+            permissions=effective,
         )
         try:
             yield context
         finally:
             context._active = False
+
+
+@contextmanager
+def browse_context(user: User, root_id: UUID, namespace: str) -> Iterator[BrowseContext]:
+    with root_context(user, root_id, namespace) as context:
+        yield context
+
+
+@contextmanager
+def entry_context(
+    user: User, entry_id: UUID, namespace: str, *, required: Permission = Permission.BROWSE,
+) -> Iterator[BrowseContext]:
+    """Resolve an entry's root through BROWSE-authorized roots, then lock it.
+
+    The candidate lookup only narrows which root to lock; ``root_context``
+    rechecks everything under its locks. A failed lookup checks the captured
+    principal first, exactly like catalog entry details.
+    """
+    requested_epoch = user.authorization_epoch
+    with bounded_read():
+        try:
+            manifest = configured_manifest()
+        except ManifestError:
+            reject_not_found(user, requested_epoch)
+        roots = authorized_roots(
+            user_id=user.pk, active_manifest_slot_ids=tuple(manifest.slots) if manifest else (),
+        ).values("id")
+        root_id = CatalogEntry.objects.filter(pk=entry_id, root_id__in=roots).values_list(
+            "root_id", flat=True,
+        ).first()
+        if root_id is None:
+            reject_not_found(user, requested_epoch)
+        with root_context(user, root_id, namespace, required=required) as context:
+            yield context

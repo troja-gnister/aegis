@@ -14,7 +14,9 @@ from django.db.models.expressions import RawSQL
 from django.db.models.functions import Coalesce
 
 from aegis_apps.identity.models import User
+from aegis_apps.media.links import MEDIA_ANNOTATIONS, MEDIA_FIELDS, MediaLinks
 from aegis_apps.roots.manifest import ManifestError, configured_manifest
+from aegis_apps.roots.permissions import Permission
 from aegis_apps.roots.selectors import authorized_roots
 
 from .authorization import (
@@ -41,6 +43,16 @@ _SUMMARY = (
     "id", "root_id", "display_name", "kind", "type_hint", "size",
     "mtime_ns", "source_state", "catalog_version",
 )
+
+
+def media_links(context: BrowseContext) -> MediaLinks:
+    """URL scope of the locked context: its namespace, root epoch and media grants."""
+    return MediaLinks(
+        namespace=context.namespace,
+        root_epoch=context.root_epoch,
+        preview=context.allows(Permission.PREVIEW),
+        export=context.allows(Permission.EXPORT),
+    )
 
 
 def keyset_predicate(
@@ -84,18 +96,31 @@ def _source_current(alias: str) -> str:
     )"""
 
 
+def source_current_sql(alias: str) -> str:
+    """SQL deciding whether the row *alias* (a fixed internal alias) has a current source chain."""
+    return _source_current(alias)
+
+
+def navigation_current_sql(alias: str) -> str:
+    """SQL deciding whether every navigation ancestor of *alias* is itself current."""
+    return _navigation_current(alias)
+
+
 def _entry(root_id: UUID, entry_id: UUID | None) -> dict[str, Any]:
     query = CatalogEntry.objects.filter(root_id=root_id)
     query = (
         query.filter(source_parent__isnull=True) if entry_id is None else query.filter(pk=entry_id)
     )
-    row = query.annotate(
+    row: dict[str, Any] | None = query.annotate(
         _current=RawSQL(
             f"{_source_current('catalog_catalogentry')} "
             f"AND {_navigation_current('catalog_catalogentry')}", (),
             output_field=models.BooleanField(),
         ),
-    ).values(*_SUMMARY, "logical_parent_id", "children_version", "_current").first()
+        **MEDIA_ANNOTATIONS,
+    ).values(
+        *_SUMMARY, *MEDIA_FIELDS, "logical_parent_id", "children_version", "_current",
+    ).first()
     if row is None:
         if entry_id is None:
             raise CatalogNotReady()
@@ -187,6 +212,7 @@ def directory_page(
     query = query.annotate(
         _missing=models.Case(models.When(source_state="missing", then=True), default=False),
         _kind=models.Case(models.When(kind="directory", then=0), default=1),
+        **MEDIA_ANNOTATIONS,
     )
     if sort == "name":
         query = query.annotate(_null=models.Value(0), _value=models.F("name_key"))
@@ -211,7 +237,7 @@ def directory_page(
         field if direction != previous else f"-{field}"
         for field, direction in zip(fields, directions, strict=True)
     )
-    projection = (*_SUMMARY, "name_key", "_kind", "_null", "_value")
+    projection = (*_SUMMARY, *MEDIA_FIELDS, "name_key", "_kind", "_null", "_value")
     branches: tuple[bool, ...] = (False,)
     if "missing" in filters.availability:
         branches = (True,) if len(filters.availability) == 1 else (False, True)
@@ -238,8 +264,10 @@ def directory_page(
         rows.reverse()
     has_next = bool(position) if previous else more
     has_previous = more if previous else bool(position)
+    links = media_links(context)
     return {
-        "entries": [entry_summary(row, available=parent["_current"] and row["_current"])
+        "entries": [entry_summary(row, available=parent["_current"] and row["_current"],
+                                  links=links)
                     for row in rows],
         "nextCursor": encode_cursor(cursor_context, _key(rows[-1], sort), "next")
         if rows and has_next else None,
@@ -298,7 +326,7 @@ def entry_details(user: User, entry_id: UUID, namespace: str) -> dict[str, objec
                         else:
                             truncated = True
             return {
-                **entry_summary(row, available=available),
+                **entry_summary(row, available=available, links=media_links(context)),
                 "parentId": str(row["logical_parent_id"]) if row["logical_parent_id"] else None,
                 "ancestors": list(reversed(ancestors)), "ancestorsTruncated": truncated,
             }
