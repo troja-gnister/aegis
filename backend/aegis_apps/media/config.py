@@ -20,11 +20,11 @@ DISCOVERY_BATCH: Final[Limit] = ("AEGIS_MEDIA_DISCOVERY_BATCH", 500, 50, 5_000)
 STAGE_LIMITS: Final[Mapping[str, tuple[Limit, Limit]]] = MappingProxyType({
     "probe": (
         ("AEGIS_MEDIA_PROBE_TIMEOUT_SECONDS", 30, 1, 600),
-        ("AEGIS_MEDIA_PROBE_MEMORY_MB", 512, 64, 4_096),
+        ("AEGIS_MEDIA_PROBE_MEMORY_MB", 1_024, 64, 4_096),
     ),
     "thumbnail": (
         ("AEGIS_MEDIA_THUMBNAIL_TIMEOUT_SECONDS", 60, 1, 900),
-        ("AEGIS_MEDIA_THUMBNAIL_MEMORY_MB", 1_024, 128, 8_192),
+        ("AEGIS_MEDIA_THUMBNAIL_MEMORY_MB", 1_536, 128, 8_192),
     ),
     "preview": (
         ("AEGIS_MEDIA_PREVIEW_TIMEOUT_SECONDS", 120, 1, 1_800),

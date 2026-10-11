@@ -10,6 +10,7 @@ COPY backend/manage.py ./backend/manage.py
 COPY backend/aegis ./backend/aegis
 COPY backend/aegis_apps ./backend/aegis_apps
 COPY backend/aegisctl ./backend/aegisctl
+COPY backend/aegis_media_processor ./backend/aegis_media_processor
 RUN uv sync --locked --no-dev --no-editable
 
 # The rootless Podman installer and its templates, for operators to copy out of the image.

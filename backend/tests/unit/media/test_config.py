@@ -27,13 +27,15 @@ def test_media_policy_defaults() -> None:
         cache_budget_gb=20,
         processor_concurrency=2,
         discovery_batch=500,
-        probe=StageLimits(timeout_seconds=30, memory_mb=512),
-        thumbnail=StageLimits(timeout_seconds=60, memory_mb=1_024),
+        probe=StageLimits(timeout_seconds=30, memory_mb=1_024),
+        thumbnail=StageLimits(timeout_seconds=60, memory_mb=1_536),
         preview=StageLimits(timeout_seconds=120, memory_mb=1_536),
         transcode=StageLimits(timeout_seconds=7_200, memory_mb=3_072),
     )
     assert policy.cache_budget_bytes == 20 * (1 << 30)
-    assert policy.probe.memory_bytes == 512 * (1 << 20)
+    assert policy.probe.memory_bytes == 1_024 * (1 << 20)
+    # Posters run under the thumbnail limits: 1536 MiB of address space for ffmpeg and Pillow.
+    assert policy.limits_for("poster").memory_bytes == 1_536 * (1 << 20)
 
 
 def test_media_policy_is_loaded_into_settings() -> None:

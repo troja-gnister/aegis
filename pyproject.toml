@@ -9,6 +9,9 @@ dependencies = [
   "argon2-cffi>=25.1,<26",
   "PyYAML>=6.0,<7",
   "uvicorn[standard]>=0.35,<1",
+  # Media decoding runs only in the media processor's rlimited children (M2).
+  "Pillow>=12.3,<13",
+  "pillow-heif==1.8.0",
 ]
 
 [project.scripts]
@@ -31,7 +34,12 @@ requires = ["hatchling>=1.27,<2"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["backend/aegis", "backend/aegis_apps", "backend/aegisctl"]
+packages = [
+  "backend/aegis",
+  "backend/aegis_apps",
+  "backend/aegisctl",
+  "backend/aegis_media_processor",
+]
 
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "aegis.settings.test"
@@ -40,6 +48,7 @@ testpaths = ["backend/tests", "tests/deployment"]
 addopts = "-ra --strict-markers"
 markers = [
   "integration: requires real PostgreSQL or the Compose stack",
+  "media_tools: needs ffmpeg and ffprobe; deselected unless -m selects it, and run inside the aegis-media image by tests/deployment/test_media_image.py",
 ]
 
 [tool.ruff]
