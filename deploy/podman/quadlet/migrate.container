@@ -35,6 +35,10 @@ Tmpfs=/tmp:size=64m,noexec,nosuid,nodev
 DropCapability=ALL
 NoNewPrivileges=true
 Unmask=/sys/devices/virtual/powercap
+# One SELinux MCS level, drawn per install, for every Aegis container: a file carries its
+# creator's level, so the containers exchange files on shared volumes, while every other
+# container's own level keeps it out.
+SecurityLabelLevel=@@LABEL_LEVEL@@
 # D5: the mount manifest must look owned by 10001:10001 in every backend-image service.
 GIDMap=+g10001:@@@HOST_GID@@:1
 # Compose's file secrets are read-only binds. The installer owns these files: mode 0600,

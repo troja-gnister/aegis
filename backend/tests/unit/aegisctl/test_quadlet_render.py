@@ -24,8 +24,10 @@ REPOSITORY = Path(__file__).resolve().parents[4]
 QUADLET_TEMPLATES = REPOSITORY / "deploy" / "podman" / "quadlet"
 PREFIX = "test-aegis-"
 DROP_IN = "50-aegis-roots.conf"
-ROLES = ("migrate", "web", "operations", "indexer", "media", "gateway")
+ROLES = ("migrate", "web", "operations", "indexer", "media", "media-processor", "gateway")
 WORKERS = ("operations", "indexer", "media")
+# Reads the roots and nothing else of the render (spec M2).
+PROCESSOR = "media-processor"
 PODMAN_COMMA_REFUSAL = (
     "mount slot photos: Podman cannot bind-mount an original root whose path contains a comma"
 )
@@ -166,10 +168,11 @@ def test_quadlet_drop_ins_carry_exactly_what_compose_adds_to_each_role(
             f"{mount['source']}:{mount['target']}:ro" for mount in service["volumes"]
         ], role
         # The release ID and process role come from the units themselves.
-        provided = set(service["environment"]) - set(unit.environment)
+        environment = service.get("environment", {})
+        provided = set(environment) - set(unit.environment)
         assert provided <= {"AEGIS_RELEASE_ID", "AEGIS_PROCESS_ROLE"}, role
         assert unit.environment == {
-            key: value for key, value in service["environment"].items() if key not in provided
+            key: value for key, value in environment.items() if key not in provided
         }, role
         if "AEGIS_RELEASE_ID" in provided:
             assert "Environment=AEGIS_RELEASE_ID=@@RELEASE@@" in template, role
@@ -189,8 +192,16 @@ def test_quadlet_drop_ins_carry_exactly_what_compose_adds_to_each_role(
             assert service["command"][2].endswith(f" && exec {template_exec[0]}"), role
         else:
             assert "command" not in service and unit.exec_lines == [], role
+    # The processor: the roots, read-only, and nothing else; no manifest, no command.
+    processor = _drop_in(output, PROCESSOR)
+    assert processor.environment == {} and processor.exec_lines == []
+    assert processor.volumes == [
+        f"{source}:/srv/aegis/roots/{slot_id}:ro" for slot_id, source in sources.items()
+    ]
+    assert "environment" not in services[PROCESSOR]
+    assert services[PROCESSOR]["user"] == f"{os.geteuid()}:{os.getegid()}"
     for slot_id, source in sources.items():
-        for role in ("gateway", *WORKERS):
+        for role in ("gateway", *WORKERS, PROCESSOR):
             assert f"{source}:/srv/aegis/roots/{slot_id}:ro" in _drop_in(output, role).volumes
         for role in ("migrate", "web"):
             assert all(f"/srv/aegis/roots/{slot_id}" not in volume
@@ -231,6 +242,7 @@ def test_quadlet_drop_in_text_is_exact_and_deterministic(tmp_path: Path) -> None
             f'--role {role}"\n'
             + manifest_volume + root_volume
         )
+    assert first[PROCESSOR].decode("ascii") == header + root_volume
     assert first["gateway"].decode("ascii") == (
         header
         + "Environment=AEGIS_GATEWAY_MOUNT_ATTESTATION=/run/aegis/mounts.gateway.attestation\n"

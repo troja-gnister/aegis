@@ -30,6 +30,10 @@ Unmask=/sys/devices/virtual/powercap
 # D5: read originals through the operator's group only; D6: the read-only reader type.
 GIDMap=+g101:@@@HOST_GID@@:1
 SecurityLabelType=@@READER_TYPE@@
+# One SELinux MCS level, drawn per install, for every Aegis container: a file carries its
+# creator's level, so the containers exchange files on shared volumes, while every other
+# container's own level keeps it out.
+SecurityLabelLevel=@@LABEL_LEVEL@@
 HealthCmd=test -f /tmp/aegis-upstream-ready && nc -z 127.0.0.1 8080
 HealthInterval=5s
 HealthTimeout=3s

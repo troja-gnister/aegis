@@ -1,7 +1,13 @@
-# Explicitly selected by controlled Podman launch interfaces.
+# Explicitly selected by controlled Podman launch interfaces. Dev and test stacks only.
+# Besides the powercap unmask, every service shares one fixed SELinux MCS level: a file
+# carries its creator's level, so the containers can exchange files on shared volumes (the
+# media worker and the processor through scratch, the worker and the gateway through the
+# derivatives). Production installs draw their own random level (aegis-podman), never this
+# one. The checked launcher admits exactly these two options.
 x-podman-security: &podman-security
   security_opt:
     - unmask=/sys/devices/virtual/powercap
+    - label=level:s0:c403,c871
 
 services:
   postgres: *podman-security
@@ -10,6 +16,7 @@ services:
   operations: *podman-security
   indexer: *podman-security
   media: *podman-security
+  media-processor: *podman-security
   gateway: *podman-security
   # Caddy's two private tmpfs mounts only: Podman rejects uid/gid tmpfs options, so U
   # derives ownership from the fixed 10001:10001 process user and notmpcopyup keeps each
@@ -19,6 +26,7 @@ services:
   caddy:
     security_opt:
       - unmask=/sys/devices/virtual/powercap
+      - label=level:s0:c403,c871
     tmpfs: !override
       - /config:size=16m,noexec,nosuid,nodev,U,notmpcopyup,mode=0700
       - /tmp:size=16m,noexec,nosuid,nodev,U,notmpcopyup,mode=1777
@@ -27,6 +35,7 @@ services:
   caddy-local:
     security_opt:
       - unmask=/sys/devices/virtual/powercap
+      - label=level:s0:c403,c871
     tmpfs: !override
       - /config:size=16m,noexec,nosuid,nodev,U,notmpcopyup,mode=0700
       - /tmp:size=16m,noexec,nosuid,nodev,U,notmpcopyup,mode=1777

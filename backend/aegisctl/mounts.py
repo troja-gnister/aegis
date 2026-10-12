@@ -69,8 +69,13 @@ MANIFEST_TARGET = "/run/aegis/mounts.manifest.json"
 GATEWAY_ATTESTATION_TARGET = "/run/aegis/mounts.gateway.attestation"
 # The Podman deployment (Quadlet units and its plain podman run observer).
 UNIT_PREFIX_RE = re.compile(r"[a-z][a-z0-9-]{0,30}-")
-QUADLET_ROLES = ("migrate", "web", "operations", "indexer", "media", "gateway")
+QUADLET_ROLES = (
+    "migrate", "web", "operations", "indexer", "media", "media-processor", "gateway",
+)
 QUADLET_DROP_IN = "50-aegis-roots.conf"
+# The media processor reads originals and nothing else of the render: no manifest, no
+# attestation and no command of its own (it opens files by slot path, spec M2).
+PROCESSOR_ROLE = "media-processor"
 MAX_GROUP_ID = 2**32 - 2
 _IMAGE_COMPONENT = r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*"
 _REGISTRY_PORT = (
@@ -722,6 +727,7 @@ def render_artifacts(
         "operations": [_bind(manifest_path.resolve(), manifest_target, read_only=True)],
         "indexer": [_bind(manifest_path.resolve(), manifest_target, read_only=True)],
         "media": [_bind(manifest_path.resolve(), manifest_target, read_only=True)],
+        PROCESSOR_ROLE: [],
         "gateway": [
             _bind(
                 gateway_attestation_path.resolve(),
@@ -752,6 +758,12 @@ def render_artifacts(
             }
             for role in ("operations", "indexer", "media")
         },
+        # The processor runs as the media worker does, so the two share the scratch volume;
+        # it reads the roots and nothing else of the render.
+        PROCESSOR_ROLE: {
+            "user": identity,
+            "volumes": service_volumes[PROCESSOR_ROLE],
+        },
         "gateway": {
             "environment": {
                 "AEGIS_GATEWAY_MOUNT_ATTESTATION": attestation_target,
@@ -761,18 +773,11 @@ def render_artifacts(
         },
     }
     for slot in validated:
-        service_volumes["gateway"].append(
-            _bind(slot.source, slot.container_path, read_only=True)
-        )
-        service_volumes["indexer"].append(
-            _bind(slot.source, slot.container_path, read_only=True)
-        )
-        service_volumes["media"].append(
-            _bind(slot.source, slot.container_path, read_only=True)
-        )
-        service_volumes["operations"].append(
-            _bind(slot.source, slot.container_path, read_only=True)
-        )
+        for role in ("gateway", "indexer", "media", PROCESSOR_ROLE, "operations"):
+            # Read-only, with no relabel or ownership option: originals are never changed.
+            service_volumes[role].append(
+                _bind(slot.source, slot.container_path, read_only=True)
+            )
     compose_raw = yaml.safe_dump(
         {"services": services},
         sort_keys=False,
@@ -890,7 +895,8 @@ def render_quadlet_artifacts(
 
     Each ``<prefix><role>.container.d/50-aegis-roots.conf`` binds the manifest or the
     gateway attestation, the read-only roots and, for workers, the attestation ``Exec=``.
-    Runs on a standard-library-only host Python.
+    The media processor's binds only the read-only roots. Runs on a standard-library-only
+    host Python.
     """
     if not isinstance(unit_prefix, str) or not UNIT_PREFIX_RE.fullmatch(unit_prefix):
         raise ConfigError("invalid Quadlet unit prefix")
@@ -932,6 +938,7 @@ def render_quadlet_artifacts(
             )
             for role in ("operations", "indexer", "media")
         },
+        PROCESSOR_ROLE: _quadlet_drop_in({}, roots),
         "gateway": _quadlet_drop_in(
             {
                 "AEGIS_GATEWAY_MOUNT_ATTESTATION": GATEWAY_ATTESTATION_TARGET,

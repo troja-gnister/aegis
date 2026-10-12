@@ -43,6 +43,10 @@ services:
     restart: "no"
     labels:
       aegis.test.resource-token: "${AEGIS_TEST_RESOURCE_TOKEN:?AEGIS_TEST_RESOURCE_TOKEN is required}"
+  media-processor:
+    restart: "no"
+    labels:
+      aegis.test.resource-token: "${AEGIS_TEST_RESOURCE_TOKEN:?AEGIS_TEST_RESOURCE_TOKEN is required}"
   gateway:
     restart: "no"
     labels:
@@ -84,6 +88,9 @@ volumes:
     labels:
       aegis.test.resource-token: "${AEGIS_TEST_RESOURCE_TOKEN:?AEGIS_TEST_RESOURCE_TOKEN is required}"
   frontier-outbox:
+    labels:
+      aegis.test.resource-token: "${AEGIS_TEST_RESOURCE_TOKEN:?AEGIS_TEST_RESOURCE_TOKEN is required}"
+  media-scratch:
     labels:
       aegis.test.resource-token: "${AEGIS_TEST_RESOURCE_TOKEN:?AEGIS_TEST_RESOURCE_TOKEN is required}"
 

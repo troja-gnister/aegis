@@ -1,6 +1,6 @@
 """The rootless Podman deployment harness, ``make verify-podman-deploy`` (spec D12, D13).
 
-It builds the four runtime images from the working tree, installs a run-unique test stack
+It builds the five runtime images from the working tree, installs a run-unique test stack
 through the real installer (``deploy/podman/aegis-podman``) under the user's systemd
 manager, checks it, and removes exactly what it recorded. Nothing it creates can start at
 boot: the installer renders a test prefix's units without ``[Install]`` sections, nothing is
@@ -10,7 +10,8 @@ Each check prints one line, ``AEGIS_PODMAN_DEPLOY check=<name> status=passed|fai
 [detail]``, and no line carries a secret. The run record,
 ``${XDG_STATE_HOME:-~/.local/state}/aegis-podman-deploy-check/<run>.json`` (0600), names every
 identity the run may create before it creates it, and the run's own directory (the
-installer's state home and the synthetic root) is ``…/aegis-podman-deploy-check/<run>/``.
+installer's state home, the synthetic root and the derivatives directory init prepares) is
+``…/aegis-podman-deploy-check/<run>/``.
 Both survive a reboot, so ``--cleanup <record>`` finishes an interrupted run's cleanup by
 those exact identities; it changes nothing when one of them no longer matches. Addresses and
 ports are discovered at run time and never written into the repository.
@@ -20,6 +21,15 @@ build``: the tracked Dockerfiles, the repository root as context and default bui
 arguments. The e2e harness builds through Compose only because it then runs the stack with
 Compose; its launch guard gates runtime launches that mount originals and passes builds
 through unchanged.
+
+``--rehearse-level-migration`` rehearses the one-time move of an install's volumes to its
+shared SELinux level instead of running the checks. It installs the release at
+``--from-commit`` (default: the last installer before the shared level) with that commit's
+own installer and images, writes a marker administrator, upgrades in place with this tree's
+installer and images, and checks that PostgreSQL comes back healthy with the marker. The old
+installer cannot install this tree's images (their renderer is newer than it understands), so
+the commit's tree is extracted with ``git archive`` into the run's directory and its four
+images are built from it, labelled for the run like the others.
 """
 from __future__ import annotations
 
@@ -61,7 +71,7 @@ DOCKERFILES = REPOSITORY / "docker"
 INSTALLER_MODULE = "aegis_podman_installer"
 PODMAN = ("podman", "--remote=false")
 SYSTEMCTL = ("systemctl", "--user")
-ROLES = ("backend", "gateway", "postgres", "caddy")
+ROLES = ("backend", "gateway", "postgres", "caddy", "media")
 PRODUCTION_PREFIX = "aegis-"
 # One run: t + 8 hex. Its prefix, release, tags and directory all derive from it.
 RUN_ID = re.compile(r"t[0-9a-f]{8}")
@@ -119,8 +129,8 @@ REMOTE_VARIABLES = frozenset({
 })
 CHECKS = (
     "units_healthy", "not_boot_enabled", "no_restart_policy", "gateway_unpublished",
-    "tls_local_ca", "throttle_per_address", "root_read_only", "postgres_restart_recovers",
-    "migrate_failure_recovers",
+    "tls_local_ca", "throttle_per_address", "root_read_only", "media_processor_isolated",
+    "shared_volume_exchange", "postgres_restart_recovers", "migrate_failure_recovers",
 )
 # Lists the synthetic root and reads one of its files as the indexer's user, then tries to
 # create a file in it; prints what it saw as JSON. The write must fail with EROFS.
@@ -138,6 +148,76 @@ ROOT_PROBE = (
     "    seen['write'] = errno.errorcode.get(error.errno, str(error.errno))\n"
     "print(json.dumps(seen))\n"
 )
+# Inside the media processor (spec M2): its network interfaces, every file under
+# /run/secrets, an attempt to create a file in the root (which must fail with EROFS) and its
+# no_new_privs flag; prints what it saw as JSON.
+PROCESSOR_PROBE = (
+    "import errno, json, os, sys\n"
+    "root, probe = sys.argv[1:3]\n"
+    "with open('/proc/net/dev', encoding='ascii') as handle:\n"
+    "    rows = handle.read().splitlines()[2:]\n"
+    "seen = {'interfaces': sorted(row.split(':', 1)[0].strip() for row in rows)}\n"
+    "secrets = []\n"
+    "def refused(error):\n"
+    "    if error.errno != errno.ENOENT:  # no /run/secrets at all is no secret\n"
+    "        secrets.append('unreadable: ' + errno.errorcode.get(error.errno, str(error.errno)))\n"
+    "for directory, _, files in os.walk('/run/secrets', onerror=refused):\n"
+    "    secrets += [os.path.join(directory, name) for name in files]\n"
+    "seen['secrets'] = sorted(secrets)\n"
+    "try:\n"
+    "    os.close(os.open(os.path.join(root, probe), os.O_WRONLY | os.O_CREAT | os.O_EXCL,"
+    " 0o600))\n"
+    "    seen['write'] = 'created'\n"
+    "except OSError as error:\n"
+    "    seen['write'] = errno.errorcode.get(error.errno, str(error.errno))\n"
+    "with open('/proc/self/status', encoding='ascii') as handle:\n"
+    "    seen['no_new_privs'] = next((line.split(':', 1)[1].strip() for line in handle\n"
+    "                                 if line.startswith('NoNewPrivs:')), None)\n"
+    "print(json.dumps(seen))\n"
+)
+
+# The shared-volume check's file, written by the media worker into scratch and into the
+# derivatives, read back by the processor and the gateway, then removed. Each run's init draws
+# its own MCS level, which every container of that test stack shares. A fresh install records
+# no volume before its level, so the installer's one-time move of existing volumes to the
+# shared level (for a record from before it) never runs in a checked stack: the rehearsal
+# (--rehearse-level-migration) runs it.
+EXCHANGE_NAME = ".aegis-deploy-check-exchange"
+EXCHANGE_SCRATCH = f"/srv/aegis/scratch/{EXCHANGE_NAME}"
+EXCHANGE_DERIVATIVE = f"/srv/aegis/derivatives/{EXCHANGE_NAME}"
+WRITE_EXCHANGE = (
+    "import os, sys\n"
+    "path, text = sys.argv[1:3]\n"
+    "descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o640)\n"
+    "try:\n"
+    "    os.write(descriptor, text.encode('ascii'))\n"
+    "finally:\n"
+    "    os.close(descriptor)\n"
+)
+REMOVE_EXCHANGE = (
+    "import os, sys\n"
+    "for path in sys.argv[1:]:\n"
+    "    if os.path.lexists(path):\n"
+    "        os.unlink(path)\n"
+)
+
+# The rehearsal (--rehearse-level-migration). Its default commit has the last installer
+# before the shared SELinux level, whose renderer is API 1 and whose releases have four images.
+PRE_LEVEL_COMMIT = "c60a2f4"
+COMMIT = re.compile(r"[0-9a-f]{7,40}")
+PREVIOUS_ROLES = ("backend", "gateway", "postgres", "caddy")
+REHEARSAL_CHECKS = (
+    "level_migration_previous_install", "level_migration_marker", "level_migration_upgrade",
+    "level_migration_start", "level_migration_marker_survives",
+)
+# The marker: an administrator bootstrap-password creates before the upgrade and must find
+# again after it. Its password is generated and kept by the installer, never seen here.
+MARKER_USER = "deploy-check"
+MARKER_EMAIL = "deploy-check@example.org"
+BOOTSTRAPPED = re.compile(r"user_id=(\d+) created=(true|false)")
+LABEL_LEVEL = re.compile(r"s0:c\d{1,4},c\d{1,4}")
+# The upgrade stops the stack and relabels every recorded volume once.
+UPGRADE_TIMEOUT = 3600
 
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 
@@ -394,6 +474,9 @@ class Record:
     created_directories: list[str] = field(default_factory=list)
     installer_started: bool = False
     version: int = 1
+    # The rehearsal's images of the previous release, like ``images`` (role -> entry), named
+    # before they are built; empty otherwise, and in a record from before the rehearsal.
+    previous_images: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @property
     def state_home(self) -> Path:
@@ -411,9 +494,48 @@ class Record:
     def cafile(self) -> Path:
         return Path(self.run_directory) / "caddy-root.pem"
 
+    @property
+    def derivatives(self) -> Path:
+        """The derivatives directory the installer prepares and the derivatives volume binds:
+        an empty directory of the operator's, inside the run's directory, so it goes with it."""
+        return Path(self.run_directory) / "derivatives"
+
+    @property
+    def previous(self) -> Path:
+        """The rehearsal's tree of the previous release, extracted from git."""
+        return Path(self.run_directory) / "previous"
+
+    @property
+    def previous_installer(self) -> Path:
+        return self.previous / "deploy" / "podman" / "aegis-podman"
+
+    @property
+    def previous_release(self) -> str:
+        return f"{self.release}-previous"
+
 
 def image_tag(role: str, run: str) -> str:
     return f"localhost/aegis-{role}:deploy-check-{run}"
+
+
+def previous_tag(role: str, run: str) -> str:
+    return f"localhost/aegis-{role}:deploy-check-{run}-previous"
+
+
+def run_images(record: Record) -> list[dict[str, Any]]:
+    """Every image entry of the run: this tree's, then the rehearsal's previous ones."""
+    return [*(record.images[role] for role in ROLES), *record.previous_images.values()]
+
+
+def _image_entry(entry: object, tag: str) -> bool:
+    return (
+        isinstance(entry, dict) and set(entry) == {"tag", "id", "preexisting"}
+        and entry["tag"] == tag
+        and (entry["id"] is None
+             or (isinstance(entry["id"], str) and re.fullmatch("[0-9a-f]{64}", entry["id"])
+                 is not None))
+        and entry["preexisting"] in (None, True, False)
+    )
 
 
 def unit_directory_chain(config: Path) -> list[str]:
@@ -444,7 +566,8 @@ def new_record(machine: Machine, run: str, layout: Layout, port: int) -> Record:
 def _record_problem(machine: Machine, data: object, run: str) -> str | None:
     """What makes ``data`` a record this harness must not act on, or None."""
     fields = {item.name for item in dataclasses.fields(Record)}
-    if not isinstance(data, dict) or set(data) != fields:
+    # A record from before the rehearsal has no previous images, and is read as having none.
+    if not isinstance(data, dict) or not fields - {"previous_images"} <= set(data) <= fields:
         return "unknown fields"
     if data["version"] != 1 or data["run"] != run or RUN_ID.fullmatch(run) is None:
         return "unknown version or run"
@@ -482,14 +605,14 @@ def _record_problem(machine: Machine, data: object, run: str) -> str | None:
             return f"malformed {key}"
     images = data["images"]
     if not isinstance(images, dict) or set(images) != set(ROLES) or not all(
-        isinstance(entry, dict) and set(entry) == {"tag", "id", "preexisting"}
-        and entry["tag"] == image_tag(role, run)
-        and (entry["id"] is None
-             or (isinstance(entry["id"], str) and re.fullmatch("[0-9a-f]{64}", entry["id"])))
-        and entry["preexisting"] in (None, True, False)
-        for role, entry in images.items()
+        _image_entry(entry, image_tag(role, run)) for role, entry in images.items()
     ):
         return "malformed images"
+    previous = data.get("previous_images", {})
+    if not isinstance(previous, dict) or (previous and set(previous) != set(PREVIOUS_ROLES)) \
+            or not all(_image_entry(entry, previous_tag(role, run))
+                       for role, entry in previous.items()):
+        return "malformed previous images"
     if not isinstance(data["inventory"], (dict, type(None))):
         return "malformed inventory"
     identity = data["directory_identity"]
@@ -698,19 +821,23 @@ def installer_environment(environ: Mapping[str, str], record: Record) -> dict[st
     return environment
 
 
-def installer_argv(machine: Machine, record: Record, command: str, *options: str) -> list[str]:
+def installer_argv(
+    machine: Machine, record: Record, command: str, *options: str, installer: Path = INSTALLER,
+) -> list[str]:
     return [
-        machine.python, str(INSTALLER), *command.split(), "--prefix", record.prefix,
+        machine.python, str(installer), *command.split(), "--prefix", record.prefix,
         "--state-home", str(record.state_home), *options,
     ]
 
 
 def run_installer(
     machine: Machine, record: Record, command: str, *options: str, timeout: float,
+    installer: Path = INSTALLER,
 ) -> subprocess.CompletedProcess[str]:
+    """This tree's installer, or ``installer`` (the rehearsal's previous one)."""
     return _run(
-        machine, installer_argv(machine, record, command, *options), timeout=timeout,
-        env=installer_environment(machine.environ, record),
+        machine, installer_argv(machine, record, command, *options, installer=installer),
+        timeout=timeout, env=installer_environment(machine.environ, record),
     )
 
 
@@ -914,17 +1041,20 @@ def _labels(entry: Mapping[str, Any]) -> dict[str, Any]:
     return labels if isinstance(labels, dict) else {}
 
 
-def build_images(machine: Machine, record: Record, record_path: Path, report: Report) -> bool:
-    """Build the four images from the working tree, each tagged and labelled for the run."""
+def _build(
+    machine: Machine, record: Record, record_path: Path, images: Mapping[str, dict[str, Any]],
+    context: Path,
+) -> str | None:
+    """Build each of ``images`` (role -> entry, named in the record) from ``context`` and its
+    docker/<role>.Dockerfile, tagged and labelled for the run; the failure, or None."""
     before = set((record.inventory or {}).get("images", {}))
-    for role in ROLES:
-        image = record.images[role]
+    for role, image in images.items():
         _say(machine, f"building the {role} image ({image['tag']})")
         started = machine.monotonic()
         result = _run(
             machine,
-            [*GENTLE, *PODMAN, "build", "--file", str(DOCKERFILES / f"{role}.Dockerfile"),
-             "--label", f"{RUN_LABEL}={record.run}", "--tag", image["tag"], str(REPOSITORY)],
+            [*GENTLE, *PODMAN, "build", "--file", str(context / "docker" / f"{role}.Dockerfile"),
+             "--label", f"{RUN_LABEL}={record.run}", "--tag", image["tag"], str(context)],
             timeout=BUILD_TIMEOUT,
         )
         entry = inspect_image(machine, image["tag"])
@@ -935,15 +1065,20 @@ def build_images(machine: Machine, record: Record, record_path: Path, report: Re
             save_record(record_path, record)
         if result.returncode != 0:
             _show_output(machine, f"podman build of {role}", result)
-            report.check("build_images", False,
-                         f"{role}: podman build failed: {_last_line(result)}")
-            return False
+            return f"{role}: podman build failed: {_last_line(result)}"
         if image["id"] is None:
-            report.check("build_images", False, f"{role}: the built tag is not this run's image")
-            return False
+            return f"{role}: the built tag is not this run's image"
         _say(machine, f"built {role} in {machine.monotonic() - started:.0f}s")
-    report.check("build_images", True, f"four images tagged deploy-check-{record.run}")
-    return True
+    return None
+
+
+def build_images(machine: Machine, record: Record, record_path: Path, report: Report) -> bool:
+    """Build the five images from the working tree, each tagged and labelled for the run."""
+    problem = _build(machine, record, record_path, {role: record.images[role] for role in ROLES},
+                     REPOSITORY)
+    report.check("build_images", problem is None,
+                 problem or f"{len(ROLES)} images tagged deploy-check-{record.run}")
+    return problem is None
 
 
 # -- installing the test stack -------------------------------------------------------------------
@@ -972,37 +1107,50 @@ def make_synthetic_root(machine: Machine, record: Record) -> None:
             raise HarnessError(f"labelling the synthetic root failed: {_last_line(result)}")
 
 
-def install_stack(
-    machine: Machine, record: Record, record_path: Path, address: str, report: Report,
-) -> bool:
-    """init, install, the synthetic root and start, each through the installer CLI."""
-    record.installer_started = True
-    save_record(record_path, record)
-    images = ",".join(f"{role}={record.images[role]['id']}" for role in ROLES)
+def _install(
+    machine: Machine, record: Record, address: str, *, installer: Path, release: str,
+    images: str, options: tuple[str, ...] = (),
+) -> str | None:
+    """init (with ``options``), install, the synthetic root and roots add, then start, each
+    through ``installer``'s CLI; the failure, or None."""
     steps: list[tuple[str, tuple[str, ...], float]] = [
-        ("init", ("--release", record.release, "--https-port", str(record.port),
+        ("init", ("--release", release, "--https-port", str(record.port),
                   "--name", LOOPBACK, "--name", address, "--local-images", images,
-                  "--reader-type", TEST_READER_TYPE), 900),
+                  "--reader-type", TEST_READER_TYPE, *options), 900),
         ("install", ("--no-install-sections",), 300),
         ("roots add", ("--slot", SLOT, "--source", str(record.root), "--timeout", "600"), 900),
         ("start", ("--timeout", str(START_TIMEOUT)), START_TIMEOUT + 300),
     ]
-    for command, options, timeout in steps:
+    which = "aegis-podman" if installer == INSTALLER else "the previous aegis-podman"
+    for command, step_options, timeout in steps:
         if command == "roots add":
             try:
                 make_synthetic_root(machine, record)
             except (HarnessError, OSError) as error:
-                report.check("install", False, f"synthetic root: {error}")
-                return False
-        _say(machine, f"aegis-podman {command}")
-        result = run_installer(machine, record, command, *options, timeout=timeout)
+                return f"synthetic root: {error}"
+        _say(machine, f"{which} {command}")
+        result = run_installer(machine, record, command, *step_options, timeout=timeout,
+                               installer=installer)
         if result.returncode != 0:
-            _show_output(machine, f"aegis-podman {command}", result)
-            report.check("install", False, f"{command}: {_last_line(result)}")
-            return False
-    report.check("install", True, "init, install --no-install-sections, roots add and start "
-                                  "through aegis-podman")
-    return True
+            _show_output(machine, f"{which} {command}", result)
+            return f"{command}: {_last_line(result)}"
+    return None
+
+
+def install_stack(
+    machine: Machine, record: Record, record_path: Path, address: str, report: Report,
+) -> bool:
+    """init with the run's derivatives directory, install, the synthetic root and start,
+    each through the installer CLI."""
+    record.installer_started = True
+    save_record(record_path, record)
+    images = ",".join(f"{role}={record.images[role]['id']}" for role in ROLES)
+    problem = _install(machine, record, address, installer=INSTALLER, release=record.release,
+                       images=images, options=("--derivatives-dir", str(record.derivatives)))
+    report.check("install", problem is None, problem or (
+        "init with a derivatives directory, install --no-install-sections, roots add and "
+        "start through aegis-podman"))
+    return problem is None
 
 
 # -- checks ------------------------------------------------------------------------------------
@@ -1270,6 +1418,109 @@ def check_root_read_only(context: Context) -> str:
             "creating a file failed with EROFS")
 
 
+def check_media_processor_isolated(context: Context) -> str:
+    """Spec M2: the processor runs with no network, no secret, the root bound read-only and
+    no way to gain privileges, as Podman reports it and as the container itself sees it."""
+    machine = context.machine
+    name = context.layout.containers[f"{context.record.prefix}media-processor.service"]
+    entry = inspect_container(machine, name)
+    if entry is None:
+        raise CheckFailed(f"{name} is missing")
+    problems = []
+    mode = (entry.get("HostConfig") or {}).get("NetworkMode")
+    if mode != "none":
+        problems.append(f"Podman reports the network mode {mode}, not none")
+    binds = [mount for mount in entry.get("Mounts") or []
+             if isinstance(mount, dict) and mount.get("Destination") == SLOT_TARGET]
+    if len(binds) != 1 or binds[0].get("RW") is not False:
+        problems.append(f"Podman does not report {SLOT_TARGET} as one read-only bind")
+    result = _run(
+        machine,
+        [*PODMAN, "exec", name, "python3", "-I", "-c", PROCESSOR_PROBE, SLOT_TARGET,
+         WRITE_PROBE],
+        timeout=120,
+    )
+    if result.returncode != 0:
+        raise CheckFailed(f"probing {name} failed: {_last_line(result)}")
+    lines = (result.stdout or "").strip().splitlines()
+    try:
+        seen = json.loads(lines[-1]) if lines else None
+    except json.JSONDecodeError:
+        seen = None
+    if not isinstance(seen, dict):
+        raise CheckFailed("the processor probe printed no result")
+    if seen.get("interfaces") != ["lo"]:
+        problems.append(f"/proc/net/dev lists {seen.get('interfaces')}, not only lo")
+    secrets = seen.get("secrets")
+    if secrets != []:
+        # A count only: even the names stay out of the report.
+        count = len(secrets) if isinstance(secrets, list) else "an unknown number of"
+        problems.append(f"{count} entries under /run/secrets")
+    if seen.get("write") != "EROFS":
+        problems.append(f"creating a file in the root gave {seen.get('write')}, not EROFS")
+    if seen.get("no_new_privs") != "1":
+        problems.append(f"NoNewPrivs is {seen.get('no_new_privs')}, not 1")
+    if problems:
+        raise CheckFailed("; ".join(problems))
+    return (f"{name}: network mode none and only lo in /proc/net/dev, nothing under "
+            f"/run/secrets, {SLOT_TARGET} read-only (EROFS), NoNewPrivs 1")
+
+
+def _mcs_level(entry: Mapping[str, Any]) -> str | None:
+    """The MCS level of a container's process label (user:role:type:level), or None."""
+    label = entry.get("ProcessLabel")
+    parts = label.split(":", 3) if isinstance(label, str) else []
+    return parts[3] if len(parts) == 4 and parts[3] else None
+
+
+def check_shared_volume_exchange(context: Context) -> str:
+    """One MCS level for the install: a file the media worker creates in scratch is readable
+    by the processor, and one it writes into the derivatives is readable by the gateway (a
+    file carries its creator's level, so separate levels would refuse both)."""
+    machine, record = context.machine, context.record
+    names = {role: context.layout.containers[f"{record.prefix}{role}.service"]
+             for role in ("media", "media-processor", "gateway")}
+    levels = {}
+    for role, name in names.items():
+        entry = inspect_container(machine, name)
+        if entry is None:
+            raise CheckFailed(f"{name} is missing")
+        levels[role] = _mcs_level(entry)
+    problems = []
+    if None in levels.values() or len(set(levels.values())) != 1:
+        problems.append("the SELinux levels differ: " + ", ".join(
+            f"{names[role]} {level}" for role, level in levels.items()))
+    text = f"aegis podman deploy check {record.run}: exchange"
+    try:
+        for path in (EXCHANGE_SCRATCH, EXCHANGE_DERIVATIVE):
+            written = _run(machine, [*PODMAN, "exec", names["media"], "python3", "-I", "-c",
+                                     WRITE_EXCHANGE, path, text], timeout=120)
+            if written.returncode != 0:
+                # Reported with whatever the removal below reports: a file written before
+                # this one may be left.
+                problems.append(f"{names['media']} could not write {path}: "
+                                f"{_last_line(written)}")
+                break
+        else:
+            for role, path in (("media-processor", EXCHANGE_SCRATCH),
+                               ("gateway", EXCHANGE_DERIVATIVE)):
+                read = _run(machine, [*PODMAN, "exec", names[role], "cat", path], timeout=120)
+                if read.returncode != 0:
+                    problems.append(f"{names[role]} could not read {path}: {_last_line(read)}")
+                elif read.stdout != text:
+                    problems.append(f"{names[role]} read other content from {path}")
+    finally:
+        removed = _run(machine, [*PODMAN, "exec", names["media"], "python3", "-I", "-c",
+                                 REMOVE_EXCHANGE, EXCHANGE_SCRATCH, EXCHANGE_DERIVATIVE],
+                       timeout=120)
+    if removed.returncode != 0:
+        problems.append(f"the exchange files were not removed: {_last_line(removed)}")
+    if problems:
+        raise CheckFailed("; ".join(problems))
+    return (f"one SELinux level ({levels['media']}); {names['media-processor']} read the "
+            f"worker's file in scratch and {names['gateway']} its file in the derivatives")
+
+
 def _systemctl(machine: Machine, *arguments: str) -> None:
     result = _run(machine, [*SYSTEMCTL, *arguments], timeout=120)
     if result.returncode != 0:
@@ -1356,6 +1607,8 @@ CHECK_FUNCTIONS: dict[str, Callable[[Context], str]] = {
     "tls_local_ca": check_tls_local_ca,
     "throttle_per_address": check_throttle_per_address,
     "root_read_only": check_root_read_only,
+    "media_processor_isolated": check_media_processor_isolated,
+    "shared_volume_exchange": check_shared_volume_exchange,
     "postgres_restart_recovers": check_postgres_restart_recovers,
     "migrate_failure_recovers": check_migrate_failure_recovers,
 }
@@ -1371,6 +1624,240 @@ def run_checks(context: Context, report: Report) -> None:
             report.check(name, False, f"{type(error).__name__}: {error}")
         else:
             report.check(name, True, detail)
+
+
+# -- the level migration rehearsal ---------------------------------------------------------
+
+
+@dataclass
+class Rehearsal:
+    """--rehearse-level-migration: what its steps share."""
+
+    machine: Machine
+    record: Record
+    record_path: Path
+    layout: Layout
+    address: str
+    commit: str
+    revision: str = ""  # the full commit ID, once resolved
+    marker: str | None = None  # the marker administrator's user ID
+    level: str | None = None  # the shared level the upgrade recorded
+
+
+def _git(
+    machine: Machine, *arguments: str, timeout: float = 120,
+) -> subprocess.CompletedProcess[str]:
+    return _run(machine, ["git", "-C", str(REPOSITORY), *arguments], timeout=timeout)
+
+
+def _previous_tree(rehearsal: Rehearsal) -> None:
+    """The commit's tracked tree, extracted into the run's directory with ``git archive``;
+    its installer must be one from before the shared level."""
+    machine, record = rehearsal.machine, rehearsal.record
+    resolved = _git(machine, "rev-parse", "--verify", "--quiet", f"{rehearsal.commit}^{{commit}}")
+    revision = (resolved.stdout or "").strip()
+    if resolved.returncode != 0 or re.fullmatch("[0-9a-f]{40}", revision) is None:
+        raise CheckFailed(f"{rehearsal.commit} names no commit of {REPOSITORY}")
+    rehearsal.revision = revision
+    archive = Path(record.run_directory) / "previous.tar"
+    exported = _git(machine, "archive", "--format=tar", f"--output={archive}", revision,
+                    timeout=600)
+    if exported.returncode != 0:
+        raise CheckFailed(f"git archive {revision[:12]} failed: {_last_line(exported)}")
+    record.previous.mkdir(mode=0o700)
+    unpacked = _run(machine, ["tar", "-x", "-f", str(archive), "-C", str(record.previous)],
+                    timeout=600)
+    if unpacked.returncode != 0:
+        raise CheckFailed(f"extracting {archive} failed: {_last_line(unpacked)}")
+    try:
+        text = record.previous_installer.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        raise CheckFailed(f"commit {revision[:12]} has no readable deploy/podman/aegis-podman"
+                          ) from None
+    api = re.search(r"^RENDER_API = (\d+)$", text, re.MULTILINE)
+    roles = re.search(r"^ROLES = \(([^)]*)\)$", text, re.MULTILINE)
+    if api is None or api.group(1) != "1":
+        raise CheckFailed(
+            f"the installer at {revision[:12]} renders API {api.group(1) if api else 'unknown'}"
+            ", not 1, so it already shares a level: give --from-commit a commit from before "
+            "the shared SELinux level"
+        )
+    if roles is None or tuple(re.findall(r'"([a-z-]+)"', roles.group(1))) != PREVIOUS_ROLES:
+        raise CheckFailed(f"the installer at {revision[:12]} does not have the images "
+                          f"{', '.join(PREVIOUS_ROLES)}")
+
+
+def rehearse_previous_install(rehearsal: Rehearsal) -> str:
+    """The previous release, built from its commit and installed and started by its own
+    installer, which runs every container at a random SELinux level."""
+    machine, record = rehearsal.machine, rehearsal.record
+    _previous_tree(rehearsal)
+    # Named in the record before they exist, as the others are.
+    record.previous_images = {
+        role: {"tag": previous_tag(role, record.run), "id": None, "preexisting": None}
+        for role in PREVIOUS_ROLES
+    }
+    save_record(rehearsal.record_path, record)
+    problem = _build(machine, record, rehearsal.record_path, record.previous_images,
+                     record.previous)
+    if problem is not None:
+        raise CheckFailed(problem)
+    images = ",".join(f"{role}={record.previous_images[role]['id']}" for role in PREVIOUS_ROLES)
+    problem = _install(machine, record, rehearsal.address, installer=record.previous_installer,
+                       release=record.previous_release, images=images)
+    if problem is not None:
+        raise CheckFailed(f"the previous aegis-podman {problem}")
+    return (f"commit {rehearsal.revision[:12]} (render API 1): {len(PREVIOUS_ROLES)} images "
+            "built, then init, install, roots add and start through its own aegis-podman")
+
+
+def _bootstrap(rehearsal: Rehearsal, installer: Path) -> tuple[str, bool]:
+    """bootstrap-password for the marker administrator: its user ID, and whether this call
+    created it. The first call prints the generated password on standard output, so none of
+    that output is ever shown or logged; only the user_id line is read from it."""
+    result = run_installer(rehearsal.machine, rehearsal.record, "bootstrap-password",
+                           "--username", MARKER_USER, "--email", MARKER_EMAIL, timeout=900,
+                           installer=installer)
+    if result.returncode != 0:
+        errors = subprocess.CompletedProcess(result.args, result.returncode, "", result.stderr)
+        raise CheckFailed(f"bootstrap-password: {_last_line(errors)}")
+    found = [match for line in (result.stdout or "").splitlines()
+             if (match := BOOTSTRAPPED.fullmatch(line.strip())) is not None]
+    if len(found) != 1:
+        raise CheckFailed("bootstrap-password printed no single user_id=<n> created=<bool> line")
+    return found[0].group(1), found[0].group(2) == "true"
+
+
+def rehearse_marker(rehearsal: Rehearsal) -> str:
+    """A PostgreSQL write through the previous release: the marker administrator."""
+    user_id, created = _bootstrap(rehearsal, rehearsal.record.previous_installer)
+    if not created:
+        raise CheckFailed(f"the marker administrator {user_id} existed before the rehearsal")
+    rehearsal.marker = user_id
+    return f"bootstrap-password through the previous release created administrator {user_id}"
+
+
+def _installer_state(rehearsal: Rehearsal) -> dict[str, Any]:
+    path = rehearsal.record.state_home / "state.json"
+    try:
+        data = json.loads(_read_private(path, rehearsal.machine.uid))
+    except (OSError, HarnessError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise CheckFailed(f"cannot read the installer's record {path}: {error}") from None
+    if not isinstance(data, dict) or data.get("prefix") != rehearsal.record.prefix:
+        raise CheckFailed(f"{path} is not the installer's record for {rehearsal.record.prefix}")
+    return data
+
+
+def rehearse_upgrade(rehearsal: Rehearsal) -> str:
+    """Stop through the previous installer, then upgrade in place with this tree's installer
+    and images, adopting the run's derivatives directory as an operator would. The upgrade
+    draws the shared level and moves every volume recorded before it to that level."""
+    machine, record = rehearsal.machine, rehearsal.record
+    stopped = run_installer(machine, record, "stop", "--timeout", "300", timeout=600,
+                            installer=record.previous_installer)
+    if stopped.returncode != 0:
+        _show_output(machine, "the previous aegis-podman stop", stopped)
+        raise CheckFailed(f"stop through the previous release: {_last_line(stopped)}")
+    # The previous release created the plain derivatives volume but never wrote it. Quadlet
+    # keeps an existing volume, so it goes, by its exact name, as the installer asks; the
+    # upgrade's units create it again as the bind of the derivatives directory.
+    volume = f"{record.prefix}derivatives"
+    if volume not in record.volumes:
+        raise HarnessError(f"{volume} is not one of the run's volumes")
+    exists = _exists(machine, "volume", volume)
+    if exists is None:
+        raise CheckFailed(f"podman could not tell whether the volume {volume} exists")
+    if exists:
+        removed = _run(machine, [*PODMAN, "volume", "rm", volume], timeout=120)
+        if removed.returncode != 0:
+            raise CheckFailed(f"podman volume rm {volume} failed: {_last_line(removed)}")
+    images = ",".join(f"{role}={record.images[role]['id']}" for role in ROLES)
+    _say(machine, "aegis-podman upgrade")
+    result = run_installer(machine, record, "upgrade", "--release", record.release,
+                           "--local-images", images, "--derivatives-dir", str(record.derivatives),
+                           "--timeout", "600", timeout=UPGRADE_TIMEOUT + 900)
+    if result.returncode != 0:
+        _show_output(machine, "aegis-podman upgrade", result)
+        raise CheckFailed(f"upgrade: {_last_line(result)}")
+    state = _installer_state(rehearsal)
+    level, migration = state.get("label_level"), state.get("level_migration")
+    derivatives = state.get("derivatives")
+    problems = []
+    if state.get("release") != record.release or state.get("pending") is not None:
+        problems.append(f"the record is not on {record.release} with nothing pending")
+    if not isinstance(level, str) or LABEL_LEVEL.fullmatch(level) is None:
+        problems.append(f"the record names no shared level ({level!r})")
+    postgres = f"{record.prefix}postgres-data"
+    if not isinstance(migration, dict) or postgres not in migration:
+        problems.append(f"the record names no level migration of {postgres}")
+    elif not all(done is True for done in migration.values()):
+        problems.append("volumes left at their old levels: " + ", ".join(
+            sorted(name for name, done in migration.items() if done is not True)))
+    if not isinstance(derivatives, dict) or derivatives.get("path") != str(record.derivatives) \
+            or derivatives.get("prepared") is not True:
+        problems.append(f"the record does not name {record.derivatives} as prepared")
+    if problems:
+        raise CheckFailed("; ".join(problems))
+    rehearsal.level = str(level)
+    assert isinstance(migration, dict)
+    return (f"stopped, then upgraded to {record.release} with this tree's installer: shared "
+            f"level {level}, {len(migration)} recorded volumes relabelled, the derivatives "
+            "directory adopted")
+
+
+def rehearse_start(rehearsal: Rehearsal) -> str:
+    """Start on the shared level: PostgreSQL must read the data it wrote at its old level."""
+    machine, record = rehearsal.machine, rehearsal.record
+    _say(machine, "aegis-podman start")
+    result = run_installer(machine, record, "start", "--timeout", str(START_TIMEOUT),
+                           timeout=START_TIMEOUT + 300)
+    if result.returncode != 0:
+        _show_output(machine, "aegis-podman start", result)
+        raise CheckFailed(f"start: {_last_line(result)}")
+    name = rehearsal.layout.containers[f"{record.prefix}postgres.service"]
+    entry = inspect_container(machine, name)
+    health, level = health_status(entry), _mcs_level(entry or {})
+    if health != "healthy" or level != rehearsal.level:
+        raise CheckFailed(f"{name} is {health} at the level {level}, not healthy at "
+                          f"{rehearsal.level}")
+    return f"every unit active and healthy; {name} healthy at the shared level {level}"
+
+
+def rehearse_marker_survives(rehearsal: Rehearsal) -> str:
+    """The marker written before the move is still there: bootstrap-password through this
+    tree's installer finds the same administrator and creates none."""
+    user_id, created = _bootstrap(rehearsal, INSTALLER)
+    if created or user_id != rehearsal.marker:
+        raise CheckFailed(f"bootstrap-password reported user_id={user_id} "
+                          f"created={str(created).lower()}, not the marker administrator "
+                          f"{rehearsal.marker} found again")
+    return f"administrator {user_id} from before the upgrade found again (created=false)"
+
+
+REHEARSAL_STEPS: dict[str, Callable[[Rehearsal], str]] = {
+    "level_migration_previous_install": rehearse_previous_install,
+    "level_migration_marker": rehearse_marker,
+    "level_migration_upgrade": rehearse_upgrade,
+    "level_migration_start": rehearse_start,
+    "level_migration_marker_survives": rehearse_marker_survives,
+}
+
+
+def rehearse_level_migration(rehearsal: Rehearsal, report: Report) -> None:
+    """Each step in order; after a failed one, the rest are reported as not run."""
+    for index, name in enumerate(REHEARSAL_CHECKS):
+        try:
+            detail = REHEARSAL_STEPS[name](rehearsal)
+        except (CheckFailed, HarnessError) as error:
+            report.check(name, False, str(error))
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            report.check(name, False, f"{type(error).__name__}: {error}")
+        else:
+            report.check(name, True, detail)
+            continue
+        for later in REHEARSAL_CHECKS[index + 1:]:
+            report.check(later, False, f"not run: {name} failed")
+        return
 
 
 # -- cleanup -----------------------------------------------------------------------------------
@@ -1402,8 +1889,7 @@ def remove_images(machine: Machine, record: Record) -> list[str]:
     untagged parents, which may predate the run.
     """
     problems = []
-    for role in ROLES:
-        image = record.images[role]
+    for image in run_images(record):
         tag, identifier = image["tag"], image["id"]
         if identifier is None:  # interrupted mid-build: the tag, if any, names the image
             entry = inspect_image(machine, tag) if _exists(machine, "image", tag) else None
@@ -1505,7 +1991,7 @@ def identity_problems(machine: Machine, record: Record) -> list[str]:
             data = None
         if not isinstance(data, dict) or data.get("prefix") != record.prefix:
             problems.append(f"{state} is not the installer's record for {record.prefix}")
-    for image in record.images.values():
+    for image in run_images(record):
         tag, identifier = image["tag"], image["id"]
         exists = _exists(machine, "image", tag)
         if exists is None:
@@ -1554,7 +2040,7 @@ def leftovers(machine: Machine, record: Record) -> list[str]:
             exists = _exists(machine, kind, name)
             if exists is not False:
                 found.append(f"{kind} {name}" + ("" if exists else " (podman could not tell)"))
-    for image in record.images.values():
+    for image in run_images(record):
         references = [image["tag"]]
         if image["id"] is not None and not image["preexisting"]:
             references.append(image["id"])
@@ -1677,7 +2163,7 @@ def _summary(report: Report, interrupted: int | None) -> None:
 
 def _exercise(
     machine: Machine, record: Record, record_path: Path, layout: Layout, address: str,
-    report: Report,
+    report: Report, rehearse: str | None = None,
 ) -> None:
     run_directory = Path(record.run_directory)
     run_directory.mkdir(mode=0o700)
@@ -1692,6 +2178,20 @@ def _exercise(
     record.directory_identity = {"inode": run_directory.lstat().st_ino, "token": token}
     save_record(record_path, record)
     record.temporary.mkdir(mode=0o700)
+    # Empty and the operator's, as the installer requires: it prepares it for the containers.
+    record.derivatives.mkdir(mode=0o750)
+    record.derivatives.chmod(0o750)
+    if rehearse is not None:
+        if not build_images(machine, record, record_path, report):
+            for name in REHEARSAL_CHECKS:
+                report.check(name, False, "not run: the images were not built")
+            return
+        record.installer_started = True
+        save_record(record_path, record)
+        rehearse_level_migration(
+            Rehearsal(machine, record, record_path, layout, address, rehearse), report,
+        )
+        return
     ready = build_images(machine, record, record_path, report) and install_stack(
         machine, record, record_path, address, report,
     )
@@ -1702,7 +2202,7 @@ def _exercise(
     run_checks(Context(machine, record, layout, address), report)
 
 
-def verify(machine: Machine) -> int:
+def verify(machine: Machine, rehearse: str | None = None) -> int:
     if machine.uid == 0:
         raise HarnessError("refusing to run as root")
     records = record_directory(machine)
@@ -1720,12 +2220,15 @@ def verify(machine: Machine) -> int:
         layout = layout_for(prefix, config_home(machine))
         open_log(machine, records / f"{run}.log")
         try:
-            return _verify_run(machine, records, run, prefix, layout)
+            return _verify_run(machine, records, run, prefix, layout, rehearse)
         finally:
             close_log(machine)
 
 
-def _verify_run(machine: Machine, records: Path, run: str, prefix: str, layout: Layout) -> int:
+def _verify_run(
+    machine: Machine, records: Path, run: str, prefix: str, layout: Layout,
+    rehearse: str | None = None,
+) -> int:
     report = Report(machine)
     run_directory = records / run
     problems, facts = preflight(machine, layout, run_directory)
@@ -1748,7 +2251,7 @@ def _verify_run(machine: Machine, records: Path, run: str, prefix: str, layout: 
         # output is best effort anyway.
         try:
             save_record(record_path, record)
-            _exercise(machine, record, record_path, layout, facts.address, report)
+            _exercise(machine, record, record_path, layout, facts.address, report, rehearse)
         except KeyboardInterrupt as error:
             interrupted = error.signum if isinstance(error, Interrupted) else signal.SIGINT
         except Exception as error:
@@ -1814,12 +2317,30 @@ def main(argv: Sequence[str] | None = None, machine: Machine | None = None) -> i
     )
     parser.add_argument("--cleanup", metavar="RECORD", type=Path,
                         help="finish an interrupted run's cleanup from its record")
+    parser.add_argument(
+        "--rehearse-level-migration", action="store_true",
+        help="instead of the checks: install the release at --from-commit with its own "
+             "installer and images, write a marker, upgrade it in place with this tree's, and "
+             "check that the one-time move to the shared SELinux level keeps PostgreSQL's data",
+    )
+    parser.add_argument(
+        "--from-commit", metavar="COMMIT",
+        help=f"the rehearsal's previous release, a commit ID whose installer is from before "
+             f"the shared level (default {PRE_LEVEL_COMMIT})",
+    )
     args = parser.parse_args(argv)
+    if args.cleanup is not None and args.rehearse_level_migration:
+        parser.error("--cleanup goes alone")
+    if args.from_commit is not None and not args.rehearse_level_migration:
+        parser.error("--from-commit goes with --rehearse-level-migration")
+    if args.from_commit is not None and COMMIT.fullmatch(args.from_commit) is None:
+        parser.error("--from-commit must be a commit ID: 7 to 40 lowercase hex digits")
+    rehearse = (args.from_commit or PRE_LEVEL_COMMIT) if args.rehearse_level_migration else None
     machine = Machine() if machine is None else machine
     try:
         if args.cleanup is not None:
             return finish_cleanup(machine, args.cleanup)
-        return verify(machine)
+        return verify(machine, rehearse)
     except HarnessError as error:
         emit(machine, f"podman_deploy_check: {error}", error=True)
         return 1

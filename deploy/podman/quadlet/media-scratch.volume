@@ -1,0 +1,5 @@
+# Mirrors compose.yaml volume `media-scratch`: the media worker and the processor only.
+[Volume]
+VolumeName=@@PREFIX@@media-scratch
+# The install's token: aegis-podman removes only objects that carry it.
+Label=io.aegis.install=@@INSTALL_TOKEN@@

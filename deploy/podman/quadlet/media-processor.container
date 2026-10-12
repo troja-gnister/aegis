@@ -1,0 +1,52 @@
+# Mirrors compose.yaml service `media-processor`: the only container that decodes media
+# (spec M2), with no network, no secret and no database setting. It shares nothing with the
+# media worker but the scratch volume, and the roots drop-in binds the originals read-only.
+# It needs neither the database nor the worker to start: either one creates the scratch
+# directories it is missing.
+[Unit]
+Description=Aegis media processor
+StartLimitIntervalSec=0
+
+[Container]
+ContainerName=@@PREFIX@@media-processor
+Image=@@IMAGE_MEDIA@@
+# The installer pulls the release images; a boot never reaches a registry.
+Pull=never
+User=10001
+Group=10001
+# The loop is a subreaper of its own; the init reaps whatever escapes it at PID 1.
+RunInit=true
+# No network namespace with any interface but loopback: nothing it decodes can reach out.
+Network=none
+Volume=@@PREFIX@@media-scratch.volume:/srv/aegis/scratch
+ReadOnly=true
+Tmpfs=/tmp:size=64m,noexec,nosuid,nodev
+DropCapability=ALL
+NoNewPrivileges=true
+Unmask=/sys/devices/virtual/powercap
+# D5: read originals through the operator's group only; D6: the read-only reader type. The
+# media worker maps the same group, so both reach the scratch volume as one identity.
+GIDMap=+g10001:@@@HOST_GID@@:1
+SecurityLabelType=@@READER_TYPE@@
+# One SELinux MCS level, drawn per install, for every Aegis container: a file carries its
+# creator's level, so the containers exchange files on shared volumes, while every other
+# container's own level keeps it out.
+SecurityLabelLevel=@@LABEL_LEVEL@@
+# compose.yaml's bounds, documented there: tasks and memory for two children at their
+# largest stage budget.
+PidsLimit=256
+Memory=7g
+
+[Service]
+# Like compose's unless-stopped: retry without limit, backing off from 5s to Docker's 1min cap
+# (RestartSteps= and RestartMaxDelaySec= need systemd 254 or newer).
+Restart=on-failure
+RestartSec=5
+RestartSteps=8
+RestartMaxDelaySec=60
+# compose.yaml's two CPUs. Quadlet has no CPU key and the units never pass raw Podman
+# arguments, so systemd bounds the unit's cgroup, which holds the container's.
+CPUQuota=200%
+
+[Install]
+WantedBy=default.target

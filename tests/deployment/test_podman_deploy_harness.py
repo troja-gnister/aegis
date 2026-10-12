@@ -1,8 +1,8 @@
 """The rootless Podman deployment harness, scripts/podman_deploy_check.py (spec D12, D13).
 
-Nothing here runs Podman, systemd, the installer, chcon or ip, or opens a connection: every
-program goes to FakeHost, which refuses any command it does not know, HTTPS goes to a fake
-gateway with nginx's limit_req arithmetic, and every path is under tmp_path.
+Nothing here runs Podman, systemd, either installer, git, tar, chcon or ip, or opens a
+connection: every program goes to FakeHost, which refuses any command it does not know, HTTPS
+goes to a fake gateway with nginx's limit_req arithmetic, and every path is under tmp_path.
 """
 from __future__ import annotations
 
@@ -16,6 +16,8 @@ import signal
 import ssl
 import stat
 import subprocess
+import sys
+import tarfile
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -34,11 +36,16 @@ TEST_PORT = 23456
 PYTHON = "/opt/test/python3"
 PEM = "-----BEGIN CERTIFICATE-----\nMIIBsynthetic\n-----END CERTIFICATE-----\n"
 RUN_LABEL = harness.RUN_LABEL
-ROLES = ("backend", "gateway", "postgres", "caddy")
+ROLES = ("backend", "gateway", "postgres", "caddy", "media")
 CHECKS = harness.CHECKS
 SETUP = ("preflight", "build_images", "install")
 FINAL = ("cleanup", "preexisting_unchanged")
 PREEXISTING_IMAGE = "1" * 64
+PREVIOUS_ROLES = ("backend", "gateway", "postgres", "caddy")
+PREVIOUS_REVISION = harness.PRE_LEVEL_COMMIT + "0" * (40 - len(harness.PRE_LEVEL_COMMIT))
+REHEARSAL = harness.REHEARSAL_CHECKS
+# What the installer's bootstrap-password prints once; it must never reach the output or log.
+GENERATED_PASSWORD = "synthetic-generated-password-Qx7"
 
 
 class FakeClock:
@@ -142,6 +149,12 @@ class FakeHost:
             "tags": ["registry.example.test/home:1"], "labels": {},
             "created": "2026-01-01T00:00:00Z",
         }}
+        # The shared volumes' files by container path, as the media worker wrote them.
+        self.exchanged: dict[str, str] = {}
+        # Administrators bootstrap-password created (username -> user ID), and whether it
+        # already showed the generated password.
+        self.administrators: dict[str, str] = {}
+        self.password_shown = False
 
     @property
     def state_directory(self) -> Path:
@@ -158,6 +171,18 @@ class FakeHost:
     @property
     def root(self) -> Path:
         return self.run_directory / "root"
+
+    @property
+    def derivatives(self) -> Path:
+        return self.run_directory / "derivatives"
+
+    @property
+    def previous(self) -> Path:
+        return self.run_directory / "previous"
+
+    @property
+    def previous_installer(self) -> Path:
+        return self.previous / "deploy" / "podman" / "aegis-podman"
 
     def reboot(self) -> None:
         """What a reboot does to the run: no container or unit keeps running, and the
@@ -186,7 +211,18 @@ class FakeHost:
         if command[:2] == (PYTHON, str(harness.INSTALLER)):
             assert env is not None
             return self.installer(command, command[2:], dict(env))
+        if command[:2] == (PYTHON, str(self.previous_installer)):
+            assert env is not None
+            return self.installer(command, command[2:], dict(env), previous=True)
         assert env is None, command
+        if command[:3] == ("git", "-C", str(harness.REPOSITORY)):
+            return self.git(command, command[3:])
+        if command[:3] == ("tar", "-x", "-f"):
+            assert command[3:] == (str(self.run_directory / "previous.tar"), "-C",
+                                   str(self.previous)), command
+            with tarfile.open(command[3]) as archive:
+                archive.extractall(command[5], filter="data")
+            return completed(command)
         if command[:2] == harness.PODMAN:
             return self.podman(command, command[2:])
         if command[:2] == harness.SYSTEMCTL:
@@ -204,6 +240,41 @@ class FakeHost:
     def installer_calls(self) -> list[tuple[str, ...]]:
         return [call for call in self.calls if call[:2] == (PYTHON, str(harness.INSTALLER))]
 
+    def previous_installer_calls(self) -> list[tuple[str, ...]]:
+        return [call for call in self.calls if call[:2] == (PYTHON, str(self.previous_installer))]
+
+    # -- git and the previous release's tree -----------------------------------------------
+    def git(
+        self, command: tuple[str, ...], words: tuple[str, ...],
+    ) -> subprocess.CompletedProcess[str]:
+        match words:
+            case ("rev-parse", "--verify", "--quiet", revision):
+                commit = revision.removesuffix("^{commit}")
+                assert revision == f"{commit}^{{commit}}", revision
+                if PREVIOUS_REVISION.startswith(commit):
+                    return completed(command, 0, f"{PREVIOUS_REVISION}\n")
+                return completed(command, 1)
+            case ("archive", "--format=tar", output, revision):
+                assert output == f"--output={self.run_directory / 'previous.tar'}", output
+                assert revision == PREVIOUS_REVISION, revision
+                api = 2 if "previous-api-2" in self.faults else 1
+                files = {
+                    "deploy/podman/aegis-podman": (
+                        "#!/usr/bin/env python3\n"
+                        f"RENDER_API = {api}\n"
+                        'ROLES = ("backend", "gateway", "postgres", "caddy")\n'
+                    ),
+                    **{f"docker/{role}.Dockerfile": "FROM scratch\n" for role in PREVIOUS_ROLES},
+                }
+                with tarfile.open(output.removeprefix("--output="), "w") as archive:
+                    for name, text in files.items():
+                        data = text.encode("utf-8")
+                        info = tarfile.TarInfo(name)
+                        info.size, info.mode = len(data), 0o644
+                        archive.addfile(info, io.BytesIO(data))
+                return completed(command)
+        raise AssertionError(f"unexpected git call {words}")
+
     def commands(self, *prefix: str) -> list[tuple[str, ...]]:
         return [call for call in self.calls if call[: len(prefix)] == prefix]
 
@@ -218,8 +289,11 @@ class FakeHost:
 
     # -- the installer ---------------------------------------------------------------------
     def installer(
-        self, command: tuple[str, ...], words: tuple[str, ...], env: dict[str, str],
+        self, command: tuple[str, ...], words: tuple[str, ...], env: dict[str, str], *,
+        previous: bool = False,
     ) -> subprocess.CompletedProcess[str]:
+        """This tree's installer, or the rehearsal's previous one (``previous``), which
+        knows neither --derivatives-dir nor the media image."""
         verb = " ".join(words[:2]) if words[0] == "roots" else words[0]
         rest = words[len(verb.split()):]
         assert rest[:4] == ("--prefix", PREFIX, "--state-home", str(self.state_home)), words
@@ -229,6 +303,14 @@ class FakeHost:
         if f"{verb}-fails" in self.faults:
             return completed(command, 1, "", f"aegis-podman: error: {verb} refused (fake)")
         if verb == "init":
+            if previous:
+                assert "--derivatives-dir" not in rest, rest
+            else:
+                assert rest[-2:] == ("--derivatives-dir", str(self.derivatives)), rest
+            # Empty, the operator's and group-only: what the installer adopts.
+            info = self.derivatives.lstat()
+            assert stat.S_ISDIR(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o750, info
+            assert info.st_uid == os.getuid() and not any(self.derivatives.iterdir())
             self.state_home.mkdir(mode=0o700)
             state = self.state_home / "state.json"
             state.write_text(json.dumps({"prefix": PREFIX}), encoding="utf-8")
@@ -260,6 +342,50 @@ class FakeHost:
             return completed(command, 0, "aegis-podman: every unit is active\n")
         if verb == "ca-cert":
             return completed(command, 0, PEM)
+        if verb == "bootstrap-password":
+            assert rest[4:] == ("--username", "deploy-check", "--email",
+                                "deploy-check@example.org"), rest
+            shown = ""
+            if not self.password_shown:
+                self.password_shown = True
+                shown = ("A new administrator password was generated. Save it in a password "
+                         f"manager now:\n  {GENERATED_PASSWORD}\n")
+            if "bootstrap-fails" in self.faults:
+                return completed(command, 1, shown, "aegis-podman: error: administrator "
+                                                    "bootstrap failed (exit 1) (fake)")
+            if "deploy-check" in self.administrators:
+                found = self.administrators["deploy-check"]
+                return completed(command, 0, f"{shown}user_id={found} created=false\n")
+            self.administrators["deploy-check"] = str(7 + len(self.administrators))
+            created = self.administrators["deploy-check"]
+            return completed(command, 0, f"{shown}user_id={created} created=true\n")
+        if verb == "upgrade":
+            assert not previous
+            ids = {role: hashlib.sha256(harness.image_tag(role, RUN).encode()).hexdigest()
+                   for role in ROLES}
+            assert rest[4:] == (
+                "--release", RELEASE,
+                "--local-images", ",".join(f"{role}={ids[role]}" for role in ROLES),
+                "--derivatives-dir", str(self.derivatives), "--timeout", "600",
+            ), rest
+            # Adopting a derivatives directory needs Aegis stopped and no derivatives volume.
+            assert not [name for name in self.containers if name.startswith(PREFIX)]
+            assert f"{PREFIX}derivatives" not in self.volumes
+            postgres = f"{PREFIX}postgres-data"
+            upgraded = {
+                "prefix": PREFIX, "release": RELEASE, "pending": None,
+                "label_level": "s0:c17,c912",
+                "level_migration": {
+                    name: not ("migration-unfinished" in self.faults and name == postgres)
+                    for name in self.layout.volumes
+                },
+                "derivatives": {"path": str(self.derivatives), "device": 1, "inode": 2,
+                                "prepared": True},
+            }
+            (self.state_home / "state.json").write_text(json.dumps(upgraded), encoding="utf-8")
+            if "marker-lost" in self.faults:
+                self.administrators.clear()
+            return completed(command, 0, f"aegis-podman: release {RELEASE} is current\n")
         if verb == "stop":
             self.stop_units(self.layout.units)
             return completed(command)
@@ -285,11 +411,11 @@ class FakeHost:
                 path.rmdir() if path.is_dir() else path.unlink()
             self.state_home.rmdir()
             if "unremovable-file" in self.faults:
-                # A file the container user owns, as podman unshare chown leaves one.
-                sealed = self.run_directory / "sealed"
-                sealed.mkdir()
-                (sealed / "owned-by-a-subordinate-uid").write_text("x", encoding="ascii")
-                sealed.chmod(0o500)
+                # The derivatives directory, which init handed to the container user (podman
+                # unshare chown), with a derivative in it: the operator cannot remove it.
+                (self.derivatives / "owned-by-a-subordinate-uid").write_text(
+                    "x", encoding="ascii")
+                self.derivatives.chmod(0o500)
             if "lose-preexisting-volume" in self.faults:
                 del self.volumes["home-data"]
             return completed(command)
@@ -300,6 +426,8 @@ class FakeHost:
         for role in ("postgres", "gateway", "caddy"):
             if service == f"{PREFIX}{role}.service":
                 return role
+        if service == f"{PREFIX}media-processor.service":
+            return "media"
         return "backend"
 
     def new_container(self, service: str) -> None:
@@ -313,6 +441,15 @@ class FakeHost:
         bindings = {"8443/tcp": [{"HostIp": "", "HostPort": "8443"}]} if (
             "published-gateway" in self.faults and service.endswith("gateway.service")
         ) else {}
+        processor = service == f"{PREFIX}media-processor.service"
+        # As Quadlet runs the processor: no network, the root bound read-only (spec M2).
+        network_mode = ("bridge" if "processor-network" in self.faults else "none") \
+            if processor else "bridge"
+        mounts = [{"Type": "bind", "Source": str(self.root),
+                   "Destination": "/srv/aegis/roots/deploy-check",
+                   "RW": "processor-writable-root" in self.faults}] if processor else []
+        # The install's one MCS level, the processor's own one under a fault.
+        level = "s0:c3,c4" if processor and "levels-differ" in self.faults else "s0:c17,c912"
         self.containers[name] = {
             "Name": name, "Id": self.new_id(), "Names": [name],
             "ImageID": self.run_image(self.role(service)), "Created": self.clock.now,
@@ -322,8 +459,10 @@ class FakeHost:
             "State": {"Status": "running", **({"Health": {"Status": health}}
                                               if service in self.layout.health_checked else {})},
             "HostConfig": {"RestartPolicy": {"Name": policy, "MaximumRetryCount": 0},
-                           "PortBindings": bindings},
+                           "PortBindings": bindings, "NetworkMode": network_mode},
             "NetworkSettings": {"Ports": {"8080/tcp": None}},
+            "Mounts": mounts,
+            "ProcessLabel": f"system_u:system_r:container_t:{level}",
         }
 
     def activate(self, unit: str, sub: str) -> None:
@@ -447,8 +586,12 @@ class FakeHost:
                 ]))
             case ("build", "--file", dockerfile, "--label", label, "--tag", tag, context):
                 role = Path(dockerfile).name.removesuffix(".Dockerfile")
-                assert dockerfile == str(harness.DOCKERFILES / f"{role}.Dockerfile"), words
-                assert context == str(harness.REPOSITORY) and tag == harness.image_tag(role, RUN)
+                # The rehearsal's previous images come from the commit's extracted tree.
+                previous = tag == harness.previous_tag(role, RUN)
+                source = self.previous if previous else harness.REPOSITORY
+                assert dockerfile == str(source / "docker" / f"{role}.Dockerfile"), words
+                assert context == str(source) and Path(dockerfile).is_file(), words
+                assert previous or tag == harness.image_tag(role, RUN), tag
                 assert label == f"{RUN_LABEL}={RUN}", label
                 if f"build-{role}-fails" in self.faults:
                     return completed(command, 1, "", "Error: building at STEP 3: failed (fake)")
@@ -505,10 +648,55 @@ class FakeHost:
                 if not container:
                     return completed(command, 125, "", f"Error: no such container {name}")
                 return completed(command, 0, json.dumps([container]))
+            case ("volume", "rm", name):
+                assert name == f"{PREFIX}derivatives" and name in self.volumes, name
+                del self.volumes[name]
+                return completed(command)
             case ("container" | "volume" | "network" as kind, "exists", name):
                 objects = {"container": self.containers, "volume": self.volumes,
                            "network": self.networks}[kind]
                 return completed(command, 0 if name in objects else 1)
+            case ("exec", name, "python3", "-I", "-c", script, path, text) \
+                    if script == harness.WRITE_EXCHANGE:
+                assert name == f"{PREFIX}media" and name in self.containers, name
+                assert path in (harness.EXCHANGE_SCRATCH, harness.EXCHANGE_DERIVATIVE), path
+                assert path not in self.exchanged, path
+                if "exchange-derivative-unwritable" in self.faults \
+                        and path == harness.EXCHANGE_DERIVATIVE:
+                    return completed(command, 1, "", "PermissionError: [Errno 13] (fake)")
+                self.exchanged[path] = text
+                return completed(command)
+            case ("exec", name, "python3", "-I", "-c", script, *paths) \
+                    if script == harness.REMOVE_EXCHANGE:
+                assert name == f"{PREFIX}media", name
+                if "exchange-unremovable" in self.faults:
+                    return completed(command, 1, "", "PermissionError: [Errno 13] (fake)")
+                for path in paths:
+                    self.exchanged.pop(path, None)
+                return completed(command)
+            case ("exec", name, "cat", path):
+                reader = {harness.EXCHANGE_SCRATCH: f"{PREFIX}media-processor",
+                          harness.EXCHANGE_DERIVATIVE: f"{PREFIX}gateway"}[path]
+                assert name == reader and name in self.containers, (name, path)
+                denied = ("exchange-scratch-denied" if path == harness.EXCHANGE_SCRATCH
+                          else "exchange-derivative-denied")
+                if denied in self.faults or path not in self.exchanged:
+                    return completed(command, 1, "", f"cat: {path}: Permission denied")
+                return completed(command, 0, self.exchanged[path])
+            case ("exec", name, "python3", "-I", "-c", script, target, probe) \
+                    if script == harness.PROCESSOR_PROBE:
+                assert name == f"{PREFIX}media-processor" and name in self.containers, name
+                assert (target, probe) == ("/srv/aegis/roots/deploy-check",
+                                           ".aegis-deploy-check-write")
+                seen = {
+                    "interfaces": ["eth0", "lo"] if "processor-interface" in self.faults
+                    else ["lo"],
+                    "secrets": ["/run/secrets/db_media_password"]
+                    if "processor-secret" in self.faults else [],
+                    "write": "created" if "processor-writable-root" in self.faults else "EROFS",
+                    "no_new_privs": "0" if "processor-new-privileges" in self.faults else "1",
+                }
+                return completed(command, 0, json.dumps(seen) + "\n")
             case ("exec", name, "python3", "-I", "-c", script, target, file, probe):
                 assert name == f"{PREFIX}indexer" and script == harness.ROOT_PROBE
                 assert target == "/srv/aegis/roots/deploy-check", target
@@ -618,7 +806,7 @@ def nothing_of_the_run_is_left(rig: Rig) -> None:
     assert not [identifier for identifier, image in fake.images.items()
                 if image["labels"].get(RUN_LABEL) == RUN and identifier != PREEXISTING_IMAGE]
     assert not [tag for image in fake.images.values() for tag in image["tags"]
-                if tag.endswith(f":deploy-check-{RUN}")]
+                if tag.endswith((f":deploy-check-{RUN}", f":deploy-check-{RUN}-previous"))]
     # Only the lock and the run's log stay: no record and no run directory.
     assert sorted(path.name for path in fake.state_directory.iterdir()) == ["lock", f"{RUN}.log"]
     # What existed before the run is still there.
@@ -662,7 +850,9 @@ def test_the_installer_runs_with_exactly_these_arguments(rig: Rig) -> None:
     assert fake.installer_calls() == [
         (*base, "init", *common, "--release", RELEASE, "--https-port", str(TEST_PORT),
          "--name", "127.0.0.1", "--name", HOST_ADDRESS, "--local-images",
-         ",".join(f"{role}={ids[role]}" for role in ROLES), "--reader-type", "container_t"),
+         ",".join(f"{role}={ids[role]}" for role in ROLES), "--reader-type", "container_t",
+         # A rootless bind volume every run: the run's own directory, prepared by init.
+         "--derivatives-dir", str(fake.derivatives)),
         (*base, "install", *common, "--no-install-sections"),
         (*base, "roots", "add", *common, "--slot", "deploy-check", "--source", str(fake.root),
          "--timeout", "600"),
@@ -937,6 +1127,16 @@ def test_a_malformed_run_id_is_refused_before_anything(rig: Rig, token: str) -> 
     ("shared-bucket", {"throttle_per_address"}, "one bucket for both"),
     ("source-mismatch", {"throttle_per_address"}, "left from"),
     ("writable-root", {"root_read_only"}, "gave created, not EROFS"),
+    ("processor-network", {"media_processor_isolated"}, "network mode bridge, not none"),
+    ("processor-interface", {"media_processor_isolated"}, "lists ['eth0', 'lo'], not only lo"),
+    ("processor-secret", {"media_processor_isolated"}, "1 entries under /run/secrets"),
+    ("processor-writable-root", {"media_processor_isolated"}, "gave created, not EROFS"),
+    ("processor-new-privileges", {"media_processor_isolated"}, "NoNewPrivs is 0, not 1"),
+    ("exchange-scratch-denied", {"shared_volume_exchange"},
+     f"{PREFIX}media-processor could not read /srv/aegis/scratch/"),
+    ("exchange-derivative-denied", {"shared_volume_exchange"},
+     f"{PREFIX}gateway could not read /srv/aegis/derivatives/"),
+    ("levels-differ", {"shared_volume_exchange"}, "the SELinux levels differ"),
     ("postgres-stuck", {"postgres_restart_recovers"}, "health is starting"),
     ("migrate-succeeds", {"migrate_failure_recovers"}, "completed without PostgreSQL"),
 ])
@@ -1043,6 +1243,14 @@ def test_the_layout_follows_the_templates(rig: Rig) -> None:
     assert f"{PREFIX}backend-network.service" in layout.generated
     assert str(quadlet / f"{PREFIX}indexer.container.d") in layout.drop_in_directories
     assert all(unit.startswith(PREFIX) for unit in layout.units)
+    # The media processor: a long-running service without a health check, its own scratch
+    # volume, and a roots drop-in like every other reader.
+    assert f"{PREFIX}media-processor.service" in layout.services
+    assert f"{PREFIX}media-processor.service" not in layout.health_checked
+    assert layout.containers[f"{PREFIX}media-processor.service"] == f"{PREFIX}media-processor"
+    assert f"{PREFIX}media-scratch" in layout.volumes
+    assert f"{PREFIX}media-scratch-volume.service" in layout.generated
+    assert str(quadlet / f"{PREFIX}media-processor.container.d") in layout.drop_in_directories
 
 
 @pytest.mark.parametrize(("entry", "published"), [
@@ -1466,6 +1674,8 @@ def interrupted_record(rig: Rig) -> dict[str, Any]:
     ({"volumes": ["home-data"]}, "malformed volumes"),
     ({"networks": ["aegis-backend"]}, "malformed networks"),
     ({"images": {}}, "malformed images"),
+    ({"previous_images": {"backend": {"tag": "localhost/aegis-backend:1", "id": None,
+                                      "preexisting": None}}}, "malformed previous images"),
     ({"created_directories": ["/home"]}, "malformed created directories"),
     ({"extra": 1}, "unknown fields"),
 ])
@@ -1603,3 +1813,232 @@ def test_the_makefile_target_runs_the_harness_with_the_locked_environment() -> N
     assert "verify-podman-deploy" in makefile.splitlines()[0].split()
     assert re.search(r"^verify-podman-deploy:\n\tuv run --locked python "
                      r"scripts/podman_deploy_check\.py\n", makefile, re.MULTILINE)
+
+
+def test_the_processor_probe_reports_what_the_isolation_check_reads(tmp_path: Path) -> None:
+    """The probe itself, run here on this Python against a writable directory: it reports
+    the interfaces, the secret files, the write attempt and NoNewPrivs, and touches nothing
+    but its probe file in the given root."""
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", harness.PROCESSOR_PROBE, str(tmp_path), "probe"],
+        check=True, capture_output=True, text=True, timeout=60,
+    )
+    seen = json.loads(result.stdout.strip().splitlines()[-1])
+
+    assert set(seen) == {"interfaces", "secrets", "write", "no_new_privs"}
+    assert "lo" in seen["interfaces"]
+    assert isinstance(seen["secrets"], list)
+    assert seen["write"] == "created" and sorted(os.listdir(tmp_path)) == ["probe"]
+    assert seen["no_new_privs"] in ("0", "1")
+
+
+def test_the_exchange_check_writes_reads_and_removes_exactly_its_own_files(rig: Rig) -> None:
+    assert rig() == 0, rig.output()
+    execs = [call[2:] for call in rig.fake.calls if call[2:3] == ("exec",)]
+    media = f"{PREFIX}media"
+    writes = [call for call in execs if harness.WRITE_EXCHANGE in call]
+    reads = [call for call in execs if call[2:3] == ("cat",)]
+    removals = [call for call in execs if harness.REMOVE_EXCHANGE in call]
+
+    assert [call[1] for call in writes] == [media, media]
+    assert [call[-2] for call in writes] == [harness.EXCHANGE_SCRATCH, harness.EXCHANGE_DERIVATIVE]
+    assert reads == [
+        ("exec", f"{PREFIX}media-processor", "cat", harness.EXCHANGE_SCRATCH),
+        ("exec", f"{PREFIX}gateway", "cat", harness.EXCHANGE_DERIVATIVE),
+    ]
+    assert removals == [("exec", media, "python3", "-I", "-c", harness.REMOVE_EXCHANGE,
+                         harness.EXCHANGE_SCRATCH, harness.EXCHANGE_DERIVATIVE)]
+    assert execs.index(removals[0]) > max(execs.index(call) for call in reads)
+    assert rig.fake.exchanged == {}
+    assert "one SELinux level (s0:c17,c912)" in rig.detail("shared_volume_exchange")
+
+
+def test_a_failed_exchange_write_still_reports_a_failed_removal(rig: Rig) -> None:
+    rig.fake.faults |= {"exchange-derivative-unwritable", "exchange-unremovable"}
+
+    assert rig() == 1
+    detail = rig.detail("shared_volume_exchange")
+    assert f"could not write {harness.EXCHANGE_DERIVATIVE}" in detail
+    assert "the exchange files were not removed" in detail
+    # Nothing is read when the worker could not write both files.
+    assert not [call for call in rig.fake.calls if call[2:3] == ("exec",) and "cat" in call]
+
+
+# -- the level migration rehearsal --------------------------------------------------------------
+
+
+def previous_ids() -> dict[str, str]:
+    return {role: hashlib.sha256(harness.previous_tag(role, RUN).encode()).hexdigest()
+            for role in PREVIOUS_ROLES}
+
+
+def current_ids() -> dict[str, str]:
+    return {role: hashlib.sha256(harness.image_tag(role, RUN).encode()).hexdigest()
+            for role in ROLES}
+
+
+def test_a_rehearsal_moves_a_previous_install_to_the_shared_level_and_leaves_nothing(
+    rig: Rig,
+) -> None:
+    assert rig("--rehearse-level-migration") == 0, rig.output()
+
+    assert rig.checks() == dict.fromkeys(
+        ("preflight", "build_images", *REHEARSAL, *FINAL), "passed")
+    assert "commit c60a2f400000 (render API 1)" in rig.detail("level_migration_previous_install")
+    assert "created administrator 7" in rig.detail("level_migration_marker")
+    assert "shared level s0:c17,c912" in rig.detail("level_migration_upgrade")
+    assert f"{PREFIX}postgres healthy at the shared level s0:c17,c912" in rig.detail(
+        "level_migration_start")
+    assert "administrator 7 from before the upgrade found again" in rig.detail(
+        "level_migration_marker_survives")
+    # None of the checks runs in a rehearsal.
+    assert not set(CHECKS) & set(rig.checks())
+    nothing_of_the_run_is_left(rig)
+    never_boot_enabled(rig)
+    # The previous images were the run's too, and only they and this tree's were removed.
+    for identifier in previous_ids().values():
+        assert (*harness.PODMAN, "image", "rm", "--no-prune", identifier) in rig.fake.calls
+
+
+def test_the_rehearsal_runs_each_installer_with_exactly_these_arguments(rig: Rig) -> None:
+    assert rig("--rehearse-level-migration") == 0, rig.output()
+    fake = rig.fake
+    common = ("--prefix", PREFIX, "--state-home", str(fake.state_home))
+    previous, current = (PYTHON, str(fake.previous_installer)), (PYTHON, str(harness.INSTALLER))
+    old_images = ",".join(f"{role}={identifier}" for role, identifier in previous_ids().items())
+    new_images = ",".join(f"{role}={current_ids()[role]}" for role in ROLES)
+    marker = ("--username", "deploy-check", "--email", "deploy-check@example.org")
+
+    assert fake.commands("git") == [
+        ("git", "-C", str(harness.REPOSITORY), "rev-parse", "--verify", "--quiet",
+         "c60a2f4^{commit}"),
+        ("git", "-C", str(harness.REPOSITORY), "archive", "--format=tar",
+         f"--output={fake.run_directory / 'previous.tar'}", PREVIOUS_REVISION),
+    ]
+    # The previous images come from the commit's own tree, after this tree's five.
+    builds = [call[len(harness.GENTLE) + 2:] for call in fake.commands(*harness.GENTLE)]
+    assert [call[-1] for call in builds] == [str(harness.REPOSITORY)] * len(ROLES) + [
+        str(fake.previous)] * len(PREVIOUS_ROLES)
+    assert [call[6] for call in builds[len(ROLES):]] == [
+        f"localhost/aegis-{role}:deploy-check-{RUN}-previous" for role in PREVIOUS_ROLES]
+    installers = [call for call in fake.calls if call[:2] in (previous, current)]
+    assert installers == [
+        (*previous, "init", *common, "--release", f"{RELEASE}-previous", "--https-port",
+         str(TEST_PORT), "--name", "127.0.0.1", "--name", HOST_ADDRESS, "--local-images",
+         old_images, "--reader-type", "container_t"),
+        (*previous, "install", *common, "--no-install-sections"),
+        (*previous, "roots", "add", *common, "--slot", "deploy-check", "--source",
+         str(fake.root), "--timeout", "600"),
+        (*previous, "start", *common, "--timeout", "900"),
+        (*previous, "bootstrap-password", *common, *marker),
+        (*previous, "stop", *common, "--timeout", "300"),
+        (*current, "upgrade", *common, "--release", RELEASE, "--local-images", new_images,
+         "--derivatives-dir", str(fake.derivatives), "--timeout", "600"),
+        (*current, "start", *common, "--timeout", "900"),
+        (*current, "bootstrap-password", *common, *marker),
+        (*current, "stop", *common, "--timeout", "300"),
+        (*current, "uninstall", *common, "--purge-data", "--timeout", "300"),
+    ]
+    # The plain derivatives volume the previous release created goes, by its exact name,
+    # after the stop and before the upgrade.
+    removal = (*harness.PODMAN, "volume", "rm", f"{PREFIX}derivatives")
+    assert fake.commands(*harness.PODMAN, "volume", "rm") == [removal]
+    order = fake.calls.index
+    assert order(installers[5]) < order(removal) < order(installers[6])
+
+
+def test_the_generated_password_never_reaches_the_output_or_the_log(rig: Rig) -> None:
+    assert rig("--rehearse-level-migration") == 0, rig.output()
+    assert GENERATED_PASSWORD not in rig.output()
+    assert not [line for line in log_lines(rig) if GENERATED_PASSWORD in line]
+
+
+def test_a_failed_bootstrap_shows_its_error_but_never_the_password(rig: Rig) -> None:
+    rig.fake.faults.add("bootstrap-fails")
+
+    assert rig("--rehearse-level-migration") == 1
+    assert "administrator bootstrap failed" in rig.detail("level_migration_marker")
+    assert GENERATED_PASSWORD not in rig.output()
+    assert not [line for line in log_lines(rig) if GENERATED_PASSWORD in line]
+    nothing_of_the_run_is_left(rig)
+
+
+@pytest.mark.parametrize(("fault", "failed", "message"), [
+    ("previous-api-2", "level_migration_previous_install", "renders API 2, not 1"),
+    ("migration-unfinished", "level_migration_upgrade",
+     f"volumes left at their old levels: {PREFIX}postgres-data"),
+    ("upgrade-fails", "level_migration_upgrade", "upgrade refused (fake)"),
+    ("postgres-unhealthy", "level_migration_start", "is unhealthy at the level"),
+    ("marker-lost", "level_migration_marker_survives",
+     "user_id=7 created=true, not the marker administrator 7 found again"),
+])
+def test_each_rehearsal_step_fails_on_its_own_fault_and_cleanup_still_runs(
+    rig: Rig, fault: str, failed: str, message: str,
+) -> None:
+    rig.fake.faults.add(fault)
+    if fault == "postgres-unhealthy":
+        # PostgreSQL unhealthy after the move, as one that cannot read its data would be.
+        def unhealthy(command: tuple[str, ...]) -> subprocess.CompletedProcess[str] | None:
+            if command[2:4] == ("container", "inspect") and command[4] == f"{PREFIX}postgres":
+                entry = dict(rig.fake.containers[command[4]])
+                entry["State"] = {"Status": "running", "Health": {"Status": "unhealthy"}}
+                return completed(command, 0, json.dumps([entry]))
+            return None
+        rig.fake.intercept = unhealthy
+
+    assert rig("--rehearse-level-migration") == 1
+    checks = rig.checks()
+    index = REHEARSAL.index(failed)
+    assert all(checks[name] == "passed" for name in REHEARSAL[:index]), checks
+    assert checks[failed] == "failed" and message in rig.detail(failed), rig.detail(failed)
+    for later in REHEARSAL[index + 1:]:
+        assert rig.detail(later).endswith(f"status=failed not run: {failed} failed")
+    assert checks["cleanup"] == "passed"
+    nothing_of_the_run_is_left(rig)
+
+
+def test_an_unknown_commit_fails_the_rehearsal_before_anything_is_built_from_it(
+    rig: Rig,
+) -> None:
+    assert rig("--rehearse-level-migration", "--from-commit", "0123abc") == 1
+    assert "0123abc names no commit" in rig.detail("level_migration_previous_install")
+    assert not [call for call in rig.fake.calls if "archive" in call]
+    assert not [call for call in rig.fake.commands(*harness.GENTLE)
+                if call[-1] == str(rig.fake.previous)]
+    nothing_of_the_run_is_left(rig)
+
+
+@pytest.mark.parametrize("argv", [
+    ("--from-commit", "c60a2f4"),
+    ("--rehearse-level-migration", "--from-commit", "--output=/tmp/x"),
+    ("--rehearse-level-migration", "--from-commit", "HEAD"),
+    ("--rehearse-level-migration", "--from-commit", "C60A2F4"),
+    ("--rehearse-level-migration", "--cleanup", "record.json"),
+])
+def test_the_rehearsal_options_are_refused_unless_well_formed(
+    rig: Rig, argv: tuple[str, ...],
+) -> None:
+    with pytest.raises(SystemExit) as exited:
+        rig(*argv)
+    assert exited.value.code == 2
+    assert not rig.fake.calls
+
+
+def test_an_interrupted_rehearsal_removes_the_previous_images_too(rig: Rig) -> None:
+    def interrupt(command: tuple[str, ...]) -> subprocess.CompletedProcess[str] | None:
+        if command[2:3] == ("upgrade",):
+            raise KeyboardInterrupt
+        return None
+
+    rig.fake.intercept = interrupt
+    assert rig("--rehearse-level-migration") == 130
+    nothing_of_the_run_is_left(rig)
+
+
+def test_a_record_from_before_the_rehearsal_is_still_cleaned_up(rig: Rig) -> None:
+    record = interrupted_record(rig)
+    del record["previous_images"]
+    rig.record_path.write_text(json.dumps(record), encoding="utf-8")
+
+    assert rig("--cleanup", str(rig.record_path)) == 0, rig.output()
+    nothing_of_the_run_is_left(rig)

@@ -158,6 +158,15 @@ def compose_config() -> dict[str, Any]:
                                    "read_only": True}]
         services[role] = service
     services["gateway"]["networks"] = {"backend": None, "edge": None, "tls-hop": None}
+    # The media decoder joins no network at all (spec M2) and reads the roots read-only.
+    services["media-processor"] = {
+        "read_only": True, "cap_drop": ["ALL"], "network_mode": "none", "restart": "no",
+        "volumes": [
+            {"type": "volume", "source": "media-scratch", "target": "/srv/aegis/scratch"},
+            {"type": "bind", "source": "/tmp/aegis-bench.x/roots/a",
+             "target": "/srv/aegis/roots/bench-main", "read_only": True},
+        ],
+    }
     services["gateway"]["ports"] = [{"host_ip": "127.0.0.1", "published": "40001"}]
     services["postgres"]["ports"] = [{"host_ip": "127.0.0.1", "published": "40002"}]
     services["postgres"]["volumes"] = [{"type": "volume", "source": "postgres-data",
@@ -190,7 +199,8 @@ def test_compose_gate_accepts_only_the_selected_cpu_placement() -> None:
 
 @pytest.mark.parametrize("drift", [
     "operator-volume", "external-volume", "public-port", "writable-root", "missing-limit",
-    "wrong-project", "web-originals",
+    "wrong-project", "web-originals", "processor-network", "processor-bridge",
+    "processor-writable-root", "missing-processor",
 ])
 def test_compose_gate_refuses_operator_or_unowned_resources(drift: str) -> None:
     config = compose_config()
@@ -206,6 +216,14 @@ def test_compose_gate_refuses_operator_or_unowned_resources(drift: str) -> None:
         del config["services"]["postgres"]["mem_limit"]
     elif drift == "wrong-project":
         config["name"] = "aegis"
+    elif drift == "processor-network":
+        config["services"]["media-processor"]["networks"] = {"backend": None}
+    elif drift == "processor-bridge":
+        config["services"]["media-processor"]["network_mode"] = "bridge"
+    elif drift == "processor-writable-root":
+        config["services"]["media-processor"]["volumes"][1]["read_only"] = False
+    elif drift == "missing-processor":
+        del config["services"]["media-processor"]
     else:
         config["services"]["web"]["volumes"] = config["services"]["indexer"]["volumes"]
     with pytest.raises(resources.BenchmarkResourceError):

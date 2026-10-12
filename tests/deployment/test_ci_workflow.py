@@ -13,9 +13,12 @@ from xml.sax.saxutils import escape, quoteattr
 import pytest
 import yaml
 
+from tests.support.podman_deploy import load_installer
+
 WORKFLOW = Path(__file__).resolve().parents[2] / ".github/workflows/ci.yml"
 GATES = ("backend", "frontend", "deployment", "e2e")
-ROLES = ("backend", "gateway", "postgres", "caddy")
+# Every image a release publishes; the installer pulls exactly these (aegis-<role>).
+ROLES = ("backend", "gateway", "postgres", "caddy", "media")
 PUBLISH_IF = "github.event_name == 'push' && github.ref == 'refs/heads/main'"
 PUBLISH_PERMISSIONS = {"contents": "read", "packages": "write"}
 LOGIN = """printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin"""
@@ -299,9 +302,21 @@ def test_publisher_builds_labels_and_pushes_each_role_by_commit_only(
         assert digest in result.stdout.splitlines()
 
 
+def test_the_publisher_and_the_installer_agree_on_the_five_images(
+    workflow: dict[str, Any],
+) -> None:
+    build = _publish_steps(workflow)[3]
+    roles = re.search(r"^\s*roles=\(([a-z ]+)\)$", build["run"], flags=re.MULTILINE)
+    assert roles is not None
+    assert tuple(roles.group(1).split()) == ROLES == load_installer().ROLES
+    # The media processor's image is built from its own Dockerfile.
+    assert (WORKFLOW.parents[2] / "docker" / "media.Dockerfile").is_file()
+
+
 @pytest.mark.parametrize(("failure", "fake"), [
     ("first build", {"FAKE_FAIL_ROLE": "backend"}),
-    ("last build", {"FAKE_FAIL_ROLE": "caddy"}),
+    ("a middle build", {"FAKE_FAIL_ROLE": "caddy"}),
+    ("last build", {"FAKE_FAIL_ROLE": "media"}),
     ("checkout is not the labelled commit", {"FAKE_HEAD": "f" * 40}),
 ])
 def test_publisher_pushes_nothing_unless_every_image_builds_from_the_commit(

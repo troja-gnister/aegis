@@ -30,9 +30,14 @@ ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1
 ARG AEGIS_UID=10001
 ARG AEGIS_GID=10001
+# Volume mount points, owned by the runtime user: a fresh named volume takes its owner and
+# mode from the image's directory, so the media worker can write it from the first start.
+# Scratch is group-writable: the processor (same identity) claims and publishes jobs there.
 RUN groupadd --gid 10001 aegis \
     && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin aegis \
-    && install -d -o "$AEGIS_UID" -g "$AEGIS_GID" -m 0700 /srv/aegis/indexer-coordination
+    && install -d -o "$AEGIS_UID" -g "$AEGIS_GID" -m 0700 /srv/aegis/indexer-coordination \
+    && install -d -o "$AEGIS_UID" -g "$AEGIS_GID" -m 0750 /srv/aegis/derivatives /srv/aegis/quarantine \
+    && install -d -o "$AEGIS_UID" -g "$AEGIS_GID" -m 0770 /srv/aegis/scratch
 WORKDIR /app/backend
 COPY --from=build /app/.venv /app/.venv
 COPY --from=build /app/backend /app/backend

@@ -15,6 +15,9 @@ import pytest
 from tests.support.fake_container_engine import select_fake_engine
 
 POWERCAP = "/sys/devices/virtual/powercap"
+# compose.podman.yaml's shared dev and test MCS level, which the checked launcher admits beside
+# the mask option (aegisctl.container_launch.LEVEL_OPTION).
+LEVEL_OPTION = "label=level:s0:c403,c871"
 IMAGE = "a" * 64
 ROOT_ROW = "1 0 0:1 / / ro - overlay overlay ro"
 MASK_ROW = f"2 1 0:2 /crun/.empty-directory {POWERCAP} ro - tmpfs tmpfs ro"
@@ -697,7 +700,7 @@ def test_compose_launch_refuses_comma_bind_source_before_any_container(
     def render(options: list[str], *args: Any) -> dict[str, Any]:
         security = ["no-new-privileges:true"]
         if str(base.with_name("compose.podman.yaml")) in options:
-            security.append(policy.MASK_OPTION)
+            security.extend((policy.MASK_OPTION, LEVEL_OPTION))
         bind = {"type": "bind", "source": rendered, "target": "/srv/aegis/roots/photos"}
         return {"services": {"web": {"security_opt": security, "volumes": [bind]}}}
 
@@ -784,7 +787,7 @@ def load_podman_overlay() -> dict[str, Any]:
     return document
 
 
-def test_static_podman_overlay_has_exact_services_and_mask_only() -> None:
+def test_static_podman_overlay_has_exact_services_and_mask_and_level_only() -> None:
     document = load_podman_overlay()
     assert set(document["services"]) == {
         "postgres",
@@ -793,12 +796,18 @@ def test_static_podman_overlay_has_exact_services_and_mask_only() -> None:
         "operations",
         "indexer",
         "media",
+        "media-processor",
         "gateway",
         *CADDY_SERVICES,
     }
     for name, service in document["services"].items():
         if name not in CADDY_SERVICES:
-            assert service == {"security_opt": [f"unmask={POWERCAP}"]}
+            assert service == {"security_opt": [f"unmask={POWERCAP}", LEVEL_OPTION]}
+    launch = launch_module()
+    assert launch.LEVEL_OPTION == LEVEL_OPTION
+    assert launch.PODMAN_OVERLAY_OPTIONS == (launch.MASK_OPTION, LEVEL_OPTION)
+    mask = f"unmask={POWERCAP}"
+    assert mask == launch.MASK_OPTION
 
 
 def test_static_podman_overlay_replaces_only_caddy_private_tmpfs() -> None:
@@ -807,7 +816,7 @@ def test_static_podman_overlay_replaces_only_caddy_private_tmpfs() -> None:
         # Mask-only security contribution (base NNP is merged, never repeated), the one
         # explicit Caddy private-tmpfs replacement and the unprivileged-port sysctl.
         assert document["services"][name] == {
-            "security_opt": [f"unmask={POWERCAP}"],
+            "security_opt": [f"unmask={POWERCAP}", LEVEL_OPTION],
             "tmpfs": {"!override": CADDY_PODMAN_TMPFS},
             "sysctls": CADDY_PODMAN_SYSCTLS,
         }
@@ -949,7 +958,7 @@ def test_runtime_compose_refuses_effective_drift_before_gate(
             "web": {"security_opt": ["no-new-privileges:true"], "profiles": []}
         }
         if str(base.with_name("compose.podman.yaml")) in command:
-            services["web"]["security_opt"].append(f"unmask={POWERCAP}")
+            services["web"]["security_opt"].extend((f"unmask={POWERCAP}", LEVEL_OPTION))
             if drift == "phantom":
                 services["phantom"] = {}
             elif drift == "nnp":
@@ -966,6 +975,52 @@ def test_runtime_compose_refuses_effective_drift_before_gate(
             ["podman", "--remote=false", "compose", "-f", str(base), "up"],
             canonical_base=base,
         )
+    assert not fake.created
+
+
+@pytest.mark.parametrize("drift", [
+    "accepted", "missing", "other-level", "duplicated", "label-type", "label-disable",
+    "canonical-label",
+])
+def test_runtime_compose_admits_exactly_the_shared_dev_level(
+    mask_engine: tuple[Any, MaskEngine],
+    monkeypatch: pytest.MonkeyPatch,
+    drift: str,
+) -> None:
+    """The overlay's one addition beside the mask is the fixed dev MCS level, exactly once,
+    and no service may carry any other SELinux label option."""
+    policy, fake = mask_engine
+    launch = launch_module()
+    base = Path(__file__).resolve().parents[4] / "compose.yaml"
+
+    def render(
+        command: list[str], environment: Any, **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        del environment
+        options = ["no-new-privileges:true"]
+        if drift == "canonical-label":
+            options.append("label=type:spc_t")
+        if str(base.with_name("compose.podman.yaml")) in command:
+            options.append(f"unmask={POWERCAP}")
+            options.extend({
+                "accepted": [LEVEL_OPTION], "missing": [],
+                "other-level": ["label=level:s0:c1,c2"],
+                "duplicated": [LEVEL_OPTION, LEVEL_OPTION],
+                "label-type": [LEVEL_OPTION, "label=type:spc_t"],
+                "label-disable": [LEVEL_OPTION, "label=disable"],
+                "canonical-label": [LEVEL_OPTION],
+            }[drift])
+        services = {"web": {"security_opt": options, "profiles": []}}
+        return subprocess.CompletedProcess(command, 0, json.dumps({"services": services}), "")
+
+    monkeypatch.setattr(launch, "_run", render)
+    command = ["podman", "--remote=false", "compose", "-f", str(base), "up"]
+    if drift == "accepted":
+        result = launch.controlled_container_argv(command, canonical_base=base)
+        assert result[-3:] == ["-f", str(base.with_name("compose.podman.yaml")), "up"]
+        return
+    with pytest.raises(policy.PodmanMaskError):
+        launch.controlled_container_argv(command, canonical_base=base)
     assert not fake.created
 
 
@@ -1014,7 +1069,7 @@ def podman_caddy_merge(services: dict[str, dict[str, Any]]) -> dict[str, dict[st
     """Model the provider-proven effective merge of the exact overlay."""
     merged = deepcopy(services)
     for name, service in merged.items():
-        service["security_opt"] = [*service["security_opt"], f"unmask={POWERCAP}"]
+        service["security_opt"] = [*service["security_opt"], f"unmask={POWERCAP}", LEVEL_OPTION]
         if name in CADDY_SERVICES:
             service["tmpfs"] = list(CADDY_PODMAN_TMPFS)
             service["sysctls"] = dict(CADDY_PODMAN_SYSCTLS)
@@ -1173,7 +1228,7 @@ CADDY_AFTER_DRIFT = {
     "read-only": _set("caddy-local", "read_only", False),
     "port": _set("caddy", "ports", []),
     "command": _set("caddy-local", "command", ["sh"]),
-    "nnp": _set("caddy", "security_opt", [f"unmask={POWERCAP}"]),
+    "nnp": _set("caddy", "security_opt", [f"unmask={POWERCAP}", LEVEL_OPTION]),
     "privileged": _set("caddy", "privileged", True),
     "web-borrows-transformation": _web_borrowed_after,
     "sysctl-missing": lambda services: services["caddy-local"].pop("sysctls"),
@@ -1375,7 +1430,7 @@ def test_canonical_merge_cannot_remove_existing_security_option(
         del environment
         security = ["no-new-privileges:true", "seccomp=fixture.json"]
         if str(base.with_name("compose.podman.yaml")) in options:
-            security = ["no-new-privileges:true", f"unmask={POWERCAP}"]
+            security = ["no-new-privileges:true", f"unmask={POWERCAP}", LEVEL_OPTION]
         return {"services": {"web": {"security_opt": security}}}
 
     monkeypatch.setattr(launch, "_render", render)
@@ -1686,7 +1741,7 @@ def test_canonical_overlay_spellings_all_render_and_gate(
         renders.append(options)
         opts = ["no-new-privileges:true"]
         if str(override) in options:
-            opts.append(policy.MASK_OPTION)
+            opts.extend((policy.MASK_OPTION, LEVEL_OPTION))
         return {"services": {"web": {"security_opt": opts}}}
 
     def refuse(*args: Any, **kwargs: Any) -> Any:
@@ -1810,7 +1865,7 @@ def test_effective_privileged_service_refuses_before_probe(
     def render(options: list[str], *args: Any) -> dict[str, Any]:
         security = ["no-new-privileges:true"]
         if str(base.with_name("compose.podman.yaml")) in options:
-            security.append(policy.MASK_OPTION)
+            security.extend((policy.MASK_OPTION, LEVEL_OPTION))
         return {"services": {"web": {"security_opt": security, "privileged": True}}}
 
     monkeypatch.setattr(launch, "_render", render)
@@ -2094,7 +2149,7 @@ def test_overlay_removal_uses_parsed_span_with_following_global_options(
         rendered.append(opts)
         security = ["no-new-privileges:true"]
         if str(override) in opts:
-            security.append(policy.MASK_OPTION)
+            security.extend((policy.MASK_OPTION, LEVEL_OPTION))
         return {"services": {"web": {"security_opt": security}}}
 
     monkeypatch.setattr(launch, "_render", render)

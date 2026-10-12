@@ -29,6 +29,10 @@ Tmpfs=/tmp:size=16m,noexec,nosuid,nodev,U,notmpcopyup,mode=1777
 DropCapability=ALL
 NoNewPrivileges=true
 Unmask=/sys/devices/virtual/powercap
+# One SELinux MCS level, drawn per install, for every Aegis container: a file carries its
+# creator's level, so the containers exchange files on shared volumes, while every other
+# container's own level keeps it out.
+SecurityLabelLevel=@@LABEL_LEVEL@@
 
 [Service]
 # Like compose's unless-stopped: retry without limit, backing off from 5s to Docker's 1min cap

@@ -32,6 +32,16 @@ COPY --chmod=0555 deploy/nginx/start-gateway.sh /usr/local/bin/aegis-gateway-sta
 COPY --chmod=0555 deploy/nginx/entrypoint/10-aegis-mount-attestation.sh /usr/local/bin/aegis-mount-attest
 COPY --from=frontend-build /frontend/dist/ /usr/share/nginx/html/
 COPY --from=admin-static-build /app/backend/staticfiles/admin/ /usr/share/nginx/html/admin-static/admin/
+# The derivatives volume's mount point, owned as the media worker's image owns it: the worker's
+# uid (10001 in the published image; compose passes its runtime AEGIS_UID), with this image's
+# group 101, which the Podman units map to the operator's group as they map the worker's (D5).
+# Podman gives a fresh volume the owner and mode of the mount point in whichever container
+# mounts it first, so the worker can write it even when the gateway starts first, and the
+# gateway traverses it through its primary group. Docker copies the worker's own mount point
+# when it creates the worker.
+ARG AEGIS_UID=10001
+USER 0
+RUN install -d -o "$AEGIS_UID" -g 101 -m 0750 /srv/aegis/derivatives
 EXPOSE 8080
 USER 101:101
 CMD ["/usr/local/bin/aegis-gateway-start"]

@@ -197,6 +197,7 @@ Rootless Podman 5.x is a secondary, optional runtime, paired with a Docker Compo
 - Set `AEGIS_CONTAINER_ENGINE=podman`, `PODMAN_COMPOSE_PROVIDER` (path to the Compose v2 provider binary), and `AEGIS_PODMAN_SOCKET` (a private, user-owned rootless API socket in a 0700 directory — never a TCP or rootful socket).
 - The checked launcher then applies `compose.podman.yaml` automatically.
 - On SELinux hosts, the two Caddyfile binds already carry the `:z` relabel flag in `compose.yaml`, which is universal across engines; no manual SELinux configuration is needed.
+- The overlay runs every service at one fixed SELinux level (`s0:c403,c871`), so the media worker, the processor and the gateway can share files on volumes. Test stacks are always created fresh. A long-lived development volume written before this change carries random levels and may be unreadable now. Recreate it if it holds only development data, or relabel its content once with `podman unshare chcon -R -l s0:c403,c871 <its mount point>`.
 - **Known limitation:** rootless Podman's published ports do not preserve client source IP addresses. This breaks per-client login rate limiting and makes the TLS gateway's anti-spoofing readiness check intermittent. Recommended mitigations: put a host-level reverse proxy in front, use a VPN, or run rootful Podman or Docker instead.
 - **Known limitation:** on Podman, an original root whose path contains a comma is refused, because Podman's API splits such a path into mount options and cannot bind-mount it.
 

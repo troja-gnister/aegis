@@ -10,14 +10,17 @@ from typing import Any
 
 import pytest
 from aegisctl.container_engine import selected_engine
+from aegisctl.container_launch import LEVEL_OPTION
 from aegisctl.podman_mask_compatibility import MASK_OPTION
 
 from tests.support.compose_render import rendered_compose
 from tests.support.podman_deploy import (
     SAMPLE_BACKEND_SUBNET,
+    SAMPLE_DERIVATIVES_DIR,
     SAMPLE_HOST_GID,
     SAMPLE_IMAGES,
     SAMPLE_INSTALL_TOKEN,
+    SAMPLE_LABEL_LEVEL,
     SAMPLE_PREFIX,
     SAMPLE_READER_TYPE,
     SAMPLE_SECRETS_DIR,
@@ -34,7 +37,10 @@ from tests.support.podman_deploy import (
 )
 
 REPOSITORY = Path(__file__).resolve().parents[2]
-CONTAINERS = ("postgres", "migrate", "web", "operations", "indexer", "media", "gateway", "caddy")
+CONTAINERS = (
+    "postgres", "migrate", "web", "operations", "indexer", "media", "media-processor", "gateway",
+    "caddy",
+)
 COMPOSE_VARIABLE = re.compile(r"\$\{([A-Z][A-Z0-9_]*)")
 PRODUCTION_KEYS = frozenset({
     "AEGIS_ENV", "DJANGO_SETTINGS_MODULE", "AEGIS_RELEASE_ID", "AEGIS_PUBLIC_URL",
@@ -45,11 +51,14 @@ PRODUCTION_VALUE = "<production value>"
 ALL = frozenset(CONTAINERS)
 CADDY = frozenset({"caddy"})
 HEALTH_GATED = frozenset({"postgres", "web", "operations", "indexer", "media"})
-GROUP_MAPPED = frozenset({"gateway", "migrate", "operations", "indexer", "media", "web"})
-READER_LABELED = frozenset({"gateway", "operations", "indexer", "media"})
+GROUP_MAPPED = frozenset({
+    "gateway", "migrate", "operations", "indexer", "media", "media-processor", "web",
+})
+READER_LABELED = frozenset({"gateway", "operations", "indexer", "media", "media-processor"})
 NETWORK_UNITS = frozenset({"backend", "edge", "tls-hop"})
 VOLUME_UNITS = frozenset({
     "postgres-data", "indexer-coordination", "staging", "derivatives", "quarantine", "caddy-data",
+    "media-scratch",
 })
 
 # Every way the units may differ from compose: the exact services it applies to, and why.
@@ -97,19 +106,46 @@ ALLOWED_DIFFERENCES: dict[str, tuple[frozenset[str], str]] = {
     "install-label": (
         NETWORK_UNITS | VOLUME_UNITS, "install identity for exact-identity removal",
     ),
+    "SecurityLabelLevel": (
+        ALL,
+        "shared MCS level so Aegis containers can exchange files on shared volumes while "
+        "staying isolated from other containers (compose.podman.yaml's dev level under "
+        "Podman; the install's own level in the units)",
+    ),
+    "group_add": (
+        frozenset({"gateway"}),
+        "nginx reads the media worker's group-readable derivatives through the runtime group; "
+        "the units map the gateway's own group to the operator's, as the worker's (GIDMap, D5)",
+    ),
 }
+# The derivatives volume's bind form: rendered only when the installer has an operator
+# directory (aegis-podman --derivatives-dir, spec M8), so the sample configuration above never
+# shows it. Exactly these keys of exactly this volume, with exactly these values.
+DERIVATIVES_BIND = {"Device": SAMPLE_DERIVATIVES_DIR, "Type": "none", "Options": "bind"}
 # Differences that only one engine's compose rendering contains.
 ENGINE_ONLY = {("sysctls", "caddy"): "podman", ("tmpfs-ownership", "caddy"): "docker"}
 COMPOSE_FIELDS = frozenset({
     "image", "user", "read_only", "tmpfs", "cap_drop", "cap_add", "security_opt", "init",
     "networks", "volumes", "secrets", "environment", "command", "entrypoint", "healthcheck",
+    "network_mode", "pids_limit", "mem_limit", "cpus",
 })
 UNIT_FIELDS = frozenset({
     "Image", "User", "Group", "ReadOnly", "Tmpfs", "DropCapability", "AddCapability",
     "NoNewPrivileges", "RunInit", "Network", "Volume", "Environment", "Exec",
     "Entrypoint", "HealthCmd", "HealthInterval", "HealthTimeout", "HealthRetries",
-    "HealthStartPeriod",
+    "HealthStartPeriod", "PidsLimit", "Memory",
 })
+BYTE_UNITS = {"": 1, "b": 1, "k": 2**10, "m": 2**20, "g": 2**30}
+
+
+def byte_count(value: object) -> int | None:
+    """Compose's rendered memory (bytes, as a number or a decimal string) or a unit's Memory=
+    (a number with a k, m or g suffix), in bytes."""
+    if value is None:
+        return None
+    match = re.fullmatch(r"([0-9]+)([bkmg]?)", str(value).lower())
+    assert match, value
+    return int(match.group(1)) * BYTE_UNITS[match.group(2)]
 
 
 class Allowances:
@@ -165,6 +201,8 @@ def compose_view(name: str, service: dict[str, Any], allowances: Allowances) -> 
     for option in service.get("security_opt", []):
         if option == "no-new-privileges:true":
             no_new_privileges = True
+        elif option == LEVEL_OPTION:
+            assert allowances.take(name, "SecurityLabelLevel"), (name, option)
         else:
             assert option == MASK_OPTION and allowances.take(name, "Unmask"), (name, option)
     tmpfs = list(service.get("tmpfs", []))
@@ -214,6 +252,10 @@ def compose_view(name: str, service: dict[str, Any], allowances: Allowances) -> 
         "command": None if allowances.take(name, "command") else service.get("command"),
         "entrypoint": service.get("entrypoint"),
         "healthcheck": service.get("healthcheck"),
+        "network_mode": service.get("network_mode"),
+        "pids_limit": service.get("pids_limit"),
+        "memory": byte_count(service.get("mem_limit")),
+        "cpus": None if service.get("cpus") is None else float(service["cpus"]),
     }
 
 
@@ -258,7 +300,10 @@ def unit_view(name: str, unit: Unit, allowances: Allowances) -> dict[str, Any]:
         )
 
     networks = {}
-    for line in unit.values("Container", "Network"):
+    lines = unit.values("Container", "Network")
+    # Network=none alone is compose's network_mode: none, which joins no network.
+    network_mode = "none" if lines == ["none"] else None
+    for line in [] if network_mode else lines:
         reference, aliases, network_options = network_line(line)
         assert reference.startswith(SAMPLE_PREFIX) and reference.endswith(".network"), line
         network = reference.removeprefix(SAMPLE_PREFIX).removesuffix(".network")
@@ -306,6 +351,13 @@ def unit_view(name: str, unit: Unit, allowances: Allowances) -> dict[str, Any]:
             else json.loads(entrypoint) if entrypoint.startswith("[") else [entrypoint]
         ),
         "healthcheck": unit_health(unit),
+        "network_mode": network_mode,
+        "pids_limit": None if (pids := unit.value("Container", "PidsLimit")) is None
+        else int(pids),
+        "memory": byte_count(unit.value("Container", "Memory")),
+        # Quadlet has no CPU key: the unit's cgroup quota, in CPUs.
+        "cpus": None if (quota := unit.value("Service", "CPUQuota")) is None
+        else float(quota.removesuffix("%")) / 100,
     }
 
 
@@ -409,10 +461,11 @@ if selected_engine() == "podman":
         tmp_path: Path,
     ) -> None:
         group_mapped = {"gateway": 101, "operations": 10001, "indexer": 10001, "media": 10001,
-                        "web": 10001, "migrate": 10001}
+                        "media-processor": 10001, "web": 10001, "migrate": 10001}
         static_hosts = {"web": 10, "gateway": 11}
         secret_binds = {"postgres": 6, "migrate": 2, "web": 3, "operations": 2, "indexer": 2,
-                        "media": 2, "gateway": 0, "caddy": 0}
+                        "media": 2, "media-processor": 0, "gateway": 0, "caddy": 0}
+        initialized = {"indexer", "media-processor"}
         health_commands = {
             "web": '["python","manage.py","check_runtime","--role","web","--require-http"]',
             "postgres": 'pg_isready -h 127.0.0.1 -p 5432 -U postgres -d "aegis"',
@@ -427,10 +480,7 @@ if selected_engine() == "podman":
             *(f"{SAMPLE_PREFIX}{name}.service" for name in CONTAINERS),
             *(f"{SAMPLE_PREFIX}{name}-network.service"
               for name in ("backend", "edge", "tls-hop")),
-            *(f"{SAMPLE_PREFIX}{name}-volume.service" for name in (
-                "postgres-data", "indexer-coordination", "staging", "derivatives",
-                "quarantine", "caddy-data",
-            )),
+            *(f"{SAMPLE_PREFIX}{name}-volume.service" for name in VOLUME_UNITS),
         }
         for name in CONTAINERS:
             arguments = exec_start_arguments(services[f"{SAMPLE_PREFIX}{name}.service"])
@@ -445,12 +495,16 @@ if selected_engine() == "podman":
                 [f"+g{group_mapped[name]}:@{SAMPLE_HOST_GID}:1"] if name in group_mapped else []
             ), name
             labels = [value for flag, value in pairs
-                      if flag == "--security-opt" and value.startswith("label=")]
+                      if flag == "--security-opt" and value.startswith("label=type:")]
             assert labels == (
                 [f"label=type:{SAMPLE_READER_TYPE}"] if name in READER_LABELED else []
             ), name
+            # One MCS level for every container of the install.
+            levels = [value for flag, value in pairs
+                      if flag == "--security-opt" and value.startswith("label=level:")]
+            assert levels == [f"label=level:{SAMPLE_LABEL_LEVEL}"], name
             assert ("--pull", "never") in pairs, name
-            assert ("--init" in arguments) is (name == "indexer"), name
+            assert ("--init" in arguments) is (name in initialized), name
             assert (("--sdnotify", "healthy") in pairs) is (name in HEALTH_GATED), name
             assert ("-d" in arguments) is (name != "migrate"), name
             if name in health_commands:
@@ -462,7 +516,15 @@ if selected_engine() == "podman":
             backend = f"{SAMPLE_PREFIX}backend:alias={name}"
             if name in static_hosts:
                 backend += f",ip={subnet[static_hosts[name]]}"
-            assert (backend in networks) is (name not in ("caddy",)), (name, networks)
+            assert (backend in networks) is (name not in ("caddy", "media-processor")), (
+                name, networks,
+            )
+            # Spec M2: no network namespace beyond loopback, and bounded tasks and memory.
+            assert (networks == ["none"]) is (name == "media-processor"), (name, networks)
+            limits = {flag: value for flag, value in pairs if flag in ("--pids-limit", "--memory")}
+            assert limits == (
+                {"--pids-limit": "256", "--memory": "7g"} if name == "media-processor" else {}
+            ), name
             assert not any("ip=" in network for network in networks if network != backend), name
             binds = [value for flag, value in pairwise(arguments)
                      if flag == "-v" and value.startswith(f"{SAMPLE_SECRETS_DIR}/")]
@@ -475,3 +537,27 @@ if selected_engine() == "podman":
             assert ("--internal" in arguments) is (name != "edge"), name
             assert (("--subnet", SAMPLE_BACKEND_SUBNET) in pairs) is (name == "backend"), name
             assert (("--ip-range", str(pool)) in pairs) is (name == "backend"), name
+
+
+def test_only_the_derivatives_volume_gains_the_operator_directory_bind(
+    units: dict[str, Unit],
+) -> None:
+    bound = {
+        name: parse_unit(text)
+        for name, text in load_installer().render_units(
+            sample_config(derivatives_dir=SAMPLE_DERIVATIVES_DIR),
+        ).items()
+    }
+    derivatives = f"{SAMPLE_PREFIX}derivatives.volume"
+    plain = units[derivatives]
+    extra = [(key, value) for key, value in bound[derivatives].sections["Volume"]
+             if (key, value) not in plain.sections["Volume"]]
+
+    assert set(bound) == set(units)
+    assert {name: unit for name, unit in bound.items() if name != derivatives} == {
+        name: unit for name, unit in units.items() if name != derivatives
+    }
+    assert dict(extra) == DERIVATIVES_BIND and len(extra) == len(DERIVATIVES_BIND)
+    assert bound[derivatives].sections["Volume"][:len(plain.sections["Volume"])] == (
+        plain.sections["Volume"]
+    )

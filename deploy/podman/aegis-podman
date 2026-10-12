@@ -51,19 +51,28 @@ from typing import Any, TextIO
 TEMPLATE_DIRECTORY = Path(__file__).resolve().parent / "quadlet"
 # The interface an installer relies on when it renders with a release's own copy of this file:
 # UnitConfig, load_templates, render_units and unit_directory. Change it only with a new value.
-RENDER_API = 1
+# 2 added the media image, the optional derivatives directory and the shared SELinux level.
+RENDER_API = 2
+# The interfaces this installer renders with: 1 is a release before the media processor
+# (four images, no derivatives directory), so a pending upgrade from one can be abandoned.
+RENDER_APIS = (1, 2)
 TEMPLATE_NAMES = frozenset({
     "backend.network", "edge.network", "tls-hop.network",
     "postgres-data.volume", "indexer-coordination.volume", "staging.volume",
-    "derivatives.volume", "quarantine.volume", "caddy-data.volume",
+    "derivatives.volume", "quarantine.volume", "caddy-data.volume", "media-scratch.volume",
     "postgres.container", "migrate.container", "web.container", "operations.container",
-    "indexer.container", "media.container", "gateway.container", "caddy.container",
-    "caddy.socket",
+    "indexer.container", "media.container", "media-processor.container", "gateway.container",
+    "caddy.container", "caddy.socket",
 })
+# The derivatives volume's bind form (spec M8): exactly these consecutive template lines, kept
+# only when the install has an operator directory for the derivatives.
+DERIVATIVES_TEMPLATE = "derivatives.volume"
+DERIVATIVES_BIND = ("Device=@@DERIVATIVES_DIR@@", "Type=none", "Options=bind")
 TOKEN = re.compile(r"@@([A-Z][A-Z0-9_]*)@@")
 PREFIX = re.compile(r"[a-z][a-z0-9-]{0,30}-")
 RELEASE = re.compile(r"sha-[0-9a-f]{40}")
 TEST_RELEASE = re.compile(r"test-[0-9a-z][0-9a-z-]{0,58}")
+BOOT_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _COMPONENT = r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*"
 # A registry port, 1 to 65535.
 _PORT = (
@@ -86,6 +95,9 @@ MAX_GID = 2**32 - 2
 SECRETS_DIR = re.compile(r"(?:/[A-Za-z0-9._@+-]+)+")
 # Marks the volumes and networks one install created, so removal can match exact identity.
 INSTALL_TOKEN = re.compile(r"[0-9a-f]{32}")
+# The install's one SELinux MCS level, s0 with two categories, the lower first.
+LABEL_LEVEL = re.compile(r"s0:c(0|[1-9][0-9]{0,3}),c(0|[1-9][0-9]{0,3})")
+MAX_CATEGORY = 1023
 PRIVATE_IPV4 = tuple(
     ipaddress.IPv4Network(network) for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
 )
@@ -114,9 +126,13 @@ class UnitConfig:
     and forms the public URL. ``secrets_dir`` holds one file per secret, named as in
     compose.yaml. ``backend_subnet`` is a private IPv4 /24 that collides with nothing else.
     ``install_token`` (32 hex) labels every volume and network, so the installer removes
-    only objects that carry it.
+    only objects that carry it. ``label_level`` (``s0:cX,cY``) is the SELinux MCS level every
+    container shares, so they exchange files on shared volumes while other containers' levels
+    keep them out.
     With ``install_sections`` false, no unit carries an [Install] section, so nothing it
     renders starts at boot (the deployment test installs units that way).
+    ``derivatives_dir``, when set, is the operator directory the derivatives volume binds
+    (spec M8); otherwise that volume is a plain named volume.
     """
 
     prefix: str
@@ -129,11 +145,14 @@ class UnitConfig:
     image_gateway: str
     image_postgres: str
     image_caddy: str
+    image_media: str
     secrets_dir: str
     backend_subnet: str
     install_token: str
+    label_level: str
     allow_test_values: bool = False
     install_sections: bool = True
+    derivatives_dir: str | None = None
 
 
 def _text(field: str, value: object) -> str:
@@ -195,10 +214,30 @@ def _host(value: object) -> str:
     return hostname
 
 
-def _secrets_dir(value: object) -> str:
-    text = _matching("secrets_dir", value, SECRETS_DIR)
+def _literal_directory(field: str, value: object) -> str:
+    """An absolute, normalized directory that unit files and Podman read literally."""
+    text = _matching(field, value, SECRETS_DIR)
     if posixpath.normpath(text) != text:
-        raise RenderError("secrets_dir must be a normalized absolute path")
+        raise RenderError(f"{field} must be a normalized absolute path")
+    return text
+
+
+def _secrets_dir(value: object) -> str:
+    return _literal_directory("secrets_dir", value)
+
+
+def _derivatives_dir(value: object) -> str:
+    return _literal_directory("derivatives_dir", value)
+
+
+def _label_level(value: object) -> str:
+    text = _matching("label_level", value, LABEL_LEVEL)
+    match = LABEL_LEVEL.fullmatch(text)
+    assert match is not None
+    if not int(match.group(1)) < int(match.group(2)) <= MAX_CATEGORY:
+        raise RenderError(
+            f"label_level must be s0:cX,cY with categories X < Y <= {MAX_CATEGORY}"
+        )
     return text
 
 
@@ -238,6 +277,11 @@ def unit_values(config: UnitConfig) -> dict[str, str]:
         raise RenderError("names must not repeat")
     sites = [f"https://{host}:{port}" for host in hosts]
     subnet = _backend_subnet(config.backend_subnet)
+    # Only a configured directory gets a value: the bind lines that use it are rendered only
+    # then, and a token without a value anywhere else fails the render.
+    derivatives = {} if config.derivatives_dir is None else {
+        "DERIVATIVES_DIR": _derivatives_dir(config.derivatives_dir),
+    }
     return {
         "PREFIX": prefix,
         "RELEASE": release,
@@ -248,6 +292,8 @@ def unit_values(config: UnitConfig) -> dict[str, str]:
         "IMAGE_GATEWAY": _image("image_gateway", config.image_gateway, test),
         "IMAGE_POSTGRES": _image("image_postgres", config.image_postgres, test),
         "IMAGE_CADDY": _image("image_caddy", config.image_caddy, test),
+        "IMAGE_MEDIA": _image("image_media", config.image_media, test),
+        **derivatives,
         "PUBLIC_URL": sites[0],
         "ALLOWED_HOSTS": ",".join(hosts),
         # Caddy needs a space between site addresses (Caddyfile.lan: {$AEGIS_LAN_SITES}).
@@ -260,6 +306,7 @@ def unit_values(config: UnitConfig) -> dict[str, str]:
         "WEB_ADDRESS": str(subnet[WEB_HOST]),
         "GATEWAY_ADDRESS": str(subnet[GATEWAY_HOST]),
         "INSTALL_TOKEN": _matching("install_token", config.install_token, INSTALL_TOKEN),
+        "LABEL_LEVEL": _label_level(config.label_level),
     }
 
 
@@ -302,6 +349,25 @@ def unit_directory(name: str) -> str:
     return UNIT_DIRECTORIES[suffix]
 
 
+def _derivatives_form(text: str, bound: bool) -> str:
+    """The derivatives volume template with its bind lines, or without them.
+
+    The three lines must appear exactly once, consecutively and in order; anything else is a
+    template that does not say what it binds, and is refused.
+    """
+    lines = text.splitlines(keepends=True)
+    found = [index for index, line in enumerate(lines) if line.strip() in DERIVATIVES_BIND]
+    if (
+        [lines[index].strip() for index in found] != list(DERIVATIVES_BIND)
+        or found != list(range(found[0], found[0] + len(DERIVATIVES_BIND)))
+    ):
+        raise RenderError(f"{DERIVATIVES_TEMPLATE}: the bind lines are not exactly "
+                          f"{', '.join(DERIVATIVES_BIND)}")
+    if bound:
+        return text
+    return "".join(line for index, line in enumerate(lines) if index not in found)
+
+
 def _without_install(text: str) -> str:
     """Drop every line of the [Install] section, up to the next section header."""
     kept = []
@@ -329,6 +395,9 @@ def render_units(
     sources = load_templates() if templates is None else dict(templates)
     if set(sources) != TEMPLATE_NAMES:
         raise RenderError("the Quadlet template set is not the expected one")
+    sources[DERIVATIVES_TEMPLATE] = _derivatives_form(
+        sources[DERIVATIVES_TEMPLATE], config.derivatives_dir is not None,
+    )
     rendered = {
         values["PREFIX"] + name: _substitute(name, text, values)
         for name, text in sorted(sources.items())
@@ -349,7 +418,8 @@ PRODUCTION_READER_TYPE = "aegis_reader.process"
 # container_t, so no module is loaded, and they read only container_file_t roots.
 TEST_READER_TYPE = "container_t"
 READER_TYPES = (PRODUCTION_READER_TYPE, TEST_READER_TYPE)
-ROLES = ("backend", "gateway", "postgres", "caddy")
+# Each image a release publishes, as aegis-<role> (media: the processor's, spec M2).
+ROLES = ("backend", "gateway", "postgres", "caddy", "media")
 # Always the local engine: a CONTAINER_HOST in the environment would otherwise make Podman
 # talk to a remote service.
 PODMAN = ("podman", "--remote=false")
@@ -379,6 +449,15 @@ SECRET_OWNER = "10001:10001"
 # group, which those containers see as 10001, is gid 0.
 MAPPED_OWNER = "10001:0"
 CONTAINER_FILE_TYPE = "container_file_t"
+# Files and the derivatives directory the containers read: container_file_t at level s0, which
+# every MCS level dominates. chcon -t alone keeps a file's level, which for a file the operator
+# created is already s0 (the low end of the operator's range); -l s0 makes sure of it.
+CONTAINER_FILE_LABEL = ("chcon", "-h", "-t", CONTAINER_FILE_TYPE, "-l", "s0")
+# compose.podman.yaml's fixed level for dev and test stacks (aegisctl.container_launch): an
+# install never draws it, so no Aegis install shares a level with them.
+DEV_LABEL_LEVEL = "s0:c403,c871"
+# Relabelling a volume's content (a one-time migration to the shared level) may take long.
+RELABEL_TIMEOUT = 3600.0
 MINIMUM_SYSTEMD = 254
 MINIMUM_PORT = 1024
 DEFAULT_DEADLINE = 600.0
@@ -414,7 +493,8 @@ TEMPORARY_SUFFIXES = (".tmp", ".partial", ".cid")
 # is refused, so a later release cannot add a confinement the one-off container would miss.
 BOOTSTRAP_COPIED = frozenset({
     "User", "Group", "Environment", "Volume", "ReadOnly", "Tmpfs", "DropCapability",
-    "AddCapability", "NoNewPrivileges", "Unmask", "GIDMap", "SecurityLabelType", "RunInit",
+    "AddCapability", "NoNewPrivileges", "Unmask", "GIDMap", "SecurityLabelType",
+    "SecurityLabelLevel", "RunInit",
 })
 BOOTSTRAP_IGNORED = frozenset({
     "ContainerName", "Image", "Exec", "Pull", "Network", "HealthCmd", "HealthInterval",
@@ -433,9 +513,12 @@ LIBRARY_REQUIRED = tuple(
 # dropped from the environment, give the same isolation with the release's library on the
 # path; -B keeps bytecode out of that recorded copy.
 AEGISCTL_FLAGS = ("-B", "-P", "-S")
-# The units aegisctl's Quadlet render writes a drop-in for, and the drop-in's name.
-ROOT_ROLES = ("migrate", "web", "operations", "indexer", "media", "gateway")
+# The units aegisctl's Quadlet render writes a drop-in for, and the drop-in's name. A release
+# before the media processor renders neither its unit nor its drop-in.
+ROOT_ROLES = ("migrate", "web", "operations", "indexer", "media", "media-processor", "gateway")
 WORKER_ROLES = ("operations", "indexer", "media")
+# Binds the roots and nothing else: no manifest, attestation or command (spec M2).
+PROCESSOR_ROLE = "media-processor"
 DROP_IN = "50-aegis-roots.conf"
 DROP_IN_KEYS = frozenset({"Environment", "Exec", "Volume"})
 MANIFEST_TARGET = "/run/aegis/mounts.manifest.json"
@@ -498,6 +581,12 @@ PROBE_CANDIDATES = 256
 PROBE_TIMEOUT = 120.0
 BACKEND_USER = "10001:10001"
 BACKEND_GID = 10001
+# The operator directory the derivatives volume binds (spec M8): setgid, so whatever the media
+# worker creates keeps the operator's group, which the gateway reads through (D5).
+DERIVATIVES_VOLUME = "derivatives"
+DERIVATIVES_MODE = 0o2770
+# Memory-backed file systems: derivatives there would vanish at every boot.
+VOLATILE_FILESYSTEMS = frozenset({"tmpfs", "ramfs"})
 # The host-setup script (spec D7): the HTTPS port only from private and VPN sources.
 ZONE = re.compile(r"[A-Za-z0-9_-]{1,32}")
 LOGIN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,31}")
@@ -590,6 +679,10 @@ class Host:
     python: str = field(default_factory=lambda: sys.executable or "python3")
     getxattr: Callable[[str, str], bytes] = read_selinux_label
     login_name: Callable[[int], str] = login_name
+    # The installer's own mount table: the file system that would hold the derivatives.
+    mountinfo: Path = Path("/proc/self/mountinfo")
+    # This boot's random ID, recorded with a pending upgrade: a reboot changes it.
+    boot_id: Path = Path("/proc/sys/kernel/random/boot_id")
 
 
 def _absolute(name: str, value: str) -> Path:
@@ -711,7 +804,8 @@ _STATE_TYPES: dict[str, type | tuple[type, ...]] = {
     "firewall_zones": list, "installed": bool, "history": list, "files": dict,
     "secrets": dict, "releases": dict, "units": dict, "volumes": list, "networks": list,
     "extractions": list, "roots": dict, "selinux_covered": list, "selinux_pending": list,
-    "mounts": dict, "local_images": bool, "version": int,
+    "mounts": dict, "local_images": bool, "derivatives": (dict, type(None)),
+    "label_level": (str, type(None)), "level_migration": (dict, type(None)), "version": int,
 }
 _INVENTORY_TYPES: dict[str, type] = {
     "files": list, "socket": str, "services": list, "oneshots": list, "generated": list,
@@ -744,6 +838,16 @@ class State:
     ``local_images`` marks a deployment-test stack (spec D12) whose ``images`` are local image
     IDs rather than pulled digests; like the ``container_t`` reader type, it never applies to
     the production prefix.
+
+    ``derivatives`` is the operator directory the derivatives volume binds (spec M8), or None
+    for a plain named volume: its path, its device and inode when it was adopted, and whether
+    its preparation for the containers finished. It never changes once recorded.
+
+    ``label_level`` is the SELinux MCS level every container of this install shares, drawn at
+    random when the install is initialized (or, for a record from before it existed, when the
+    units of a release that uses it are next written) and kept from then on.
+    ``level_migration`` maps each volume recorded before that late draw to whether its content
+    is relabelled to the level yet (a one-time migration); None when there was nothing to do.
     """
 
     phase: str
@@ -778,15 +882,19 @@ class State:
         default_factory=lambda: {"current": None, "installing": None, "generations": {}},
     )
     local_images: bool = False
+    derivatives: dict[str, Any] | None = None
+    label_level: str | None = None
+    level_migration: dict[str, bool] | None = None
     version: int = STATE_VERSION
 
     @classmethod
     def from_json(cls, data: object) -> State:
         if isinstance(data, dict):
-            # A record written before roots or local images existed: it has neither yet.
+            # A record written before roots, local images or a derivatives directory existed.
             defaults: dict[str, Any] = {
                 "roots": {}, "selinux_covered": [], "selinux_pending": [],
                 "mounts": {"current": None, "generations": {}}, "local_images": False,
+                "derivatives": None, "label_level": None, "level_migration": None,
             }
             data = defaults | data
             if isinstance(data["mounts"], dict):
@@ -839,7 +947,12 @@ def _record_problem(data: object) -> str | None:
         isinstance(pending.get("release"), str) and isinstance(pending.get("images"), dict)
         and isinstance(pending.get("restart_queued", False), bool)
         and isinstance(pending.get("local_images", False), bool)
+        and (pending.get("boot_id") is None
+             or (isinstance(pending["boot_id"], str)
+                 and BOOT_ID.fullmatch(pending["boot_id"]) is not None))
     ):
+        return "malformed pending upgrade"
+    if pending is not None and _derivatives_problem(pending.get("previous_derivatives")):
         return "malformed pending upgrade"
     if pending is not None and data["prefix"] == PRODUCTION_PREFIX and (
         pending.get("local_images", False) or TEST_RELEASE.fullmatch(pending["release"])
@@ -861,7 +974,37 @@ def _record_problem(data: object) -> str | None:
         isinstance(data["units"].get(key), expected) for key, expected in _INVENTORY_TYPES.items()
     ):
         return "installed without a unit inventory"
+    if _derivatives_problem(data["derivatives"]):
+        return "malformed derivatives directory"
+    if data["label_level"] is not None:
+        try:
+            _label_level(data["label_level"])
+        except RenderError:
+            return "malformed SELinux level"
+    migration = data["level_migration"]
+    if migration is not None and (
+        data["label_level"] is None
+        or not all(isinstance(name, str) and isinstance(done, bool)
+                   for name, done in migration.items())
+    ):
+        return "malformed SELinux level migration"
     return _roots_problem(data)
+
+
+def _derivatives_problem(record: object) -> bool:
+    """Whether a recorded derivatives directory is malformed (None is a plain volume)."""
+    if record is None:
+        return False
+    if not isinstance(record, dict) or set(record) != {"path", "device", "inode", "prepared"}:
+        return True
+    try:
+        _derivatives_dir(record["path"])
+    except RenderError:
+        return True
+    return not (
+        all(type(record[key]) is int and record[key] >= 0 for key in ("device", "inode"))
+        and isinstance(record["prepared"], bool)
+    )
 
 
 def _roots_problem(data: Mapping[str, Any]) -> str | None:
@@ -1259,7 +1402,7 @@ def _local_images_argument(value: str | None) -> dict[str, str] | None:
         if set(images) == set(ROLES):
             return images
     raise InstallError(
-        "--local-images must name each of backend, gateway, postgres and caddy once, as "
+        f"--local-images must name each of {', '.join(ROLES[:-1])} and {ROLES[-1]} once, as "
         "role=<64 hex image ID>, separated by commas"
     )
 
@@ -1540,7 +1683,7 @@ def _created_label(entry: Mapping[str, Any]) -> str | None:
 
 
 def _pull(host: Host, registry: str, release: str) -> tuple[dict[str, str], str | None]:
-    """Pull the four images by tag and pin each to its registry digest.
+    """Pull the release's images by tag and pin each to its registry digest.
 
     Also returns the backend image's creation label, which orders releases.
     """
@@ -1829,7 +1972,7 @@ def _release_renderer(
         raise InstallError(f"cannot load the renderer of release {release}: {error}") from None
     finally:
         del sys.modules[name]
-    if getattr(module, "RENDER_API", None) != RENDER_API:
+    if getattr(module, "RENDER_API", None) not in RENDER_APIS:
         raise InstallError(
             f"release {release} has a renderer this installer does not understand; "
             "run that release's own aegis-podman"
@@ -1848,17 +1991,29 @@ def _release_renderer(
 def _render(
     module: types.ModuleType, templates: Mapping[str, str], state: State, paths: Paths,
 ) -> dict[str, RenderedUnit]:
-    """Render with the release's renderer and templates; place each unit where it belongs."""
+    """Render with the release's renderer and templates; place each unit where it belongs.
+
+    A release before the media processor (render API 1) takes neither the media image, a
+    derivatives directory nor the shared level; its units get random levels and a plain
+    derivatives volume.
+    """
     try:
-        config = module.UnitConfig(
-            prefix=state.prefix, release=state.release, https_port=state.https_port,
-            names=tuple(state.names), host_gid=state.host_gid, reader_type=state.reader_type,
-            image_backend=state.images["backend"], image_gateway=state.images["gateway"],
-            image_postgres=state.images["postgres"], image_caddy=state.images["caddy"],
-            secrets_dir=str(paths.secrets), backend_subnet=state.backend_subnet,
-            install_token=state.install_token, install_sections=state.install_sections,
-            allow_test_values=state.local_images,
-        )
+        values: dict[str, Any] = {
+            "prefix": state.prefix, "release": state.release, "https_port": state.https_port,
+            "names": tuple(state.names), "host_gid": state.host_gid,
+            "reader_type": state.reader_type,
+            "image_backend": state.images["backend"], "image_gateway": state.images["gateway"],
+            "image_postgres": state.images["postgres"], "image_caddy": state.images["caddy"],
+            "secrets_dir": str(paths.secrets), "backend_subnet": state.backend_subnet,
+            "install_token": state.install_token, "install_sections": state.install_sections,
+            "allow_test_values": state.local_images,
+        }
+        if module.RENDER_API >= 2:
+            values["image_media"] = state.images["media"]
+            usable = _usable_derivatives(state)
+            values["derivatives_dir"] = None if usable is None else usable["path"]
+            values["label_level"] = state.label_level
+        config = module.UnitConfig(**values)
         texts = module.render_units(config, templates)
         units = {}
         for name, text in texts.items():
@@ -2133,6 +2288,17 @@ def _print_status(
     _say(host, f"release {state.release} ({state.desired})")
     for role in ROLES:
         _say(host, f"  {role:<9} {state.images.get(role, '-')}")
+    if state.derivatives is not None:
+        _say(host, f"  derivatives in {state.derivatives['path']}" + (
+            "" if state.derivatives["prepared"] else
+            " (preparation unfinished, so nothing binds it; --derivatives-dir replaces it)"
+        ))
+    if state.label_level is not None:
+        _say(host, f"  SELinux level {state.label_level}, shared by every container")
+    unfinished = _migration_pending(state)
+    if unfinished:
+        _say(host, f"  volumes not yet relabelled to that level: {', '.join(unfinished)}; "
+                   "the pending upgrade, or aegis-podman install, finishes it")
     for slot, root in sorted(state.roots.items()):
         _say(host, f"  root {slot}: {root['source']} ({root['selinux_type']})")
     if state.selinux_pending:
@@ -2323,7 +2489,7 @@ def _new_secret(host: Host, paths: Paths, state: State, name: str) -> str:
     state.secrets[name] = {"pending": str(temporary), **identity}
     save_state(paths, state)
     _check(
-        host, ["chcon", "-h", "-t", CONTAINER_FILE_TYPE, str(temporary)],
+        host, [*CONTAINER_FILE_LABEL, str(temporary)],
         f"labelling the secret {name}", timeout=60,
     )
     _check(
@@ -2362,13 +2528,423 @@ def prepare_for_mapped_containers(host: Host, path: Path) -> None:
         os.fchmod(descriptor, 0o600)
     finally:
         os.close(descriptor)
-    _check(host, ["chcon", "-h", "-t", CONTAINER_FILE_TYPE, str(path)], f"labelling {path}",
-           timeout=60)
+    _check(host, [*CONTAINER_FILE_LABEL, str(path)], f"labelling {path}", timeout=60)
     _check(host, [*PODMAN, "unshare", "chown", "-h", MAPPED_OWNER, str(path)],
            f"handing {path} to the mapped container user", timeout=60)
 
 
+# -- the derivatives directory (spec M8) -----------------------------------------------------
+
+
+def _derivatives_argument(value: str) -> str:
+    """A derivatives directory as the units and Podman read it: absolute, normalized, literal."""
+    try:
+        return _derivatives_dir(value)
+    except RenderError:
+        raise InstallError(
+            f"--derivatives-dir {value!r} must be an absolute, normalized path whose components "
+            "are letters, digits and ._@+-, so that Quadlet, systemd and Podman read it "
+            "literally"
+        ) from None
+
+
+def _derivatives_moved(recorded: str, requested: str) -> str:
+    return (
+        f"the derivatives directory is {recorded}, not {requested}; aegis-podman never moves "
+        "derivatives to another directory (that would need a --move-derivatives, which does "
+        f"not exist), so it keeps the recorded one: leave out --derivatives-dir, or give "
+        f"{shlex.quote(recorded)}"
+    )
+
+
+def _unescape_mountinfo(value: str) -> str:
+    return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), value)
+
+
+def _filesystem_type(host: Host, path: str) -> tuple[str, str]:
+    """The type and mount point of the file system that holds ``path`` (a real, absolute
+    path), from the installer's own mount table: the deepest mount point that contains it, and
+    of two at the same point the one mounted last."""
+    try:
+        text = host.mountinfo.read_text(encoding="utf-8", errors="surrogateescape")
+    except OSError as error:
+        raise InstallError(f"cannot read {host.mountinfo}: {error.strerror}") from None
+    found: tuple[str, str] | None = None
+    for line in text.splitlines():
+        # id parent major:minor root mountpoint options [optional fields] - type source ...
+        fields = line.split(" ")
+        try:
+            separator = fields.index("-", 6)
+            mountpoint, kind = _unescape_mountinfo(fields[4]), fields[separator + 1]
+        except (ValueError, IndexError):
+            continue
+        if not mountpoint.startswith("/"):
+            continue
+        inside = path == mountpoint or path.startswith(mountpoint.rstrip("/") + "/")
+        if inside and (found is None or len(mountpoint) >= len(found[1])):
+            found = (kind, mountpoint)
+    if found is None:
+        raise InstallError(f"{host.mountinfo} names no mount that holds {path}")
+    return found
+
+
+def _prepared_for_containers(host: Host, path: str) -> bool:
+    """Whether ``path`` already is what ``_prepare_derivatives`` makes of a directory (owned
+    by container uid 10001 and the operator's group, mode 2770): a run interrupted between the
+    preparation and the record left it so, and the operator can no longer own it again."""
+    result = _run(host, [*PODMAN, "unshare", "stat", "--format=%u:%g:%a", "--", path],
+                  timeout=60)
+    return result.returncode == 0 and (result.stdout or "").strip() == (
+        f"{MAPPED_OWNER}:{DERIVATIVES_MODE:o}"
+    )
+
+
+def _check_derivatives_directory(
+    host: Host, paths: Paths, state: State, path: str, record: Mapping[str, Any] | None,
+) -> os.stat_result:
+    """The derivatives directory must already be a real directory reached through no symbolic
+    link, apart from every root and every directory of the installer (by path and by device
+    and inode), on a file system that keeps its content. Adopted (no ``record``) it must also
+    be empty, the operator's own (or already prepared by an interrupted adoption), and not a
+    mount point itself, so that a disk missing at boot leaves Podman nothing to bind. A
+    recorded one must still be that same directory. aegis-podman never creates it."""
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        raise InstallError(
+            f"{path} does not exist; aegis-podman never creates the derivatives directory, so "
+            "create it first: an empty directory of your own, outside every root"
+        ) from None
+    except OSError as error:
+        raise InstallError(f"cannot inspect {path}: {error.strerror}") from None
+    if stat.S_ISLNK(info.st_mode):
+        raise InstallError(f"{path} is a symbolic link; give the directory it points to")
+    if not stat.S_ISDIR(info.st_mode):
+        raise InstallError(f"{path} is not a directory")
+    real = os.path.realpath(path)
+    if real != path:
+        raise InstallError(f"{path} is reached through a symbolic link; give its real path, "
+                           f"{shlex.quote(real)}")
+    if record is not None:
+        if (info.st_dev, info.st_ino) != (record["device"], record["inode"]):
+            raise InstallError(
+                f"{path} is no longer the derivatives directory aegis-podman prepared (its "
+                "device and inode changed); mount or put that directory back"
+            )
+    else:
+        if info.st_uid != host.uid and not _prepared_for_containers(host, path):
+            raise InstallError(f"{path} is not owned by you; the derivatives directory must "
+                               "be a directory of your own")
+        try:
+            entries = os.listdir(path)
+        except OSError as error:
+            raise InstallError(f"cannot list {path}: {error.strerror}") from None
+        if entries:
+            raise InstallError(f"{path} is not empty; the derivatives directory must start "
+                               "empty, so create a new one")
+    for directory in (paths.data, paths.config_directory, *paths.unit_directories()):
+        if not _apart(real, info, directory):
+            raise InstallError(
+                f"{path} overlaps aegis-podman's own directory {directory}; the derivatives "
+                "directory must lie outside it, and it outside the derivatives directory"
+            )
+    for slot, root in sorted(state.roots.items()):
+        if not _apart(real, info, root["source"]):
+            raise InstallError(
+                f"{path} overlaps the root {slot} ({root['source']}); originals stay "
+                "read-only, so the derivatives directory must lie outside every root, and "
+                "every root outside it"
+            )
+    kind, mountpoint = _filesystem_type(host, real)
+    if kind in VOLATILE_FILESYSTEMS:
+        raise InstallError(f"{path} is on {kind}, which keeps nothing across a reboot; choose "
+                           "a directory on a disk")
+    if record is None and mountpoint == real:
+        raise InstallError(
+            f"{path} is a mount point itself; give a directory inside it, so that if the disk "
+            "is not mounted at boot there is nothing for Podman to bind"
+        )
+    return info
+
+
+def _label_probe(host: Host, path: str) -> None:
+    """Prove that files in ``path`` take the containers' label before anything changes: label
+    a fresh file in it, then remove that file. A file system without SELinux labels, or one
+    mounted with a fixed ``context=``, refuses."""
+    probe = os.path.join(path, f".aegis-podman-label-probe.{secrets.token_hex(8)}")
+    descriptor = os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                         | os.O_CLOEXEC, 0o600)
+    os.close(descriptor)
+    try:
+        result = _run(host, [*CONTAINER_FILE_LABEL, probe], timeout=60)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(probe)
+    if result.returncode != 0:
+        raise InstallError(
+            f"{path} cannot carry the SELinux label the containers read through (chcon -t "
+            f"{CONTAINER_FILE_TYPE} -l s0 failed{_detail(result.stderr)}): its file system "
+            "has no SELinux labels, or is mounted with a fixed context=. Nothing was "
+            "recorded; choose a directory on a file system with SELinux labels"
+        )
+
+
+def _prepare_derivatives(host: Host, path: str) -> None:
+    """Hand the derivatives directory to the group-mapped containers, as files are prepared
+    for them: mode 2770, labelled container_file_t at s0, then owned by container uid 10001
+    and the operator's group (``podman unshare chown 10001:0``), which the media worker and
+    the gateway both map (D5). The setgid bit keeps that group on whatever the worker creates.
+    Neither tool follows a symbolic link."""
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        os.fchmod(descriptor, DERIVATIVES_MODE)
+        kept = stat.S_IMODE(os.fstat(descriptor).st_mode)
+    finally:
+        os.close(descriptor)
+    if kept != DERIVATIVES_MODE:
+        raise InstallError(
+            f"{path} did not keep mode {DERIVATIVES_MODE:o}: the setgid bit needs a group of "
+            "yours, so change its group to your own (chgrp) and rerun"
+        )
+    _check(host, [*CONTAINER_FILE_LABEL, path], f"labelling {path}", timeout=60)
+    _check(host, [*PODMAN, "unshare", "chown", "-h", MAPPED_OWNER, path],
+           f"handing {path} to the mapped container user", timeout=60)
+
+
+def _adopt_derivatives(host: Host, paths: Paths, state: State, path: str) -> dict[str, Any]:
+    """Check ``path``, prove it takes the containers' label, prepare it, and return the record
+    to keep. Nothing is recorded here: the caller records it only once the preparation is
+    complete, so any failure leaves the record as it was and the operator free to choose
+    again. A directory an interrupted adoption already prepared is taken as it is."""
+    info = _check_derivatives_directory(host, paths, state, path, None)
+    if info.st_uid == host.uid:
+        _label_probe(host, path)
+        _prepare_derivatives(host, path)
+    return {"path": path, "device": info.st_dev, "inode": info.st_ino, "prepared": True}
+
+
+def _usable_derivatives(state: State) -> dict[str, Any] | None:
+    """The recorded derivatives directory, once its preparation finished. A record left
+    unprepared by an earlier version binds nothing and may be replaced."""
+    record = state.derivatives
+    return record if record is not None and record["prepared"] else None
+
+
+def _derivatives_bound(paths: Paths, state: State) -> bool:
+    """Whether the installed units bind the recorded directory: the derivatives volume unit
+    on disk names it. A release whose units do not (one before the bind form, or a stack not
+    installed) is never held back by it, and the directory may still be replaced."""
+    record = _usable_derivatives(state)
+    if record is None or not state.installed:
+        return False
+    unit = paths.config / UNIT_DIRECTORIES[".volume"] / f"{state.prefix}{DERIVATIVES_VOLUME}.volume"
+    try:
+        lines = _read_regular(unit).decode("utf-8").splitlines()
+    except (OSError, InstallError, UnicodeDecodeError):
+        return False
+    return f"Device={record['path']}" in (line.strip() for line in lines)
+
+
+def _derivatives_request(host: Host, paths: Paths, state: State, path: str | None) -> bool:
+    """Whether this upgrade adopts ``path``; refuse what it cannot do.
+
+    The recorded directory is kept. Another one replaces it only while no installed unit
+    binds it. A new directory replaces the derivatives volume, which Quadlet creates only when
+    no volume of that name exists. So Aegis must be stopped and the volume absent: a release
+    without the media processor created it, but never wrote it.
+    """
+    if path is None:
+        return False
+    record = _usable_derivatives(state)
+    if record is not None and record["path"] == path:
+        return False
+    if record is not None and _derivatives_bound(paths, state):
+        raise InstallError(_derivatives_moved(record["path"], path))
+    if state.desired != "stopped":
+        raise InstallError(
+            "adopting a derivatives directory replaces the derivatives volume, so Aegis must "
+            "be stopped first: run aegis-podman stop, then this command again"
+        )
+    name = f"{state.prefix}{DERIVATIVES_VOLUME}"
+    if _object_labels(host, "volume", name) is not None:
+        raise InstallError(
+            f"the volume {name} already exists, and Quadlet keeps an existing volume as it is, "
+            f"so it would never bind {path}. If it holds no derivatives yet (a release without "
+            f"the media processor never writes it), remove it with: podman volume rm {name}; "
+            "then run this command again. Derivatives already in it are never moved"
+        )
+    return True
+
+
+def _check_derivatives(host: Host, paths: Paths, state: State, record: Mapping[str, Any]) -> None:
+    """Before units that bind ``record``'s directory are installed, upgraded or started: it is
+    still the same directory, and an existing derivatives volume binds exactly it (Quadlet
+    keeps an existing volume as it is, so a plain one would stay plain)."""
+    _check_derivatives_directory(host, paths, state, record["path"], record)
+    name = f"{state.prefix}{DERIVATIVES_VOLUME}"
+    exists = _run(host, [*PODMAN, "volume", "exists", name], timeout=60)
+    if exists.returncode == 1:
+        return
+    if exists.returncode != 0:
+        raise InstallError(f"podman volume exists {name} failed{_detail(exists.stderr)}")
+    entry = _single(
+        _json_output(host, [*PODMAN, "volume", "inspect", name], "podman volume inspect"),
+        "Name", name, "podman volume inspect",
+    )
+    options = entry.get("Options") or {}
+    if not (
+        isinstance(options, dict) and options.get("device") == record["path"]
+        and options.get("type") == "none" and options.get("o") == "bind"
+    ):
+        raise InstallError(
+            f"the volume {name} exists but does not bind {record['path']}, and Quadlet keeps "
+            "an existing volume as it is. If it holds no derivatives yet, stop Aegis "
+            f"(aegis-podman stop), remove it with: podman volume rm {name}; then run this "
+            "command again"
+        )
+
+
+def _renew_derivatives_volume(host: Host, state: State, timeout: float) -> None:
+    """While Aegis is stopped, with a derivatives directory recorded and no volume yet: stop
+    the volume's service, so the next start runs it and Quadlet creates the volume, now as
+    the bind. A service still active from the old plain volume would never run again, and
+    the containers would create a plain volume of their own."""
+    if _usable_derivatives(state) is None:
+        return
+    if _object_labels(host, "volume", f"{state.prefix}{DERIVATIVES_VOLUME}") is not None:
+        return
+    unit = f"{state.prefix}{DERIVATIVES_VOLUME}-volume.service"
+    _run(host, [*SYSTEMCTL, "--no-block", "stop", unit], timeout=120)
+    if not _await_stopped(host, [unit], timeout):
+        raise InstallError(f"{unit} did not stop; stop it with: systemctl --user stop {unit}")
+
+
+# -- the shared SELinux level -----------------------------------------------------------------
+
+
+def new_label_level(randbelow: Callable[[int], int] | None = None) -> str:
+    """A random ``s0:cX,cY`` with distinct categories, the lower first, never the dev stacks'.
+
+    Containers of one install share it; every other container, another install's included,
+    draws its own, so MCS keeps them apart. ``randbelow`` defaults to ``secrets.randbelow``.
+    """
+    draw = secrets.randbelow if randbelow is None else randbelow
+    while True:
+        first, second = draw(MAX_CATEGORY + 1), draw(MAX_CATEGORY + 1)
+        level = f"s0:c{min(first, second)},c{max(first, second)}"
+        if first != second and level != DEV_LABEL_LEVEL:
+            return level
+
+
+def _render_level(state: State, module: types.ModuleType) -> tuple[str | None, bool]:
+    """The level to render ``module``'s units with, and whether it is newly drawn.
+
+    A renderer before the shared level (render API 1) takes none. A record from before it
+    gets a fresh draw, which ``_adopt_level`` records only once the units are about to change;
+    a render that fails first leaves nothing behind, and the next attempt draws again.
+    """
+    if module.RENDER_API < 2:
+        return state.label_level, False
+    if state.label_level is not None:
+        return state.label_level, False
+    return new_label_level(), True
+
+
+def _adopt_level(state: State, level: str, volumes: Sequence[str]) -> None:
+    """Take a newly drawn level (the caller saves the record). The files in ``volumes``
+    (those recorded before it) carry each container's old, random level, which the shared one
+    cannot read: each is marked for relabelling, which ``_migrate_levels`` does before any
+    container runs at the new level."""
+    state.label_level = level
+    state.level_migration = dict.fromkeys(volumes, False) if volumes else None
+
+
+def _migration_pending(state: State) -> list[str]:
+    """The recorded volumes whose content is not relabelled to the shared level yet."""
+    return [name for name, done in (state.level_migration or {}).items() if not done]
+
+
+def _volume_storage(host: Host) -> str:
+    """Where Podman keeps this user's named volumes (``podman info``: store.volumePath)."""
+    info = _json_output(host, [*PODMAN, "info", "--format", "json"], "podman info")
+    store = info.get("store") if isinstance(info, dict) else None
+    path = store.get("volumePath") if isinstance(store, dict) else None
+    if not isinstance(path, str) or not os.path.isabs(path) or os.path.normpath(path) != path:
+        raise InstallError("podman info names no absolute volume storage path; no volume was "
+                           "relabelled")
+    return path
+
+
+def _relabel_volume(host: Host, state: State, name: str, level: str, storage: str) -> None:
+    """Relabel one recorded volume's content to ``level``, never following a link.
+
+    Only a volume that exists and carries this install's label is touched, and only at the
+    mount point Podman keeps it in, inside its volume storage. A bind of an operator
+    directory (the derivatives directory) stays at s0, which every level reads.
+    """
+    labels = _object_labels(host, "volume", name)
+    if labels is None:
+        return  # Quadlet creates it afresh, at s0
+    if labels.get(INSTALL_LABEL) != state.install_token:
+        print(f"aegis-podman: warning: the volume {name} does not carry this install's label; "
+              "it was left as it is", file=host.err)
+        return
+    entry = _single(
+        _json_output(host, [*PODMAN, "volume", "inspect", name], "podman volume inspect"),
+        "Name", name, "podman volume inspect",
+    )
+    options = entry.get("Options") or {}
+    if isinstance(options, dict) and options.get("device"):
+        return
+    expected = os.path.join(storage, name, "_data")
+    mountpoint = entry.get("Mountpoint")
+    real_storage = os.path.realpath(storage)
+    if (
+        not isinstance(mountpoint, str) or os.path.normpath(mountpoint) != expected
+        or os.path.commonpath([os.path.realpath(expected), real_storage]) != real_storage
+        or os.path.realpath(expected) == real_storage
+    ):
+        raise InstallError(
+            f"podman reports the mount point of the volume {name} as {mountpoint!r}, not "
+            f"{expected}; aegis-podman relabels nothing outside Podman's volume storage"
+        )
+    _check(host, [*PODMAN, "unshare", "chcon", "-R", "-h", "-l", level, expected],
+           f"relabelling the volume {name}", timeout=RELABEL_TIMEOUT)
+
+
+def _relabel_volumes(
+    host: Host, paths: Paths, state: State, names: Sequence[str], level: str, *,
+    migrated: bool, timeout: float,
+) -> None:
+    """Stop the recorded units, then relabel each of ``names`` to ``level`` and record it.
+
+    Nothing runs while the files change level. Each volume is recorded as soon as it is done,
+    so an interrupted run resumes with the ones left.
+    """
+    if not names:
+        return
+    if state.installed and state.units:
+        units = _service_units(state)
+        _run(host, [*SYSTEMCTL, "--no-block", "stop", *units], timeout=120)
+        if not _await_stopped(host, units, timeout):
+            raise InstallError(f"{', '.join(units)} did not stop; no volume was relabelled")
+    storage = _volume_storage(host)
+    for name in names:
+        _relabel_volume(host, state, name, level, storage)
+        if state.level_migration is not None:
+            state.level_migration[name] = migrated
+        save_state(paths, state)
+
+
+def _migrate_levels(host: Host, paths: Paths, state: State, timeout: float) -> None:
+    """Relabel the recorded volumes still at the old, random levels to the shared one."""
+    if state.label_level is not None:
+        _relabel_volumes(host, paths, state, _migration_pending(state), state.label_level,
+                         migrated=True, timeout=timeout)
+
+
 def _config_text(paths: Paths, state: State) -> str:
+    derivatives = _usable_derivatives(state)
     values = {
         "AEGIS_PODMAN_RELEASE": state.release,
         "AEGIS_PODMAN_REGISTRY": state.registry,
@@ -2379,7 +2955,15 @@ def _config_text(paths: Paths, state: State) -> str:
         "AEGIS_PODMAN_HOST_GID": str(state.host_gid),
         "AEGIS_PODMAN_READER_TYPE": state.reader_type,
         "AEGIS_PODMAN_SECRETS_DIR": str(paths.secrets),
-        **{f"AEGIS_PODMAN_IMAGE_{role.upper()}": state.images[role] for role in ROLES},
+        # A record from a release before the media processor has no media image.
+        **{f"AEGIS_PODMAN_IMAGE_{role.upper()}": state.images[role]
+           for role in ROLES if role in state.images},
+        **({} if derivatives is None else {
+            "AEGIS_PODMAN_DERIVATIVES_DIR": derivatives["path"],
+        }),
+        **({} if state.label_level is None else {
+            "AEGIS_PODMAN_LABEL_LEVEL": state.label_level,
+        }),
     }
     lines = [
         "# Aegis on rootless Podman: non-secret configuration, written by aegis-podman.",
@@ -2462,11 +3046,26 @@ def _ancestors(path: str) -> set[tuple[int, int]]:
         current = parent
 
 
+def _apart(real: str, info: os.stat_result, other: str | Path) -> bool:
+    """Whether the directory ``real`` (``info``) and ``other`` are apart: neither contains the
+    other, by path or by device and inode (which also catches a bind-mounted alias)."""
+    resolved = os.path.realpath(other)
+    try:
+        other_info: os.stat_result | None = os.stat(resolved)
+    except OSError:
+        other_info = None
+    return not (
+        _overlaps(real, resolved) or (info.st_dev, info.st_ino) in _ancestors(resolved) or (
+            other_info is not None and (other_info.st_dev, other_info.st_ino) in _ancestors(real)
+        )
+    )
+
+
 def _check_root_source(paths: Paths, state: State, slot: str, source: str) -> str:
     """The source must already be a real directory, reached through no symbolic link, apart
-    from every directory of the installer and from every other root, by path and by device
-    and inode (which also catches a bind-mounted alias). aegis-podman never creates or
-    changes it. Returns its identity, local:<device>:<inode>."""
+    from every directory of the installer, from every other root and from the derivatives
+    directory, by path and by device and inode (which also catches a bind-mounted alias).
+    aegis-podman never creates or changes it. Returns its identity, local:<device>:<inode>."""
     try:
         info = os.lstat(source)
     except FileNotFoundError:
@@ -2485,16 +3084,8 @@ def _check_root_source(paths: Paths, state: State, slot: str, source: str) -> st
         # aegisctl resolves the path again later; a link swapped in between would redirect it.
         raise InstallError(f"{source} is reached through a symbolic link; give its real path, "
                            f"{shlex.quote(real)}")
-    above = _ancestors(source)
     for directory in (paths.data, paths.config_directory, *paths.unit_directories()):
-        own = os.path.realpath(directory)
-        try:
-            own_info = os.stat(own)
-        except OSError:
-            own_info = None
-        if _overlaps(real, own) or (info.st_dev, info.st_ino) in _ancestors(own) or (
-            own_info is not None and (own_info.st_dev, own_info.st_ino) in above
-        ):
+        if not _apart(real, info, directory):
             raise InstallError(
                 f"{source} overlaps aegis-podman's own directory {directory}; a root must lie "
                 "outside it, and it outside the root"
@@ -2502,6 +3093,13 @@ def _check_root_source(paths: Paths, state: State, slot: str, source: str) -> st
     for other, root in sorted(state.roots.items()):
         if other != slot and _overlaps(real, os.path.realpath(root["source"])):
             raise InstallError(f"{source} overlaps the root {other} ({root['source']})")
+    # The media worker writes there: inside a root it would change originals.
+    derivatives = _usable_derivatives(state)
+    if derivatives is not None and not _apart(real, info, derivatives["path"]):
+        raise InstallError(
+            f"{source} overlaps the derivatives directory {derivatives['path']}; a root "
+            "must lie outside it, and it outside the root"
+        )
     return f"local:{info.st_dev}:{info.st_ino}"
 
 
@@ -2815,22 +3413,27 @@ def _drop_in_problem(
     """What a rendered drop-in sets beyond exactly what aegisctl's render gives ``role``.
 
     Readers bind every root read-only at its slot path with no other option (a relabel or
-    chown option on an original is what the spec forbids most), and every role binds the
-    manifest, or for the gateway the attestation, under its fixed variables. Only the three
-    workers replace their command, with the attestation step.
+    chown option on an original is what the spec forbids most), and every role but the media
+    processor binds the manifest, or for the gateway the attestation, under its fixed
+    variables. The processor binds the roots alone. Only the three workers replace their
+    command, with the attestation step.
     """
     entries = sections.get("Container", [])
     if set(sections) != {"Container"} or not {key for key, _ in entries} <= DROP_IN_KEYS:
         return "sets more than Environment, Exec and Volume"
     names = sorted(value.partition("=")[0] for key, value in entries if key == "Environment")
     gateway = role == "gateway"
-    if names != sorted(ATTESTATION_VARIABLES if gateway else MANIFEST_VARIABLES):
+    processor = role == PROCESSOR_ROLE
+    variables = set() if processor else ATTESTATION_VARIABLES if gateway else MANIFEST_VARIABLES
+    if names != sorted(variables):
         return f"sets the environment variables {', '.join(names) or 'none'}"
     if len(_values(sections, "Container", "Exec")) != (1 if role in WORKER_ROLES else 0):
         return "replaces the command of a role other than the workers"
-    expected = {f"{attestation}:{ATTESTATION_TARGET}:ro" if gateway
-                else f"{manifest}:{MANIFEST_TARGET}:ro"}
-    if gateway or role in WORKER_ROLES:
+    expected = set() if processor else {
+        f"{attestation}:{ATTESTATION_TARGET}:ro" if gateway
+        else f"{manifest}:{MANIFEST_TARGET}:ro"
+    }
+    if gateway or processor or role in WORKER_ROLES:
         expected |= {
             f"{os.path.realpath(root['source'])}:/srv/aegis/roots/{slot}:ro"
             for slot, root in roots.items()
@@ -2842,16 +3445,24 @@ def _drop_in_problem(
     return None
 
 
+def _root_roles(prefix: str, services: Iterable[str]) -> tuple[str, ...]:
+    """The roles of ``ROOT_ROLES`` whose units are among ``services`` (``<prefix><role>.service``,
+    a unit inventory's container services): the drop-ins that release's aegisctl renders."""
+    present = set(services)
+    return tuple(role for role in ROOT_ROLES if f"{prefix}{role}.service" in present)
+
+
 def _read_drop_ins(
     directory: Path, prefix: str, roots: Mapping[str, Mapping[str, str]], manifest: Path,
-    attestation: Path,
+    attestation: Path, roles: Sequence[str],
 ) -> dict[str, bytes]:
-    """The six drop-ins aegisctl rendered into ``directory``, checked before any is used."""
-    expected = {f"{prefix}{role}.container.d/{DROP_IN}": role for role in ROOT_ROLES}
+    """The drop-ins aegisctl rendered into ``directory``, one for each of ``roles``, checked
+    before any is used."""
+    expected = {f"{prefix}{role}.container.d/{DROP_IN}": role for role in roles}
     contents = _walk_tree(directory, normalize=False, what="aegisctl's rendered drop-ins")
     if set(contents) != set(expected):
         raise InstallError(
-            "aegisctl rendered other drop-ins than the six expected: "
+            f"aegisctl rendered other drop-ins than the {len(expected)} expected: "
             f"{', '.join(sorted(contents)) or 'none'}"
         )
     drop_ins = {}
@@ -2872,7 +3483,8 @@ def _read_drop_ins(
 
 def _render_roots(
     host: Host, paths: Paths, state: State, roots: Mapping[str, Mapping[str, str]],
-    release: str, images: Mapping[str, str], *, local_images: bool | None = None,
+    release: str, images: Mapping[str, str], *, roles: Sequence[str],
+    local_images: bool | None = None,
 ) -> RenderedRoots:
     """Validate, observe and render ``roots`` with ``release``'s aegisctl.
 
@@ -2881,8 +3493,10 @@ def _render_roots(
     their own generation until ``_install_drop_ins`` replaces them. The manifest is rendered
     right after a fresh preflight, while the operator still owns it, and only then handed to
     the group-mapped container user (spec D5). Both files are labelled container_file_t;
-    the originals themselves are never touched. ``local_images`` (default: the record's)
-    says that ``images`` are the deployment test's local image IDs.
+    the originals themselves are never touched. ``roles`` are the root roles whose units
+    ``release`` renders (``_root_roles``), so exactly their drop-ins are expected.
+    ``local_images`` (default: the record's) says that ``images`` are the deployment test's
+    local image IDs.
     """
     test_images = state.local_images if local_images is None else local_images
     for slot, root in sorted(roots.items()):
@@ -2925,11 +3539,11 @@ def _render_roots(
             "--manifest", str(manifest), "--gateway-attestation", str(attestation),
             "--unit-prefix", state.prefix, "--output-dir", str(staging), "--host-gid", gid,
         )
-        drop_ins = _read_drop_ins(staging, state.prefix, roots, manifest, attestation)
+        drop_ins = _read_drop_ins(staging, state.prefix, roots, manifest, attestation, roles)
     finally:
         _remove_tree(staging)
     prepare_for_mapped_containers(host, manifest)
-    _check(host, ["chcon", "-h", "-t", CONTAINER_FILE_TYPE, str(attestation)],
+    _check(host, [*CONTAINER_FILE_LABEL, str(attestation)],
            f"labelling {attestation}", timeout=60)
     info = manifest.lstat()
     state.mounts["generations"][generation] = {
@@ -2954,17 +3568,27 @@ def _install_drop_ins(paths: Paths, state: State, rendered: RenderedRoots) -> se
     The generation is recorded as ``installing`` before the first drop-in is written. Until
     ``_commit_roots`` runs, after systemd has loaded them all, the drop-ins may bind two
     generations: the switch is flagged, the next install or roots command renders again,
-    and pruning keeps both.
+    and pruning keeps both. A recorded drop-in of a role the rendered release has no unit
+    for (going back to a release before the media processor) is removed with that unit.
     """
     _check_drop_ins(paths, state)
+    stale = []
+    for role in ROOT_ROLES:
+        path = paths.drop_in(state.prefix, role)
+        if role not in rendered.drop_ins and str(path) in state.files:
+            _check_removable(paths, state, path, force=False)
+            stale.append(path)
     state.mounts["installing"] = rendered.generation
     save_state(paths, state)
     changed = set()
     for role in ROOT_ROLES:
+        if role not in rendered.drop_ins:
+            continue
         path = paths.drop_in(state.prefix, role)
         _own_directory(path.parent)
         if _publish(paths, state, path, rendered.drop_ins[role], "drop-in", 0o644):
             changed.add(role)
+    _remove_drop_ins(paths, state, stale)
     state.mounts["current"] = rendered.generation
     save_state(paths, state)
     return changed
@@ -2977,14 +3601,19 @@ def _remove_drop_ins(paths: Paths, state: State, drop_ins: Sequence[Path]) -> No
             path.parent.rmdir()
 
 
-def _roots_need_render(paths: Paths, state: State) -> bool:
+def _roots_need_render(
+    paths: Paths, state: State, roles: Sequence[str] | None = None,
+) -> bool:
     """Whether the roots' drop-ins, or the files they bind, are not all in place as recorded:
     a switch was interrupted, a drop-in is missing, unsettled, changed or binds another
-    generation, or the current generation's files are gone."""
+    generation, or the current generation's files are gone. ``roles`` (default: those of the
+    installed units) are the roles that must each have one."""
     current = state.mounts["current"]
     if state.mounts["installing"] is not None or current is None:
         return True
-    expected = {role: paths.drop_in(state.prefix, role) for role in ROOT_ROLES}
+    if roles is None:
+        roles = _root_roles(state.prefix, state.units.get("containers", {}))
+    expected = {role: paths.drop_in(state.prefix, role) for role in roles}
     if {str(path) for path in _drop_in_paths(state)} != {str(path) for path in expected.values()}:
         return True
     manifest, attestation = paths.manifest(current), paths.attestation(current)
@@ -2996,11 +3625,11 @@ def _roots_need_render(paths: Paths, state: State) -> bool:
             content = _read_regular(path)
         except (OSError, InstallError):
             return True
+        if "previous" in record or hashlib.sha256(content).hexdigest() != record["sha256"]:
+            return True
+        # The processor's binds the roots alone, so no generation file shows in it.
         bound = os.path.realpath(attestation if role == "gateway" else manifest)
-        if (
-            "previous" in record or hashlib.sha256(content).hexdigest() != record["sha256"]
-            or f"\nVolume={bound}:".encode() not in content
-        ):
+        if role != PROCESSOR_ROLE and f"\nVolume={bound}:".encode() not in content:
             return True
     return False
 
@@ -3293,7 +3922,10 @@ def _roots_add(host: Host, paths: Paths, args: argparse.Namespace) -> int:
         roots = {**state.roots, slot: {
             "source": source, "identity": identity or observed, "selinux_type": selinux_type,
         }}
-        rendered = _render_roots(host, paths, state, roots, state.release, state.images)
+        rendered = _render_roots(
+            host, paths, state, roots, state.release, state.images,
+            roles=_root_roles(state.prefix, state.units["containers"]),
+        )
         changed = _install_drop_ins(paths, state, rendered)
         restart = _apply_roots(
             host, paths, state, changed, roots, rerun=f"aegis-podman roots add"
@@ -3330,7 +3962,10 @@ def _roots_remove(host: Host, paths: Paths, args: argparse.Namespace) -> int:
         # The slot stays recorded until systemd has the units without it and their restart
         # is queued, so a failure on the way leaves a command that can simply be run again.
         if remaining:
-            rendered = _render_roots(host, paths, state, remaining, state.release, state.images)
+            rendered = _render_roots(
+                host, paths, state, remaining, state.release, state.images,
+                roles=_root_roles(state.prefix, state.units["containers"]),
+            )
             changed = _install_drop_ins(paths, state, rendered)
         else:
             changed = _remove_roots(paths, state)
@@ -3541,6 +4176,9 @@ def command_init(host: Host, paths: Paths, args: argparse.Namespace) -> int:
     port = _port_argument(args.https_port)
     names = _names_argument(args.name, args.address)
     requested_subnet = _subnet_argument(args.backend_subnet)
+    derivatives = (
+        None if args.derivatives_dir is None else _derivatives_argument(args.derivatives_dir)
+    )
     _check_directories(paths, host.uid, create=False)
     previous = load_state(paths, host.uid)
     if previous is not None and previous.phase != "initializing":
@@ -3555,13 +4193,15 @@ def command_init(host: Host, paths: Paths, args: argparse.Namespace) -> int:
         if previous is not None and previous.phase != "initializing":
             raise InstallError("aegis-podman is already initialized")
         return _initialize(host, paths, previous, release, registry, prefix, port, names,
-                           requested_subnet, local_images=local_images, reader_type=reader_type)
+                           requested_subnet, local_images=local_images, reader_type=reader_type,
+                           derivatives=derivatives)
 
 
 def _initialize(
     host: Host, paths: Paths, previous: State | None, release: str, registry: str, prefix: str,
     port: int, names: list[str], requested_subnet: str | None, *,
     local_images: Mapping[str, str] | None = None, reader_type: str = PRODUCTION_READER_TYPE,
+    derivatives: str | None = None,
 ) -> int:
     state = State(
         phase="initializing", release=release, registry=registry, prefix=prefix, names=names,
@@ -3576,9 +4216,24 @@ def _initialize(
             previous.files, previous.secrets, previous.releases, previous.extractions,
         )
         state.install_token = previous.install_token
+        state.derivatives = previous.derivatives
+        state.label_level = previous.label_level
+    # Drawn once, here, and kept for the install's lifetime.
+    if state.label_level is None:
+        state.label_level = new_label_level()
     for name in SECRET_NAMES:
         _secret_ready(paths, state, name)
     _check_replaceable(state, paths.env_file)
+    # Checked before anything else runs; prepared and recorded only once nothing else can
+    # refuse the init. No unit binds it before install, so another one replaces a recorded one.
+    recorded = _usable_derivatives(state)
+    adopt = derivatives if derivatives is not None and (
+        recorded is None or recorded["path"] != derivatives
+    ) else None
+    if adopt is not None:
+        _check_derivatives_directory(host, paths, state, adopt, None)
+    elif recorded is not None:
+        _check_derivatives_directory(host, paths, state, recorded["path"], recorded)
     containers = _containers(host)
     _check_port(host, port, containers)
     state.backend_subnet = _choose_subnet(host, requested_subnet)
@@ -3594,6 +4249,9 @@ def _initialize(
     _refuse_existing_objects(host, containers, inventory, volumes, networks)
     for unit in units.values():
         _check_replaceable(state, unit.path)
+    if adopt is not None:
+        state.derivatives = _adopt_derivatives(host, paths, state, adopt)
+        save_state(paths, state)
     missing = [name for name in SECRET_NAMES if not _secret_ready(paths, state, name)]
     for name in missing:
         _new_secret(host, paths, state, name)
@@ -3607,6 +4265,10 @@ def _initialize(
     _say(host, "  images, pinned by digest:")
     for role in ROLES:
         _say(host, f"    {role:<9} {state.images[role]}")
+    kept = _usable_derivatives(state)
+    if kept is not None:
+        _say(host, f"  derivatives in {kept['path']}, prepared for the containers")
+    _say(host, f"  SELinux level {state.label_level}, shared by every container")
     _say(host, f"  {len(SECRET_NAMES)} secret files in {paths.secrets} (values are never shown)")
     _say(host, "Next: the host setup (SELinux module and firewall rules), then "
                "aegis-podman install and aegis-podman start.")
@@ -3631,24 +4293,46 @@ def command_install(host: Host, paths: Paths, args: argparse.Namespace) -> int:
         # A lost release tree comes back from the pinned, already local backend image.
         _extract_release(host, paths, state, state.release, state.images["backend"])
         module, templates = _release_renderer(paths, state, state.release)
-        units = _render(module, templates, state, paths)
+        level, drawn = _render_level(state, module)
+        if (drawn or _migration_pending(state)) and state.installed and (
+            state.desired == "running"
+        ):
+            raise InstallError(
+                "the volumes must be relabelled to the shared SELinux level before any "
+                "container runs at it, and install never stops or starts Aegis: run "
+                "aegis-podman stop, then install again"
+            )
+        units = _render(module, templates, dataclasses.replace(state, label_level=level), paths)
         inventory, volumes, networks = _inventory(units)
         _check_backend_network(host, state)
         if not state.installed:
             _check_port(host, state.https_port, _containers(host))
         stale = _stale_units(state, units)
         _check_units(paths, state, units, stale)
+        derivatives = _usable_derivatives(state)
+        if derivatives is not None and module.RENDER_API >= 2:  # these units bind it
+            _check_derivatives(host, paths, state, derivatives)
         # Roots recorded before an uninstall get their drop-ins back; ones in place are kept.
+        roles = _root_roles(state.prefix, inventory["containers"])
         rendered = (
-            _render_roots(host, paths, state, state.roots, state.release, state.images)
-            if state.roots and _roots_need_render(paths, state) else None
+            _render_roots(host, paths, state, state.roots, state.release, state.images,
+                          roles=roles)
+            if state.roots and _roots_need_render(paths, state, roles) else None
         )
         leftover = _leftover_drop_ins(paths, state)
+        if drawn:
+            assert level is not None
+            _adopt_level(state, level, list(state.volumes))
+            save_state(paths, state)
         changed = _write_units(host, paths, state, units, stale, DEFAULT_DEADLINE)
         if rendered is not None:
             _install_drop_ins(paths, state, rendered)
         elif leftover:
             _remove_roots(paths, state)
+        # After the new units are on disk (a reboot then generates those, at the shared
+        # level) and before systemd loads them.
+        if module.RENDER_API >= 2:
+            _migrate_levels(host, paths, state, DEFAULT_DEADLINE)
         _record_inventory(state, inventory, volumes, networks)
         state.installed = True
         _settle(paths, state)
@@ -3686,6 +4370,17 @@ def command_start(host: Host, paths: Paths, args: argparse.Namespace) -> int:
     with _locked(paths):
         state = _installed_state(paths, host.uid, args)
         _refuse_pending(state)
+        unfinished = _migration_pending(state)
+        if unfinished:
+            raise InstallError(
+                f"the volumes {', '.join(unfinished)} are not relabelled to the shared SELinux "
+                "level yet, so the containers could not read them; run aegis-podman install "
+                "again to finish"
+            )
+        if _derivatives_bound(paths, state):  # only units that bind it depend on it
+            derivatives = _usable_derivatives(state)
+            assert derivatives is not None
+            _check_derivatives(host, paths, state, derivatives)
         state.desired = "running"
         save_state(paths, state)
         # Quadlet's network and volume services first, so their failures surface early.
@@ -3764,6 +4459,11 @@ def command_upgrade(host: Host, paths: Paths, args: argparse.Namespace) -> int:
     local_images = _local_images_argument(args.local_images)
     if args.abandon and local_images is not None:
         raise InstallError("--local-images goes with --release, not --abandon")
+    derivatives = (
+        None if args.derivatives_dir is None else _derivatives_argument(args.derivatives_dir)
+    )
+    if args.abandon and derivatives is not None:
+        raise InstallError("--derivatives-dir goes with --release, not --abandon")
     release = None if args.abandon else _release_argument(
         args.release, local_images=local_images is not None,
     )
@@ -3772,6 +4472,10 @@ def command_upgrade(host: Host, paths: Paths, args: argparse.Namespace) -> int:
         state = _ready_state(paths, host.uid, args)
         if local_images is not None:
             _refuse_test_option("--local-images", state.prefix)
+        recorded = _usable_derivatives(state)
+        settled = derivatives is None or (
+            recorded is not None and recorded["path"] == derivatives
+        )
         if args.abandon:
             if state.pending is None:
                 raise InstallError("no upgrade is pending, so there is nothing to abandon")
@@ -3779,13 +4483,16 @@ def command_upgrade(host: Host, paths: Paths, args: argparse.Namespace) -> int:
         elif state.pending is not None:
             if release != state.pending["release"]:
                 _refuse_pending(state)
-            wait = _upgrade(host, paths, args, state, state.pending["release"], None, resume=True)
-        elif release == state.release:
+            wait = _upgrade(host, paths, args, state, state.pending["release"], None, resume=True,
+                            derivatives=derivatives)
+        elif release == state.release and settled:
             _say(host, f"aegis-podman: release {release} is already current; nothing to do")
             return 0
         else:
+            # The current release again, too, when it is to adopt a derivatives directory.
             assert release is not None
-            wait = _upgrade(host, paths, args, state, release, local_images, resume=False)
+            wait = _upgrade(host, paths, args, state, release, local_images, resume=False,
+                            derivatives=derivatives)
     # The wait changes nothing, so other commands may read the record meanwhile.
     if not wait:
         return 0
@@ -3814,6 +4521,26 @@ def _queue_restart(host: Host, inventory: Mapping[str, Any], changed: set[str]) 
            timeout=120)
 
 
+def _boot_id(host: Host) -> str | None:
+    """This boot's ID, or None when the kernel does not tell."""
+    try:
+        text = host.boot_id.read_text(encoding="ascii").strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    return text if BOOT_ID.fullmatch(text) else None
+
+
+def _restart_may_have_run(host: Host, pending: Mapping[str, Any]) -> bool:
+    """Whether the pending release's units may already have run, so that its migrations may
+    have changed the schema: its restart was queued, or the host rebooted since the upgrade
+    recorded it (the boot generated the new units, already on disk, and the socket or a
+    manual start may have started them). A boot that cannot be read now counts as another."""
+    if pending.get("restart_queued"):
+        return True
+    recorded = pending.get("boot_id")
+    return recorded is not None and recorded != _boot_id(host)
+
+
 def _abandon(host: Host, paths: Paths, args: argparse.Namespace, state: State) -> bool:
     """Go back from a pending upgrade to the current release; True when a wait follows.
 
@@ -3824,16 +4551,27 @@ def _abandon(host: Host, paths: Paths, args: argparse.Namespace, state: State) -
     """
     assert state.pending is not None
     abandoned = state.pending["release"]
-    if state.pending.get("restart_queued"):
-        backup = (f"the restart into {abandoned} was already queued, so its migrations may have "
-                  f"changed the database schema, and {state.release} may not run on it. "
-                  "Restore a database backup from before the upgrade first")
+    if _restart_may_have_run(host, state.pending):
+        cause = (
+            f"the restart into {abandoned} was already queued"
+            if state.pending.get("restart_queued") else
+            f"the host rebooted while the upgrade to {abandoned} was pending, so its units, "
+            "already on disk, may have started"
+        )
+        backup = (f"{cause}, so its migrations may have changed the database schema, and "
+                  f"{state.release} may not run on it. Restore a database backup from before "
+                  "the upgrade first")
         if not args.allow_downgrade:
             raise InstallError(f"{backup}, then rerun with --allow-downgrade")
         print(f"aegis-podman: warning: {backup}.", file=host.err)
     next_step = (f"; the upgrade to {abandoned} is still pending: go back again with "
                  f"aegis-podman upgrade --abandon, or finish it with aegis-podman upgrade "
                  f"--release {abandoned}")
+    if "previous_derivatives" in state.pending:
+        # A directory this upgrade adopted goes with it; the directory itself stays prepared,
+        # and a later --derivatives-dir can take it again.
+        state.derivatives = state.pending["previous_derivatives"]
+        save_state(paths, state)
     try:
         running, inventory, volumes, networks = _abandon_units(host, paths, args, state)
     except InstallError as error:
@@ -3855,23 +4593,42 @@ def _abandon(host: Host, paths: Paths, args: argparse.Namespace, state: State) -
 def _abandon_units(
     host: Host, paths: Paths, args: argparse.Namespace, state: State,
 ) -> tuple[bool, dict[str, Any], list[str], list[str]]:
-    """Install the current release's units again; restart them when Aegis should run."""
+    """Install the current release's units again; restart them when Aegis should run.
+
+    Going back to a release before the shared SELinux level, whose containers run at random
+    levels again, relabels the volumes already moved to the shared level to s0, which every
+    level reads, and forgets the level: the next upgrade draws one and migrates again.
+    """
     _preflight(host, paths)
     _extract_release(host, paths, state, state.release, state.images["backend"])
     module, templates = _release_renderer(paths, state, state.release)
-    units = _render(module, templates, state, paths)
+    level, drawn = _render_level(state, module)
+    units = _render(module, templates, dataclasses.replace(state, label_level=level), paths)
     inventory, volumes, networks = _inventory(units)
     _check_backend_network(host, state)
     stale = _stale_units(state, units)
     _check_units(paths, state, units, stale)
     _check_replaceable(state, paths.env_file)
-    # The drop-ins go back to the current release's aegisctl render too.
+    # The drop-ins go back to the current release's aegisctl render too: one for each root
+    # role that release has a unit for.
     rendered = (
-        _render_roots(host, paths, state, state.roots, state.release, state.images)
+        _render_roots(host, paths, state, state.roots, state.release, state.images,
+                      roles=_root_roles(state.prefix, inventory["containers"]))
         if state.roots else None
     )
     leftover = _leftover_drop_ins(paths, state)
     running = state.desired == "running"
+    if module.RENDER_API < 2 and state.label_level is not None:
+        moved = [name for name, done in (state.level_migration or {}).items() if done]
+        _relabel_volumes(host, paths, state, moved, "s0", migrated=False, timeout=args.timeout)
+        state.label_level = state.level_migration = None
+        save_state(paths, state)
+    elif module.RENDER_API >= 2:
+        if drawn:
+            assert level is not None
+            _adopt_level(state, level, list(state.volumes))
+            save_state(paths, state)
+        _migrate_levels(host, paths, state, args.timeout)
     changed = _write_units(host, paths, state, units, stale, args.timeout)
     if rendered is not None:
         _install_drop_ins(paths, state, rendered)
@@ -3885,7 +4642,7 @@ def _abandon_units(
 
 def _upgrade(
     host: Host, paths: Paths, args: argparse.Namespace, state: State, release: str,
-    local_images: Mapping[str, str] | None, *, resume: bool,
+    local_images: Mapping[str, str] | None, *, resume: bool, derivatives: str | None = None,
 ) -> bool:
     """Move to ``release`` in two phases; True when a wait for readiness follows.
 
@@ -3894,8 +4651,12 @@ def _upgrade(
     stops in between leaves the pending record: the same command finishes it, and
     ``upgrade --abandon`` goes back. ``local_images`` are the deployment test's images,
     used by ID in place of a pull; a test release is never ordered by its creation label.
+    ``derivatives`` adopts that directory for the derivatives volume once the images are in
+    place (``_derivatives_request`` says when it can). It is prepared then, and recorded with
+    the pending record, so a failure before that leaves nothing recorded.
     """
     _preflight(host, paths)
+    adopt = _derivatives_request(host, paths, state, derivatives)
     if resume:
         assert state.pending is not None
         images, created = dict(state.pending["images"]), state.pending.get("created")
@@ -3912,9 +4673,25 @@ def _upgrade(
             images, created = _local(host, local_images)
         if not (TEST_RELEASE.fullmatch(release) or TEST_RELEASE.fullmatch(state.release)):
             _check_order(state, release, created, args.allow_downgrade)
+    planned = _usable_derivatives(state)
+    if adopt:
+        assert derivatives is not None
+        planned = _adopt_derivatives(host, paths, state, derivatives)
     _extract_release(host, paths, state, release, images["backend"])
-    candidate = dataclasses.replace(state, release=release, images=images, local_images=local)
     module, templates = _release_renderer(paths, state, release)
+    if module.RENDER_API < 2 and state.label_level is not None:
+        raise InstallError(
+            f"release {release} runs every container at a random SELinux level, which cannot "
+            f"read the volumes moved to this install's level {state.label_level}; going back "
+            "is upgrade --abandon from a pending upgrade, or a restore"
+        )
+    level, drawn = _render_level(state, module)
+    if planned is not None and module.RENDER_API >= 2:  # these units bind it
+        _check_derivatives(host, paths, state, planned)
+    candidate = dataclasses.replace(
+        state, release=release, images=images, local_images=local, label_level=level,
+        derivatives=planned,
+    )
     units = _render(module, templates, candidate, paths)
     inventory, volumes, networks = _inventory(units)
     _check_backend_network(host, state)
@@ -3922,6 +4699,10 @@ def _upgrade(
         state.release, state.images, state.created = release, images, created
         state.local_images = local
         state.pending = None
+        if drawn:  # nothing runs; install relabels the recorded volumes before it writes units
+            assert level is not None
+            _adopt_level(state, level, list(state.volumes))
+        state.derivatives = planned
         _record_history(state, release)
         _check_replaceable(state, paths.env_file)
         _write_config(paths, state)
@@ -3934,19 +4715,41 @@ def _upgrade(
     # The new release's aegisctl renders the drop-ins (their Exec= replaces the template's).
     # Rendering first leaves nothing pending when a root cannot be observed.
     rendered = (
-        _render_roots(host, paths, state, state.roots, release, images, local_images=local)
+        _render_roots(host, paths, state, state.roots, release, images, local_images=local,
+                      roles=_root_roles(state.prefix, inventory["containers"]))
         if state.roots else None
     )
     leftover = _leftover_drop_ins(paths, state)
+    # What the derivatives record was before this upgrade, which an abandon restores.
+    previous_derivatives = (
+        (state.pending or {}).get("previous_derivatives", state.derivatives) if resume
+        else state.derivatives
+    )
+    # A resumed upgrade whose restart may already have run stays one: going back from it is
+    # a downgrade.
+    queued = resume and _restart_may_have_run(host, state.pending or {})
     state.pending = {
         "release": release, "images": images, "created": created, "local_images": local,
+        "previous_derivatives": previous_derivatives, "boot_id": _boot_id(host),
+        **({"restart_queued": True} if queued else {}),
     }
+    if drawn:  # with the pending record, so an interrupted migration resumes or goes back
+        assert level is not None
+        _adopt_level(state, level, list(state.volumes))
+    # The adopted directory, with the pending record: an abandon keeps it unbound, replaceable.
+    state.derivatives = planned
     # Objects the new units may create are recorded now, so a purge finds them either way.
     state.volumes = list(dict.fromkeys([*state.volumes, *volumes]))
     state.networks = list(dict.fromkeys([*state.networks, *networks]))
     save_state(paths, state)
-    finish = (f"; the upgrade is pending: finish it with aegis-podman upgrade --release "
-              f"{release}, or go back with aegis-podman upgrade --abandon")
+    moving = bool(_migration_pending(state)) and module.RENDER_API >= 2
+    finish = (
+        "; the upgrade is pending" + (
+            " while the volumes move to the shared SELinux level: start nothing by hand, and "
+            "after a reboot run the upgrade again before using Aegis" if moving else ""
+        ) + f": finish it with aegis-podman upgrade --release {release}, or go back with "
+        "aegis-podman upgrade --abandon"
+    )
     running = state.desired == "running"
     try:
         changed = _write_units(host, paths, state, units, stale, args.timeout)
@@ -3954,12 +4757,19 @@ def _upgrade(
             _install_drop_ins(paths, state, rendered)
         elif leftover:
             _remove_roots(paths, state)
+        if module.RENDER_API >= 2:
+            # One time, for a record from before the shared level: stop everything, then move
+            # the volumes recorded before it to that level. The new units are already on disk,
+            # so a reboot generates those; systemd loads them only after the move.
+            _migrate_levels(host, paths, state, args.timeout)
         _check(host, [*SYSTEMCTL, "daemon-reload"], "systemctl --user daemon-reload", timeout=120)
         if running:
             # From here on the new release's migrate may run, so going back is a downgrade.
             state.pending["restart_queued"] = True
             save_state(paths, state)
             _queue_restart(host, inventory, changed)
+        else:
+            _renew_derivatives_volume(host, state, args.timeout)
     except InstallError as error:
         raise InstallError(f"{error}{finish}") from None
     except BaseException:
@@ -4065,6 +4875,8 @@ def _bootstrap_options(text: str, state: State, paths: Paths) -> list[str]:
             options.append(f"--gidmap={value}")
         elif key == "SecurityLabelType":
             options.append(f"--security-opt=label=type:{value}")
+        elif key == "SecurityLabelLevel":
+            options.append(f"--security-opt=label=level:{value}")
         elif key == "RunInit" and value == "true":
             options.append("--init")
     return options
@@ -4252,6 +5064,11 @@ def command_uninstall(host: Host, paths: Paths, args: argparse.Namespace) -> int
         leftovers = _purge(host, paths, state, force=args.force_recorded)
     _say(host, "aegis-podman: removed the recorded volumes, networks, secrets and records; "
                "pulled images are kept")
+    kept = _usable_derivatives(state)
+    if kept is not None:
+        # Removing the volume only unbinds it: the operator's directory is never touched.
+        _say(host, f"The derivatives directory {kept['path']} is kept as it is, "
+                   "with its content, which the container user owns")
     if state.firewall_zones:
         # The installer never runs anything privileged: the operator reviews and runs these.
         _say(host, "The host setup's firewall rules and SELinux module stay loaded. To undo "
@@ -4332,6 +5149,12 @@ def _parser() -> argparse.ArgumentParser:
     init.add_argument("--registry", default=DEFAULT_REGISTRY)
     init.add_argument("--backend-subnet", help="a free private /24 instead of the first free "
                                                "candidate")
+    derivatives_help = (
+        "an empty directory of yours, outside every root and on a disk, for the media "
+        "thumbnails, previews and transcodes (default: a Podman volume). It is prepared for "
+        "the containers and recorded, and never changes afterwards"
+    )
+    init.add_argument("--derivatives-dir", metavar="DIRECTORY", help=derivatives_help)
     # The deployment test's options (spec D12), hidden from help and refused for the
     # production prefix: images built locally, used by ID, and plain container_t readers.
     init.add_argument("--local-images", help=argparse.SUPPRESS)
@@ -4359,6 +5182,9 @@ def _parser() -> argparse.ArgumentParser:
     upgrade.add_argument("--allow-downgrade", action="store_true",
                          help="allow an older release, one that cannot be ordered, or "
                               "--abandon after the restart into the new release was queued")
+    upgrade.add_argument("--derivatives-dir", metavar="DIRECTORY", help=(
+        f"{derivatives_help}. Adopting one needs Aegis stopped and no derivatives volume yet"
+    ))
     upgrade.add_argument("--local-images", help=argparse.SUPPRESS)
     deadline(upgrade)
     command("ca-cert", "print Caddy's local root certificate for client devices")

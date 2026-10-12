@@ -32,6 +32,7 @@ Environment=AEGIS_DB_PASSWORD_FILE=/run/secrets/db_media_password
 Network=@@PREFIX@@backend.network:alias=media
 Volume=@@PREFIX@@derivatives.volume:/srv/aegis/derivatives
 Volume=@@PREFIX@@quarantine.volume:/srv/aegis/quarantine
+Volume=@@PREFIX@@media-scratch.volume:/srv/aegis/scratch
 ReadOnly=true
 Tmpfs=/tmp:size=64m,noexec,nosuid,nodev
 DropCapability=ALL
@@ -40,6 +41,10 @@ Unmask=/sys/devices/virtual/powercap
 # D5: read originals through the operator's group only; D6: the read-only reader type.
 GIDMap=+g10001:@@@HOST_GID@@:1
 SecurityLabelType=@@READER_TYPE@@
+# One SELinux MCS level, drawn per install, for every Aegis container: a file carries its
+# creator's level, so the containers exchange files on shared volumes, while every other
+# container's own level keeps it out.
+SecurityLabelLevel=@@LABEL_LEVEL@@
 # Compose's file secrets are read-only binds. The installer owns these files: mode 0600,
 # owned by container 10001:10001, labeled container_file_t.
 Volume=@@SECRETS_DIR@@/django-secret-key:/run/secrets/django_secret_key:ro

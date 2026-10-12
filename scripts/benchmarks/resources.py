@@ -61,11 +61,13 @@ SECRET_NAMES = (
     "django-secret-key", "auth-throttle-hmac-key", "e2e-alice-password",
     "e2e-bob-password", "e2e-admin-password", "bench-user-password",
 )
-SERVICES = ("postgres", "migrate", "web", "operations", "indexer", "media", "gateway")
+SERVICES = (
+    "postgres", "migrate", "web", "operations", "indexer", "media", "media-processor", "gateway",
+)
 NETWORKS = ("backend", "edge", "tls-hop")
 VOLUMES = (
     "indexer-coordination", "postgres-data", "staging", "derivatives",
-    "model-cache", "quarantine", "frontier-outbox",
+    "model-cache", "quarantine", "frontier-outbox", "media-scratch",
 )
 CPUSET = "0-3"
 ONEOFF_SERVICES = frozenset({"migrate", "web"})
@@ -241,7 +243,11 @@ def check_compose_config(config: Mapping[str, Any], *, project: str,
         if role != "postgres" and (not service.get("read_only")
                                    or service.get("cap_drop") != ["ALL"]):
             raise BenchmarkResourceError("benchmark runtime isolation is missing")
-        if role not in ("gateway", "postgres") and set(service.get("networks", {})) != {
+        if role == "media-processor":
+            # The media decoder has no network at all (spec M2).
+            if service.get("network_mode") != "none" or service.get("networks"):
+                raise BenchmarkResourceError("benchmark media processor must have no network")
+        elif role not in ("gateway", "postgres") and set(service.get("networks", {})) != {
             "backend",
         }:
             raise BenchmarkResourceError("benchmark backend must have no internet egress")

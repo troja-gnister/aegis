@@ -521,11 +521,14 @@ def _resource_rules(operation: str, token: str) -> tuple[ProjectResourceRule, ..
         )),)
     if operation != "up":
         raise ValueError("unknown E2E resource transition")
-    services = ("postgres", "migrate", "web", "operations", "indexer", "media", "gateway")
+    services = (
+        "postgres", "migrate", "web", "operations", "indexer", "media", "media-processor",
+        "gateway",
+    )
     networks = ("backend", "edge", "tls-hop")
     volumes = (
         "indexer-coordination", "postgres-data", "staging", "derivatives",
-        "model-cache", "quarantine", "frontier-outbox",
+        "model-cache", "quarantine", "frontier-outbox", "media-scratch",
     )
     return (
         *(ProjectResourceRule("container", (
@@ -688,11 +691,20 @@ def check_compose(config: dict[str, Any]) -> None:
         raise ValueError("E2E services must not have a restart policy")
     if not config["networks"]["backend"]["internal"]:
         raise ValueError("E2E backend requires an internal network")
-    for role in ("web", "migrate", "operations", "indexer", "media", "gateway"):
-        service = services[role]
+    for role in ("web", "migrate", "operations", "indexer", "media", "media-processor",
+                 "gateway"):
+        service = services.get(role)
+        if service is None:
+            raise ValueError("E2E services are incomplete")
         if not service["read_only"] or service["cap_drop"] != ["ALL"]:
             raise ValueError("E2E runtime isolation is missing")
-        if role != "gateway" and set(service["networks"]) != {"backend"}:
+        if role == "media-processor":
+            # The media decoder has no network at all and no credential (spec M2).
+            if service.get("network_mode") != "none" or service.get("networks"):
+                raise ValueError("E2E media processor must have no network")
+            if service.get("secrets") or service.get("environment"):
+                raise ValueError("E2E media processor must hold no secret or setting")
+        elif role != "gateway" and set(service["networks"]) != {"backend"}:
             raise ValueError("E2E backend must have no internet egress")
         roots = [
             volume for volume in service.get("volumes", [])
@@ -923,8 +935,11 @@ _PUBLIC_REFUSALS: dict[type[BaseException], frozenset[str]] = {
         "AEGIS_UID and AEGIS_GID must be decimal synthetic identities",
         "E2E backend must have no internet egress",
         "E2E backend requires an internal network",
+        "E2E media processor must have no network",
+        "E2E media processor must hold no secret or setting",
         "E2E ports must bind loopback",
         "E2E runtime isolation is missing",
+        "E2E services are incomplete",
         "E2E services must not have a restart policy",
         "E2E volumes must be disposable and project-scoped",
         "every original mount must be read-only",

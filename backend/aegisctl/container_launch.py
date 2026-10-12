@@ -31,6 +31,7 @@ CANONICAL_SERVICES = frozenset(
         "operations",
         "indexer",
         "media",
+        "media-processor",
         "gateway",
         "caddy",
         "caddy-local",
@@ -41,6 +42,15 @@ CANONICAL_SERVICES = frozenset(
 # with U (owner from the fixed process user) and notmpcopyup (initially empty mounts),
 # and it gains exactly one sysctl, ip_unprivileged_port_start=0.
 CADDY_SERVICES = frozenset({"caddy", "caddy-local"})
+# The dev and test stacks' fixed SELinux MCS level, which compose.podman.yaml gives every
+# service beside the mask option: a file carries its creator's level, so the containers can
+# exchange files on shared volumes (the media worker and processor, the worker and the
+# gateway). Production installs draw their own random level per install (aegis-podman) and
+# never this one. Docker never reads the Podman overlay.
+DEV_LABEL_LEVEL = "s0:c403,c871"
+LEVEL_OPTION = f"label=level:{DEV_LABEL_LEVEL}"
+# Exactly what the overlay adds to each service's security options.
+PODMAN_OVERLAY_OPTIONS = (MASK_OPTION, LEVEL_OPTION)
 _CADDY_USER = "10001:10001"
 _CADDY_TMPFS_MODES = (("/config", "0700"), ("/tmp", "1777"))
 _TmpfsOptions = tuple[tuple[str, str | None], ...]
@@ -391,8 +401,9 @@ def _checked_compose_inputs(
         options = service.get("security_opt", [])
         original_options = before[name].get("security_opt", [])
         expected_options = [*original_options]
-        if MASK_OPTION not in expected_options:
-            expected_options.append(MASK_OPTION)
+        for overlay_option in PODMAN_OVERLAY_OPTIONS:
+            if overlay_option not in expected_options:
+                expected_options.append(overlay_option)
         if collections.Counter(options) != collections.Counter(expected_options):
             raise PodmanMaskError("Podman overlay changed existing security options")
         expected = before[name]
@@ -412,6 +423,12 @@ def _checked_compose_inputs(
             for option in options
         ):
             raise PodmanMaskError("conflicting effective Compose mask policy")
+        # The one shared level and no other SELinux label setting (type, user, role, disable).
+        if options.count(LEVEL_OPTION) != 1 or any(
+            option != LEVEL_OPTION and option.startswith(("label=", "label:"))
+            for option in options
+        ):
+            raise PodmanMaskError("effective Compose SELinux level differs from the shared one")
         if service.get("profiles", []) != before[name].get("profiles", []):
             raise PodmanMaskError("Podman overlay changed service profiles")
         for mount in service.get("volumes", []):

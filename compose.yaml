@@ -187,6 +187,8 @@ services:
     volumes:
       - derivatives:/srv/aegis/derivatives
       - quarantine:/srv/aegis/quarantine
+      # The only channel to the processor: job files out, validated results in (spec M2).
+      - media-scratch:/srv/aegis/scratch
     secrets:
       - source: django-secret-key
         target: django_secret_key
@@ -202,12 +204,52 @@ services:
       retries: 20
       start_period: 10s
 
+  # The only service that decodes media (spec M2): no network at all, no secret and no
+  # database setting. It shares nothing with the media worker but the scratch volume, and
+  # `aegisctl mounts render` binds the roots into it read-only, as into the other readers.
+  # Its bounds follow the processor's own limits: AEGIS_MEDIA_PROCESSOR_CONCURRENCY (default
+  # 2) children at a time, each under its stage's RLIMIT_AS, the largest being
+  # AEGIS_MEDIA_TRANSCODE_MEMORY_MB (default 3072). Memory is the concurrency times that
+  # budget plus 1 GiB for the loop, the job children and /tmp; two CPUs, while the children
+  # also run at nice 10; 256 tasks for the children's and tools' threads. Raise these
+  # together with the concurrency or the stage budgets. Docker refuses `cpus: 2` on a host
+  # with fewer than two CPUs; lower it there.
+  media-processor:
+    image: aegis-media
+    build:
+      context: .
+      dockerfile: docker/media.Dockerfile
+      args:
+        AEGIS_UID: "${AEGIS_UID:-10001}"
+        AEGIS_GID: "${AEGIS_GID:-10001}"
+    user: "${AEGIS_UID:-10001}:${AEGIS_GID:-10001}"
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid,nodev
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    # The loop is a subreaper of its own; the init reaps whatever escapes it at PID 1.
+    init: true
+    pids_limit: 256
+    mem_limit: 7g
+    cpus: 2
+    volumes:
+      - media-scratch:/srv/aegis/scratch
+    restart: unless-stopped
+
   gateway:
     image: aegis-gateway
     build:
       context: .
       dockerfile: docker/gateway.Dockerfile
+      # The worker's uid owns the derivatives mount point (docker/gateway.Dockerfile).
+      args:
+        AEGIS_UID: "${AEGIS_UID:-10001}"
     user: "101:101"
+    # The media worker publishes derivatives group-readable (0640 in 0750 directories) under
+    # the runtime group, so nginx reads them through that group and nothing else.
+    group_add: ["${AEGIS_GID:-10001}"]
     environment:
       NGINX_ENTRYPOINT_QUIET_LOGS: "1"
       AEGIS_PUBLIC_URL: "${AEGIS_PUBLIC_URL:-http://localhost:8080}"
@@ -303,6 +345,7 @@ volumes:
   model-cache:
   quarantine:
   frontier-outbox:
+  media-scratch:
 
 secrets:
   postgres-superuser-password:

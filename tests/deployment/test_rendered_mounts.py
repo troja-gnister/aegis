@@ -749,6 +749,14 @@ expected_identity = "{local_identity(source)}"
             if mount["target"] == "/srv/aegis/roots/photos"
         )
         assert root_mount["read_only"] is True
+    # The media processor reads the roots read-only beside its scratch volume, and keeps its
+    # own command, no network and no setting (spec M2).
+    processor = services["media-processor"]
+    assert "command" not in processor and "environment" not in processor
+    assert processor["network_mode"] == "none"
+    assert {
+        (mount["target"], mount.get("read_only", False)) for mount in processor["volumes"]
+    } == {("/srv/aegis/roots/photos", True), ("/srv/aegis/scratch", False)}
     generated = yaml.safe_load(output.read_text(encoding="ascii"))
     for service in generated["services"].values():
         targets = [mount["target"] for mount in service.get("volumes", [])]

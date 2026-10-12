@@ -27,6 +27,10 @@ DropCapability=ALL
 AddCapability=CHOWN DAC_OVERRIDE FOWNER SETGID SETUID
 NoNewPrivileges=true
 Unmask=/sys/devices/virtual/powercap
+# One SELinux MCS level, drawn per install, for every Aegis container: a file carries its
+# creator's level, so the containers exchange files on shared volumes, while every other
+# container's own level keeps it out.
+SecurityLabelLevel=@@LABEL_LEVEL@@
 # Compose's file secrets are read-only binds, and the entrypoint refuses any other source
 # mount; Podman's own secrets are mounted read-write. The installer owns these files: mode
 # 0600, owned by container 10001:10001, labeled container_file_t. As under compose, the root

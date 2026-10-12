@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import dataclasses
 import ipaddress
 import os
 import re
@@ -15,9 +16,11 @@ import pytest
 from tests.support.podman_deploy import (
     INSTALLER,
     SAMPLE_BACKEND_SUBNET,
+    SAMPLE_DERIVATIVES_DIR,
     SAMPLE_HOST_GID,
     SAMPLE_IMAGES,
     SAMPLE_INSTALL_TOKEN,
+    SAMPLE_LABEL_LEVEL,
     SAMPLE_PORT,
     SAMPLE_PREFIX,
     SAMPLE_READER_TYPE,
@@ -35,9 +38,11 @@ from tests.support.podman_deploy import (
 NETWORKS = ("backend", "edge", "tls-hop")
 VOLUMES = (
     "postgres-data", "indexer-coordination", "staging", "derivatives", "quarantine", "caddy-data",
+    "media-scratch",
 )
 CONTAINERS = (
-    "postgres", "migrate", "web", "operations", "indexer", "media", "gateway", "caddy",
+    "postgres", "migrate", "web", "operations", "indexer", "media", "media-processor", "gateway",
+    "caddy",
 )
 TEMPLATES = (
     *(f"{name}.network" for name in NETWORKS),
@@ -46,19 +51,21 @@ TEMPLATES = (
     "caddy.socket",
 )
 BACKEND = ("migrate", "web", "operations", "indexer", "media")
-LONG_RUNNING = ("postgres", "web", "operations", "indexer", "media", "gateway", "caddy")
+LONG_RUNNING = (
+    "postgres", "web", "operations", "indexer", "media", "media-processor", "gateway", "caddy",
+)
 # Units whose systemd start completes only once the container's health check passes.
 HEALTH_GATED = ("postgres", "web", "operations", "indexer", "media")
 # D5: the containers that mount originals, plus every other backend-image service: web
 # shares staging with operations, and all of them read the mount manifest, which must look
 # owned by 10001:10001 inside each.
 GROUP_MAPPED = {"gateway": 101, "operations": 10001, "indexer": 10001, "media": 10001,
-                "web": 10001, "migrate": 10001}
+                "media-processor": 10001, "web": 10001, "migrate": 10001}
 # D6: the containers that mount originals run as the dedicated reader type.
-READER_LABELED = {"gateway", "operations", "indexer", "media"}
-IMAGE_ROLE = {"postgres": "postgres", "gateway": "gateway", "caddy": "caddy"} | dict.fromkeys(
-    BACKEND, "backend",
-)
+READER_LABELED = {"gateway", "operations", "indexer", "media", "media-processor"}
+IMAGE_ROLE = {
+    "postgres": "postgres", "gateway": "gateway", "caddy": "caddy", "media-processor": "media",
+} | dict.fromkeys(BACKEND, "backend")
 PUBLIC_URL = f"https://aegis.example.test:{SAMPLE_PORT}"
 # Compose's file secrets: each is a read-only bind of <secrets dir>/<name> at its target.
 SECRET_BINDS = {
@@ -78,7 +85,7 @@ SECRET_BINDS = {
     role: {"django-secret-key": "/run/secrets/django_secret_key",
            f"db-{role}-password": f"/run/secrets/db_{role}_password"}
     for role in ("operations", "indexer", "media")
-} | {"gateway": {}, "caddy": {}}
+} | {"gateway": {}, "caddy": {}, "media-processor": {}}
 # Fixed backend addresses: nginx pins web and web pins the gateway when each starts.
 STATIC_BACKEND_HOSTS = {"web": 10, "gateway": 11}
 IMAGE_ID = "e" * 64
@@ -114,7 +121,9 @@ def object_references(unit: Unit) -> list[str]:
         )
         for value in unit.values(section, key)
     ]
-    names += [value.partition(":")[0] for value in unit.values("Container", "Network")]
+    # Network=none names no object: the processor has no network at all.
+    names += [value.partition(":")[0] for value in unit.values("Container", "Network")
+              if value != "none"]
     names += [
         value.partition(":")[0] for value in unit.values("Container", "Volume")
         if not value.startswith("/")
@@ -207,6 +216,8 @@ INVALID_VALUES = [
     ("image_backend", "registry.example.test:65536/aegis-backend@sha256:" + "a" * 64),
     ("image_backend", "registry.example.test:0/aegis-backend@sha256:" + "a" * 64),
     ("image_gateway", IMAGE_ID), ("image_postgres", "sha256:" + "a" * 64), ("image_caddy", ""),
+    ("image_media", IMAGE_ID), ("image_media", "registry.example.test/aegis-media:sha-" + "0" * 40),
+    ("image_media", None),
     ("host_gid", 0), ("host_gid", -1), ("host_gid", True), ("host_gid", "1000"),
     ("host_gid", 2**32 - 1),
     ("reader_type", ""), ("reader_type", "container"), ("reader_type", "spc_t"),
@@ -245,6 +256,19 @@ INVALID_VALUES = [
     ("backend_subnet", "010.123.45.0/24"), ("backend_subnet", 24),
     ("install_token", ""), ("install_token", "0" * 31), ("install_token", "0" * 33),
     ("install_token", "A" * 32), ("install_token", "g" * 32), ("install_token", 7),
+    # The shared MCS level: s0, two categories, the lower first, at most c1023.
+    ("label_level", ""), ("label_level", "s0"), ("label_level", "s0:c5"),
+    ("label_level", "s0:c5,c5"), ("label_level", "s0:c9,c5"), ("label_level", "s0:c05,c9"),
+    ("label_level", "s0:c5,c1024"), ("label_level", "s0:c5,c10000"), ("label_level", "s1:c5,c9"),
+    ("label_level", "s0-s0:c5,c9"), ("label_level", "s0:c5.c9"), ("label_level", "s0:c5,c9,c11"),
+    ("label_level", "s0:c5,c9 "), ("label_level", 7), ("label_level", None),
+    # The derivatives directory is bound by Device=: literal, absolute and normalized.
+    ("derivatives_dir", ""), ("derivatives_dir", "relative/derivatives"), ("derivatives_dir", "/"),
+    ("derivatives_dir", "/srv/../derivatives"), ("derivatives_dir", "/srv//derivatives"),
+    ("derivatives_dir", "/srv/derivatives/"), ("derivatives_dir", "/srv/a:b"),
+    ("derivatives_dir", "/srv/a,b"), ("derivatives_dir", "/srv/a b"),
+    ("derivatives_dir", "/srv/%h/derivatives"), ("derivatives_dir", "/srv/$HOME"),
+    ("derivatives_dir", "/srv/\u00e4"), ("derivatives_dir", 7), ("derivatives_dir", b"/srv/d"),
 ]
 
 
@@ -258,14 +282,15 @@ def test_each_invalid_value_class_is_refused(field: str, value: object) -> None:
 
 @pytest.mark.parametrize("field", [
     "prefix", "release", "reader_type", "image_backend", "image_gateway", "image_postgres",
-    "image_caddy", "names", "secrets_dir", "backend_subnet", "install_token",
+    "image_caddy", "image_media", "names", "secrets_dir", "backend_subnet", "install_token",
+    "derivatives_dir", "label_level",
 ])
 @pytest.mark.parametrize("hazard", ["\n", "\r", "\0", "@@"])
 def test_values_with_line_breaks_nul_or_token_markers_are_refused(
     field: str, hazard: str,
 ) -> None:
     installer = load_installer()
-    current = getattr(sample_config(), field)
+    current = getattr(sample_config(derivatives_dir=SAMPLE_DERIVATIVES_DIR), field)
     value: object = (
         (current[0] + hazard, *current[1:]) if isinstance(current, tuple) else current + hazard
     )
@@ -275,6 +300,8 @@ def test_values_with_line_breaks_nul_or_token_markers_are_refused(
 
 
 @pytest.mark.parametrize(("field", "value"), [
+    ("label_level", "s0:c0,c1"), ("label_level", "s0:c0,c1023"),
+    ("label_level", "s0:c1022,c1023"),
     ("reader_type", "container_t"), ("reader_type", "aegis_reader2.process"),
     ("secrets_dir", "/srv/aegis_1.2@x+y-z/Secrets"),
     ("image_backend", "registry.example.test:65535/aegis-backend@sha256:" + "a" * 64),
@@ -327,6 +354,10 @@ def test_each_container_joins_its_networks_under_its_compose_service_name() -> N
         assert tuple(joined) == networks, name
         for network, aliases in joined.items():
             assert aliases[0] == name, (name, network)
+    # Spec M2: the processor joins no network at all, as compose's network_mode: none.
+    processor = rendered_units[f"{SAMPLE_PREFIX}media-processor.container"]
+    assert processor.values("Container", "Network") == ["none"]
+    assert set(expected_networks) | {"media-processor"} == set(CONTAINERS)
 
 
 def test_tls_gateway_alias_exists_only_on_the_gateway_tls_hop_line() -> None:
@@ -437,6 +468,10 @@ def test_startup_order_follows_compose_conditions_and_web_finds_the_gateway() ->
     assert references("caddy", "After") == {"caddy.socket", "gateway", "web"}
     assert references("caddy", "Requires") == {"caddy.socket"}
     assert references("postgres", "After") == set()
+    # The processor needs neither the database nor the worker: either one creates the
+    # scratch directories, and Quadlet orders it after its scratch volume by itself.
+    for key in ("After", "Requires", "Wants"):
+        assert references("media-processor", key) == set(), key
     for name in CONTAINERS:
         notify = unit(name).value("Container", "Notify")
         assert notify == ("healthy" if name in HEALTH_GATED else None), name
@@ -659,3 +694,129 @@ def test_installer_is_a_python_311_standard_library_executable() -> None:
     assert INSTALLER.stat().st_mode & stat.S_IXUSR
     assert os.access(INSTALLER, os.X_OK)
     assert imported <= sys.stdlib_module_names | {"__future__"}
+
+
+# -- the media processor and the derivatives volume (spec M2, M8) -------------------------------
+
+
+def test_the_media_processor_is_offline_credential_free_read_only_and_bounded() -> None:
+    processor = container("media-processor")
+
+    assert processor.value("Container", "Image") == SAMPLE_IMAGES["media"]
+    assert processor.values("Container", "Network") == ["none"]
+    # No secret bind, no database setting, no environment at all.
+    assert processor.values("Container", "Environment") == []
+    assert processor.values("Container", "Volume") == [
+        f"{SAMPLE_PREFIX}media-scratch.volume:/srv/aegis/scratch",
+    ]
+    assert processor.value("Container", "Exec") is None  # the image's own processor loop
+    assert (processor.value("Container", "User"), processor.value("Container", "Group")) == (
+        "10001", "10001",
+    )
+    assert processor.value("Container", "ReadOnly") == "true"
+    assert processor.values("Container", "Tmpfs") == ["/tmp:size=64m,noexec,nosuid,nodev"]
+    assert processor.value("Container", "DropCapability") == "ALL"
+    assert processor.value("Container", "AddCapability") is None
+    assert processor.value("Container", "NoNewPrivileges") == "true"
+    assert processor.value("Container", "RunInit") == "true"
+    assert processor.value("Container", "Unmask") == "/sys/devices/virtual/powercap"
+    assert processor.value("Container", "PidsLimit") == "256"
+    assert processor.value("Container", "Memory") == "7g"
+    assert processor.value("Service", "CPUQuota") == "200%"
+    assert processor.value("Container", "HealthCmd") is None
+    assert processor.value("Container", "Notify") is None
+
+
+def test_only_the_worker_and_the_processor_share_scratch_and_only_the_gateway_reads_derivatives(
+) -> None:
+    mounts: dict[str, dict[str, str]] = {}
+    for name in CONTAINERS:
+        for line in container(name).values("Container", "Volume"):
+            source, target, *options = line.split(":")
+            if source.startswith(SAMPLE_PREFIX):
+                volume = source.removeprefix(SAMPLE_PREFIX).removesuffix(".volume")
+                mounts.setdefault(volume, {})[name] = ":".join([target, *options])
+
+    assert mounts["media-scratch"] == {
+        "media": "/srv/aegis/scratch", "media-processor": "/srv/aegis/scratch",
+    }
+    assert mounts["derivatives"] == {
+        "media": "/srv/aegis/derivatives", "gateway": "/srv/aegis/derivatives:ro",
+    }
+    assert mounts["quarantine"] == {"media": "/srv/aegis/quarantine"}
+
+
+def test_the_derivatives_volume_binds_the_operator_directory_only_when_configured() -> None:
+    plain = units()
+    bound = units(derivatives_dir=SAMPLE_DERIVATIVES_DIR)
+    name = f"{SAMPLE_PREFIX}derivatives.volume"
+    label = ("Label", f"io.aegis.install={SAMPLE_INSTALL_TOKEN}")
+
+    assert plain[name].sections == {"Volume": [
+        ("VolumeName", f"{SAMPLE_PREFIX}derivatives"), label,
+    ]}
+    assert bound[name].sections == {"Volume": [
+        ("VolumeName", f"{SAMPLE_PREFIX}derivatives"), label,
+        ("Device", SAMPLE_DERIVATIVES_DIR), ("Type", "none"), ("Options", "bind"),
+    ]}
+    # Nothing else changes: the containers mount the volume by its unit either way.
+    assert {key: unit for key, unit in bound.items() if key != name} == {
+        key: unit for key, unit in plain.items() if key != name
+    }
+    assert SAMPLE_DERIVATIVES_DIR not in "".join(rendered().values())
+
+
+@pytest.mark.parametrize("change", ["missing", "reordered", "repeated", "apart"])
+def test_the_derivatives_bind_lines_must_be_exactly_the_three_together(change: str) -> None:
+    installer = load_installer()
+    templates = real_templates()
+    text = templates["derivatives.volume"]
+    bind = "Device=@@DERIVATIVES_DIR@@\nType=none\nOptions=bind\n"
+    assert bind in text
+    edited = {
+        "missing": bind.replace("Type=none\n", ""),
+        "reordered": "Type=none\nDevice=@@DERIVATIVES_DIR@@\nOptions=bind\n",
+        "repeated": bind + "Options=bind\n",
+        "apart": "Device=@@DERIVATIVES_DIR@@\n# between\nType=none\nOptions=bind\n",
+    }[change]
+    templates["derivatives.volume"] = text.replace(bind, edited)
+
+    for directory in (None, SAMPLE_DERIVATIVES_DIR):
+        with pytest.raises(installer.RenderError, match="bind lines"):
+            installer.render_units(sample_config(derivatives_dir=directory), templates)
+
+
+def test_the_derivatives_directory_token_has_no_value_without_a_directory() -> None:
+    installer = load_installer()
+    templates = real_templates()
+    templates["media.container"] += "# @@DERIVATIVES_DIR@@\n"
+
+    with pytest.raises(installer.RenderError, match="unknown token @@DERIVATIVES_DIR@@"):
+        installer.render_units(sample_config(), templates)
+    assert installer.render_units(sample_config(derivatives_dir=SAMPLE_DERIVATIVES_DIR), templates)
+
+
+def test_the_renderer_interface_names_the_media_image_and_the_derivatives_directory() -> None:
+    installer = load_installer()
+
+    # An installer renders with each release's own copy of this interface (RENDER_API).
+    assert installer.RENDER_API == 2 and installer.RENDER_APIS == (1, 2)
+    fields = {field.name for field in dataclasses.fields(installer.UnitConfig)}
+    assert {"image_media", "derivatives_dir"} <= fields
+    assert installer.UnitConfig.__dataclass_fields__["derivatives_dir"].default is None
+
+
+def test_every_container_shares_the_install_level_and_nothing_else_names_one() -> None:
+    rendered_units = units()
+    for name in CONTAINERS:
+        assert container(name).values("Container", "SecurityLabelLevel") == [
+            SAMPLE_LABEL_LEVEL,
+        ], name
+    for name, unit in rendered_units.items():
+        if not name.endswith(".container"):
+            assert all("SecurityLabelLevel" not in unit.keys(part) for part in unit.sections)
+    other = "s0:c5,c600"
+    assert all(
+        unit.values("Container", "SecurityLabelLevel") == [other]
+        for name, unit in units(label_level=other).items() if name.endswith(".container")
+    )

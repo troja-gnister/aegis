@@ -133,6 +133,12 @@ def test_render_is_deterministic_and_enforces_role_scoped_long_bind_mounts(
     assert services["operations"]["user"] == f"{os.geteuid()}:{os.getegid()}"
     assert services["indexer"]["user"] == f"{os.geteuid()}:{os.getegid()}"
     assert services["media"]["user"] == f"{os.geteuid()}:{os.getegid()}"
+    # The processor shares scratch with the worker as the same identity, and gets nothing
+    # of the render but the roots: no manifest, no setting, no command (spec M2).
+    assert services["media-processor"] == {
+        "user": f"{os.geteuid()}:{os.getegid()}",
+        "volumes": services["media-processor"]["volumes"],
+    }
     assert "user" not in services["gateway"]
     for role in ("operations", "indexer", "media"):
         assert services[role]["environment"]["AEGIS_PROCESS_ROLE"] == role
@@ -144,9 +150,10 @@ def test_render_is_deterministic_and_enforces_role_scoped_long_bind_mounts(
     root_targets = {"/srv/aegis/roots/photos", "/srv/aegis/roots/uploads"}
     web_targets = {mount["target"] for mount in services["web"]["volumes"]}
     assert web_targets.isdisjoint(root_targets)
-    for role in ("gateway", "indexer", "media"):
+    for role in ("gateway", "indexer", "media", "media-processor"):
         for target in root_targets:
             assert _root_mount(services[role], target)["read_only"] is True
+    assert {mount["target"] for mount in services["media-processor"]["volumes"]} == root_targets
     assert _root_mount(services["operations"], "/srv/aegis/roots/photos")["read_only"] is True
     assert _root_mount(services["operations"], "/srv/aegis/roots/uploads")["read_only"] is True
     for service in services.values():

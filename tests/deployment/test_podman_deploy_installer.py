@@ -19,15 +19,19 @@ import subprocess
 import sys
 import textwrap
 import tomllib
+import types
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import pytest
+from aegisctl import container_launch as aegisctl_launch
+from aegisctl import mounts as aegisctl_mounts
 
 from tests.support.podman_deploy import (
     AEGISCTL,
+    CONTAINER_FILE_LABEL,
     INSTALLER,
     PODMAN,
     SAMPLE_HOST_GID,
@@ -37,6 +41,7 @@ from tests.support.podman_deploy import (
     SAMPLE_REGISTRY,
     SAMPLE_RELEASE,
     SAMPLE_THIRD_RELEASE,
+    SAMPLE_VOLUME_STORAGE,
     SYSTEMCTL,
     FakeClock,
     FakeSystem,
@@ -48,7 +53,7 @@ from tests.support.podman_deploy import (
     sample_config,
 )
 
-ROLES = ("backend", "gateway", "postgres", "caddy")
+ROLES = ("backend", "gateway", "postgres", "caddy", "media")
 SECRET_NAMES = (
     "postgres-superuser-password", "db-migrator-password", "db-web-password",
     "db-operations-password", "db-indexer-password", "db-media-password",
@@ -60,12 +65,15 @@ INIT = (
     "init", "--release", SAMPLE_RELEASE, "--https-port", str(SAMPLE_PORT),
     "--name", NAMES[0], "--address", NAMES[1], "--registry", SAMPLE_REGISTRY,
 )
-SERVICE_NAMES = ("postgres", "web", "operations", "indexer", "media", "gateway", "caddy")
+SERVICE_NAMES = (
+    "postgres", "web", "operations", "indexer", "media", "media-processor", "gateway", "caddy",
+)
 LONG_RUNNING = {f"{SAMPLE_PREFIX}{name}.service" for name in SERVICE_NAMES}
 SOCKET = f"{SAMPLE_PREFIX}caddy.socket"
 MIGRATE = f"{SAMPLE_PREFIX}migrate.service"
 VOLUME_NAMES = (
-    "caddy-data", "derivatives", "indexer-coordination", "postgres-data", "quarantine", "staging",
+    "caddy-data", "derivatives", "indexer-coordination", "media-scratch", "postgres-data",
+    "quarantine", "staging",
 )
 NETWORK_NAMES = ("backend", "edge", "tls-hop")
 VOLUMES = tuple(f"{SAMPLE_PREFIX}{name}" for name in VOLUME_NAMES)
@@ -80,6 +88,9 @@ INSTALL_LABEL = "io.aegis.install"
 # ID, a test release literal and plain container_t readers. Synthetic values only.
 TEST_PREFIX = "aegis-test-0f3a-"
 TEST_RELEASE = "test-0f3a5c7e"
+# Synthetic boot IDs (/proc/sys/kernel/random/boot_id): this boot's, and the one after a reboot.
+SAMPLE_BOOT_ID = "0f3a5c7e-1b2d-4e6f-8a9b-0c1d2e3f4a5b"
+SAMPLE_OTHER_BOOT_ID = "9e8d7c6b-5a49-4382-9716-a5b4c3d2e1f0"
 TEST_OTHER_RELEASE = "test-9b2d4e6f"
 LOCAL_IDS = {role: hashlib.sha256(f"local:{role}".encode()).hexdigest() for role in ROLES}
 OTHER_LOCAL_IDS = {role: hashlib.sha256(f"other:{role}".encode()).hexdigest() for role in ROLES}
@@ -134,6 +145,13 @@ class Rig:
         self.xattr_reads: list[tuple[str, int]] = []
         self.system.labels = self.xattrs
         self.login = "aegis-operator"
+        # The installer's mount table, faked: one disk-backed root file system.
+        self.mountinfo = tmp_path / "mountinfo"
+        self.mountinfo.write_text("22 1 259:2 / / rw,relatime shared:1 - ext4 /dev/vda1 rw\n",
+                                  encoding="ascii")
+        # This boot's ID, faked; a test reboots by writing another.
+        self.boot_id = tmp_path / "boot_id"
+        self.boot_id.write_text(f"{SAMPLE_BOOT_ID}\n", encoding="ascii")
 
     def getxattr(self, path: str, name: str) -> bytes:
         assert name == "security.selinux", name
@@ -150,7 +168,7 @@ class Rig:
             gid=SAMPLE_HOST_GID, environ=self.environ, monotonic=self.clock.monotonic,
             sleep=self.clock.sleep, port_in_use=lambda port: port in self.system.listeners,
             quadlet=self.quadlet, selinux_enforce=self.enforce, getxattr=self.getxattr,
-            login_name=lambda uid: self.login,
+            login_name=lambda uid: self.login, mountinfo=self.mountinfo, boot_id=self.boot_id,
         )
 
     def __call__(self, *argv: str) -> int:
@@ -215,10 +233,12 @@ def rig(tmp_path: Path) -> Rig:
 def rendered_for(rig: Rig, release: str = SAMPLE_RELEASE, **overrides: Any) -> dict[str, str]:
     """What the repository renderer gives for the values the installer recorded."""
     images = {f"image_{role}": expected_image(role, release) for role in ROLES}
-    token = rig.state()["install_token"] if rig.state_path.exists() else "0" * 32
+    recorded = rig.state() if rig.state_path.exists() else {}
+    token = recorded.get("install_token", "0" * 32)
+    level = {"label_level": recorded["label_level"]} if recorded.get("label_level") else {}
     config = sample_config(
         release=release, names=NAMES, secrets_dir=str(rig.secrets),
-        backend_subnet=FIRST_SUBNET, install_token=token, **images, **overrides,
+        backend_subnet=FIRST_SUBNET, install_token=token, **images, **(level | overrides),
     )
     return dict(load_installer().render_units(config))
 
@@ -408,7 +428,7 @@ def test_a_release_renderer_with_another_interface_is_refused(rig: Rig) -> None:
     def other_interface(tree: Path) -> None:
         script = tree / "aegis-podman"
         text = script.read_text(encoding="utf-8")
-        script.write_text(text.replace("RENDER_API = 1", "RENDER_API = 2", 1), encoding="utf-8")
+        script.write_text(text.replace("RENDER_API = 2", "RENDER_API = 3", 1), encoding="utf-8")
 
     rig.system.tree_hook = other_interface
 
@@ -554,11 +574,11 @@ def test_init_creates_eight_private_labelled_secrets_for_the_container_user(rig:
     owners = rig.system.commands(*PODMAN, "unshare", "chown")
     assert len(labels) == len(owners) == len(SECRET_NAMES)
     for label, owner in zip(labels, owners, strict=True):
-        # Neither tool may follow a symbolic link.
-        assert label[:4] == ("chcon", "-h", "-t", "container_file_t")
+        # Neither tool may follow a symbolic link; the label is container_file_t at s0.
+        assert label[:6] == CONTAINER_FILE_LABEL
         assert owner[:6] == (*PODMAN, "unshare", "chown", "-h", "10001:10001")
-        assert label[4] == owner[6]
-        assert Path(label[4]).parent == rig.secrets
+        assert label[6] == owner[6]
+        assert Path(label[6]).parent == rig.secrets
         assert rig.system.calls.index(label) < rig.system.calls.index(owner)
 
 
@@ -656,7 +676,7 @@ def test_a_file_for_mapped_containers_is_private_labelled_and_in_the_operators_g
     # Container uid 10001 and, inside podman unshare, gid 0: the operator's group, which
     # GIDMap=+g10001:@<host gid>:1 shows as 10001. Secrets instead stay 10001:10001.
     assert rig.system.calls[first:] == [
-        ("chcon", "-h", "-t", "container_file_t", str(manifest)),
+        (*CONTAINER_FILE_LABEL, str(manifest)),
         (*PODMAN, "unshare", "chown", "-h", "10001:0", str(manifest)),
     ]
 
@@ -742,6 +762,11 @@ def test_a_failed_record_write_keeps_the_previous_record(
     "production-container-t", "unknown-reader-type", "test-release-without-local-images",
     "malformed-local-images", "production-pending-local-images",
     "production-pending-test-release", "malformed-pending-local-images",
+    "malformed-derivatives", "relative-derivatives", "boolean-derivatives-inode",
+    "unprepared-flag", "level-one-category", "level-equal-categories",
+    "level-descending-categories", "level-leading-zero", "level-out-of-range",
+    "level-other-sensitivity", "level-not-a-string", "migration-without-level",
+    "migration-not-a-flag",
 ])
 def test_an_unsafe_or_unknown_record_is_refused(tmp_path: Path, damage: str) -> None:
     installer = load_installer()
@@ -759,6 +784,8 @@ def test_an_unsafe_or_unknown_record_is_refused(tmp_path: Path, damage: str) -> 
                                               "install_sections": True},
         "malformed-restart-flag": {"pending": {"release": SAMPLE_OTHER_RELEASE, "images": {},
                                                "restart_queued": "yes"}},
+        "malformed-boot-id": {"pending": {"release": SAMPLE_OTHER_RELEASE, "images": {},
+                                          "boot_id": "not-a-boot"}},
         # The deployment test's options never apply to the production prefix.
         "production-local-images": {"local_images": True},
         "production-container-t": {"reader_type": "container_t"},
@@ -775,6 +802,26 @@ def test_an_unsafe_or_unknown_record_is_refused(tmp_path: Path, damage: str) -> 
             "prefix": TEST_PREFIX, "install_sections": False,
             "pending": {"release": SAMPLE_OTHER_RELEASE, "images": {}, "local_images": "yes"},
         },
+        "malformed-derivatives": {"derivatives": {"path": "/srv/derivatives"}},
+        "relative-derivatives": {"derivatives": {
+            "path": "srv/derivatives", "device": 1, "inode": 2, "prepared": True,
+        }},
+        "boolean-derivatives-inode": {"derivatives": {
+            "path": "/srv/derivatives", "device": 1, "inode": True, "prepared": True,
+        }},
+        "unprepared-flag": {"derivatives": {
+            "path": "/srv/derivatives", "device": 1, "inode": 2, "prepared": "no",
+        }},
+        "level-one-category": {"label_level": "s0:c5"},
+        "level-equal-categories": {"label_level": "s0:c5,c5"},
+        "level-descending-categories": {"label_level": "s0:c9,c5"},
+        "level-leading-zero": {"label_level": "s0:c05,c9"},
+        "level-out-of-range": {"label_level": "s0:c5,c1024"},
+        "level-other-sensitivity": {"label_level": "s1:c5,c9"},
+        "level-not-a-string": {"label_level": 7},
+        "migration-without-level": {"level_migration": {"aegis-staging": True}},
+        "migration-not-a-flag": {"label_level": "s0:c1,c2",
+                                 "level_migration": {"aegis-staging": "yes"}},
     }
     if damage == "symlink":
         target = tmp_path / "elsewhere.json"
@@ -1107,10 +1154,10 @@ def test_a_test_stack_runs_local_images_as_container_t_without_pulling(
     no_install_sections(rig)
     assert not rig.system.commands(*SYSTEMCTL, "enable")
     for service, role in (("web", "backend"), ("gateway", "gateway"), ("postgres", "postgres"),
-                          ("caddy", "caddy")):
+                          ("caddy", "caddy"), ("media-processor", "media")):
         unit = parse_unit((rig.quadlet_units / f"{TEST_PREFIX}{service}.container").read_text())
         assert unit.value("Container", "Image") == LOCAL_IDS[role], service
-    for service in ("operations", "indexer", "media", "gateway"):
+    for service in ("operations", "indexer", "media", "media-processor", "gateway"):
         unit = parse_unit((rig.quadlet_units / f"{TEST_PREFIX}{service}.container").read_text())
         assert unit.value("Container", "SecurityLabelType") == "container_t", service
 
@@ -2208,6 +2255,42 @@ def test_a_pending_upgrade_records_when_its_restart_was_queued(rig: Rig) -> None
     rig.refused("upgrade", "--abandon", match="allow-downgrade")
 
 
+def test_a_reboot_with_an_upgrade_pending_counts_as_a_queued_restart(rig: Rig) -> None:
+    pending_with_a_new_unit(rig)  # the new units are on disk; nothing was restarted
+    pending = rig.state()["pending"]
+    assert pending["boot_id"] == SAMPLE_BOOT_ID
+    assert pending.get("restart_queued", False) is False
+
+    # The host rebooted: the boot generated the new units, which may have started.
+    rig.boot_id.write_text(f"{SAMPLE_OTHER_BOOT_ID}\n", encoding="ascii")
+    rig.fresh_output()
+    first = len(rig.system.calls)
+    rig.refused("upgrade", "--abandon", match="allow-downgrade")
+    assert rig.system.calls[first:] == []
+    assert "rebooted" in rig.stderr.getvalue() and "backup" in rig.stderr.getvalue()
+
+    # Resuming keeps it a downgrade, now under this boot's ID.
+    rig.system.failures[(*SYSTEMCTL, "daemon-reload")] = (1, "", "Failed to reload")
+    rig.refused("upgrade", "--release", SAMPLE_OTHER_RELEASE, match="daemon-reload")
+    rig.system.failures.clear()
+    pending = rig.state()["pending"]
+    assert pending["boot_id"] == SAMPLE_OTHER_BOOT_ID and pending["restart_queued"] is True
+    rig.fresh_output()
+    rig.refused("upgrade", "--abandon", match="allow-downgrade")
+
+    rig.fresh_output()
+    assert rig("upgrade", "--abandon", "--allow-downgrade") == 0, rig.output()
+    assert "backup" in rig.output() and rig.state()["pending"] is None
+
+
+def test_the_same_boot_abandons_without_a_downgrade(rig: Rig) -> None:
+    pending_with_a_new_unit(rig)
+    rig.fresh_output()
+
+    assert rig("upgrade", "--abandon") == 0, rig.output()
+    assert "backup" not in rig.output()
+
+
 def test_a_failed_abandon_says_what_to_do_next(rig: Rig) -> None:
     pending_with_a_new_unit(rig)
     rig.system.failures[(*SYSTEMCTL, "daemon-reload")] = (1, "", "Failed to reload")
@@ -2364,6 +2447,8 @@ def test_bootstrap_password_mirrors_the_web_unit_and_shows_a_new_password_once(
         "--security-opt=no-new-privileges",
         "--security-opt=unmask=/sys/devices/virtual/powercap",
         f"--gidmap=+g10001:@{SAMPLE_HOST_GID}:1",
+        # The install's shared level, as the web unit has it.
+        f"--security-opt=label=level:{rig.state()['label_level']}",
     ])
     assert web.values("Container", "Tmpfs") == ["/tmp:size=64m,noexec,nosuid,nodev"]
     assert all(password not in word for word in run)
@@ -2623,8 +2708,9 @@ UNLABELED = b"system_u:object_r:unlabeled_t:s0\x00"
 # A deployment test's synthetic root: labelled for containers, never an original.
 CONTAINER_FILE = b"unconfined_u:object_r:container_file_t:s0\x00"
 HOME_LABEL = b"unconfined_u:object_r:user_home_t:s0:c1,c2\x00"
-ROOT_ROLES = ("migrate", "web", "operations", "indexer", "media", "gateway")
-READER_ROLES = ("operations", "indexer", "media", "gateway")
+ROOT_ROLES = ("migrate", "web", "operations", "indexer", "media", "media-processor", "gateway")
+READER_ROLES = ("operations", "indexer", "media", "media-processor", "gateway")
+PROCESSOR = "media-processor"
 ROOT_SERVICES = tuple(f"{SAMPLE_PREFIX}{role}.service" for role in ROOT_ROLES)
 DROP_IN = "50-aegis-roots.conf"
 UDICA = "/usr/share/udica/templates"
@@ -2632,7 +2718,7 @@ PRIVATE_SOURCES = (
     ("ipv4", "10.0.0.0/8"), ("ipv4", "172.16.0.0/12"), ("ipv4", "192.168.0.0/16"),
     ("ipv4", "100.64.0.0/10"), ("ipv6", "fc00::/7"), ("ipv6", "fe80::/10"),
 )
-LABEL = ("chcon", "-h", "-t", "container_file_t")
+LABEL = CONTAINER_FILE_LABEL
 RELOAD = (*SYSTEMCTL, "daemon-reload")
 
 
@@ -2777,7 +2863,8 @@ def test_a_passing_probe_covers_the_type_and_aegisctl_runs_in_order(rig: Rig) ->
     assert create < later.index((*AEGISCTL, *calls[0]))
     # After a fresh render: the manifest goes to the mapped container user, both artifacts
     # are labelled, then systemd reloads and the units the drop-ins changed restart.
-    steps = [call for call in later if call[:4] == LABEL or call[2:4] == ("unshare", "chown")
+    steps = [call for call in later if call[:len(LABEL)] == LABEL
+             or call[2:4] == ("unshare", "chown")
              or call == RELOAD or call[2:4] == ("--no-block", "restart")]
     assert steps == [
         (*LABEL, str(manifest)),
@@ -2869,6 +2956,10 @@ def test_the_drop_ins_are_recorded_and_bind_exactly_what_each_role_needs(rig: Ri
         if role == "gateway":
             assert f"{attestation}:/run/aegis/mounts.gateway.attestation:ro" in volumes
             assert environment["AEGIS_GATEWAY_MOUNT_ATTESTATION_SHA256"] == digest(attestation)
+        elif role == PROCESSOR:
+            # The roots alone: no manifest, no attestation, no setting (spec M2).
+            assert volumes == [f"{root}:/srv/aegis/roots/photos:ro"]
+            assert environment == {}
         else:
             assert f"{manifest}:/run/aegis/mounts.manifest.json:ro" in volumes
             assert environment["AEGIS_MOUNT_MANIFEST_SHA256"] == digest(manifest)
@@ -4491,3 +4582,941 @@ def test_programs_run_only_as_argument_vectors_through_the_runner(rig: Rig) -> N
 def test_main_needs_a_command(rig: Rig) -> None:
     with pytest.raises(SystemExit):
         rig()
+
+
+# -- the media processor's image and units (spec M2, M8) ----------------------------------------
+
+
+def test_the_media_image_is_a_fifth_role_pulled_pinned_recorded_and_shown(rig: Rig) -> None:
+    rig.started()
+    state = rig.state()
+    media = expected_image("media")
+    processor = f"{SAMPLE_PREFIX}media-processor.service"
+
+    assert state["images"]["media"] == media
+    assert f"{SAMPLE_REGISTRY}/aegis-media:{SAMPLE_RELEASE}" in [
+        call[4] for call in rig.system.commands(*PODMAN, "pull")
+    ]
+    unit = parse_unit(unit_path(rig, f"{SAMPLE_PREFIX}media-processor.container").read_text())
+    assert unit.value("Container", "Image") == media
+    assert state["units"]["images"][processor] == media
+    assert processor in state["units"]["services"]
+    assert processor not in state["units"]["health_checked"]
+    assert f"{SAMPLE_PREFIX}media-scratch" in state["volumes"]
+    assert f"AEGIS_PODMAN_IMAGE_MEDIA={media}\n" in rig.env_file.read_text(encoding="utf-8")
+    rig.fresh_output()
+    assert rig("status") == 0, rig.output()
+    output = rig.stdout.getvalue()
+    assert re.search(rf"^  media\s+{re.escape(media)}$", output, flags=re.MULTILINE)
+    assert re.search(rf"{re.escape(processor)}\s+active/running\s.*health=-\s+image=current",
+                     output)
+
+
+def test_local_images_must_name_the_media_image(rig: Rig, tmp_path: Path) -> None:
+    make_test_stack(rig, tmp_path)
+    without_media = ",".join(f"{role}={LOCAL_IDS[role]}" for role in ROLES if role != "media")
+
+    rig.refused(*replaced(TEST_INIT, "--local-images", without_media),
+                match="caddy and media once")
+    assert not rig.system.calls
+
+
+def test_an_upgrade_from_a_record_without_the_media_image_pulls_and_pins_it(rig: Rig) -> None:
+    rig.started()
+    raw = rig.state()
+    del raw["images"]["media"]  # as a release before the media processor recorded it
+    rig.state_path.write_text(json.dumps(raw), encoding="utf-8")
+    rig.fresh_output()
+    rig("status")
+    assert re.search(r"^  media\s+-$", rig.stdout.getvalue(), flags=re.MULTILINE)
+
+    assert rig("upgrade", "--release", SAMPLE_OTHER_RELEASE) == 0, rig.output()
+    state = rig.state()
+    assert state["images"] == {role: expected_image(role, SAMPLE_OTHER_RELEASE) for role in ROLES}
+    assert rig.system.running_images[f"{SAMPLE_PREFIX}media-processor"] == expected_image(
+        "media", SAMPLE_OTHER_RELEASE,
+    )
+
+
+def test_only_a_render_api_2_release_gets_the_media_image_and_the_derivatives_directory(
+    tmp_path: Path,
+) -> None:
+    installer = load_installer()
+    paths = private_paths(installer, tmp_path)
+    state = sample_state(installer)
+    state.images = {role: expected_image(role) for role in ROLES}
+    state.derivatives = {"path": "/srv/aegis-operator/derivatives", "device": 1, "inode": 2,
+                         "prepared": True}
+    seen: dict[int, dict[str, Any]] = {}
+
+    def release(api: int) -> Any:
+        def unit_config(**values: Any) -> dict[str, Any]:
+            seen[api] = values
+            return values
+
+        return types.SimpleNamespace(
+            RENDER_API=api, UnitConfig=unit_config, unit_directory=installer.unit_directory,
+            render_units=lambda config, templates: {},
+        )
+
+    state.label_level = "s0:c17,c912"
+    for api in installer.RENDER_APIS:
+        assert installer._render(release(api), {}, state, paths) == {}
+    # A release before the media processor renders four images, a plain volume and random
+    # levels.
+    added = ("image_media", "derivatives_dir", "label_level")
+    assert not set(added) & set(seen[1])
+    assert seen[2]["image_media"] == expected_image("media")
+    assert seen[2]["derivatives_dir"] == "/srv/aegis-operator/derivatives"
+    assert seen[2]["label_level"] == state.label_level
+    assert {key: value for key, value in seen[2].items() if key not in added} == seen[1]
+
+
+def processorless(tree: Path) -> None:
+    """A release before the media processor: no processor unit and no scratch volume."""
+    script = tree / "aegis-podman"
+    text = script.read_text(encoding="utf-8")
+    for name in (' "media-scratch.volume",', ' "media-processor.container",'):
+        assert text.count(name) == 1, name
+        text = text.replace(name, "", 1)
+    script.write_text(text, encoding="utf-8")
+    (tree / "quadlet" / "media-processor.container").unlink()
+    (tree / "quadlet" / "media-scratch.volume").unlink()
+    media = tree / "quadlet" / "media.container"
+    media.write_text("".join(
+        line for line in media.read_text(encoding="utf-8").splitlines(keepends=True)
+        if "media-scratch.volume" not in line
+    ), encoding="utf-8")
+
+
+def renders_six_drop_ins_for(rig: Rig, monkeypatch: pytest.MonkeyPatch, release: str) -> None:
+    """``release``'s aegisctl predates the processor: it renders no drop-in for it."""
+    full = aegisctl_mounts.QUADLET_ROLES
+    monkeypatch.setattr(aegisctl_mounts, "QUADLET_ROLES", full)
+    real = rig.system.aegisctl
+
+    def aegisctl(words: tuple[str, ...], env: Any) -> tuple[int, str, str]:
+        old = Path(env["PYTHONPATH"]).parent.name == release
+        aegisctl_mounts.QUADLET_ROLES = tuple(role for role in full if role != PROCESSOR) \
+            if old else full
+        try:
+            return real(words, env)
+        finally:
+            aegisctl_mounts.QUADLET_ROLES = full
+
+    rig.system.aegisctl = aegisctl  # type: ignore[method-assign]
+
+
+def test_abandoning_to_a_release_without_the_processor_takes_its_unit_and_drop_in_away(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rig.system.release_hooks[SAMPLE_RELEASE] = processorless
+    renders_six_drop_ins_for(rig, monkeypatch, SAMPLE_RELEASE)
+    rig.install()
+    covered_root(rig)
+    older = [role for role in ROOT_ROLES if role != PROCESSOR]
+    assert [role for role in ROOT_ROLES if drop_in(rig, role).exists()] == older
+    rig.fresh_output()
+    rig("status")
+    assert "drop-ins are not all in place" not in rig.stdout.getvalue()
+
+    rig.system.failures[(*SYSTEMCTL, "daemon-reload")] = (1, "", "Failed to reload")
+    rig.refused("upgrade", "--release", SAMPLE_OTHER_RELEASE, match="daemon-reload")
+    rig.system.failures.clear()
+    # The new release's aegisctl rendered the processor's drop-in with its unit.
+    assert drop_in(rig, PROCESSOR).is_file()
+    assert (rig.quadlet_units / f"{SAMPLE_PREFIX}media-processor.container").is_file()
+
+    assert rig("upgrade", "--abandon") == 0, rig.output()
+    state = rig.state()
+    assert state["pending"] is None and state["release"] == SAMPLE_RELEASE
+    assert not drop_in(rig, PROCESSOR).exists()
+    assert str(drop_in(rig, PROCESSOR)) not in state["files"]
+    assert not (rig.quadlet_units / f"{SAMPLE_PREFIX}media-processor.container").exists()
+    assert [role for role in ROOT_ROLES if drop_in(rig, role).exists()] == older
+    rig.fresh_output()
+    rig("status")
+    assert "drop-ins are not all in place" not in rig.stdout.getvalue()
+
+
+def test_the_processor_drop_in_may_bind_the_roots_and_nothing_else(rig: Rig) -> None:
+    installer = rig.installer
+    source = os.path.realpath(rig.originals / "photos")
+    roots = {"photos": {"source": source, "identity": "local:1:2",
+                        "selinux_type": "unlabeled_t"}}
+    manifest, attestation = "/srv/state/manifest.json", "/srv/state/gateway.attestation"
+    root = f"Volume={source}:/srv/aegis/roots/photos:ro"
+
+    def problem(*lines: str) -> str | None:
+        sections = installer._unit_sections("\n".join(["[Container]", *lines]) + "\n")
+        return installer._drop_in_problem(PROCESSOR, sections, roots, manifest, attestation)
+
+    assert problem(root) is None
+    assert problem(root, f"Volume={manifest}:/run/aegis/mounts.manifest.json:ro")
+    assert problem(root, "Environment=AEGIS_MOUNT_MANIFEST=/run/aegis/mounts.manifest.json")
+    assert problem(root, "Exec=/bin/sh -ec true")
+    assert problem(f"Volume={source}:/srv/aegis/roots/photos:ro,z")
+    assert problem(f"Volume={source}:/srv/aegis/roots/photos")
+    assert problem()
+
+
+# -- the derivatives directory (spec M8) -------------------------------------------------------
+
+
+def derivatives_directory(rig: Rig, name: str = "derivatives") -> Path:
+    """An empty directory of the operator's, on the fake mount table's disk."""
+    directory = rig.originals.parent / name
+    directory.mkdir(mode=0o750)
+    return directory
+
+
+def volume_unit(rig: Rig) -> Any:
+    return parse_unit(unit_path(rig, f"{SAMPLE_PREFIX}derivatives.volume").read_text())
+
+
+def test_init_adopts_prepares_and_records_the_derivatives_directory(rig: Rig) -> None:
+    directory = derivatives_directory(rig)
+    info = directory.lstat()
+
+    assert rig(*INIT, "--derivatives-dir", str(directory)) == 0, rig.output()
+    state = rig.state()
+    assert state["derivatives"] == {
+        "path": str(directory), "device": info.st_dev, "inode": info.st_ino, "prepared": True,
+    }
+    # Prepared as files for the mapped containers are: mode, label, then the owner, last.
+    assert mode(directory) == 0o2770
+    calls = rig.system.calls
+    label = calls.index((*LABEL, str(directory)))
+    chown = calls.index((*PODMAN, "unshare", "chown", "-h", "10001:0", str(directory)))
+    assert label < chown
+    assert rig.system.chowned[str(directory)] == "10001:0"
+    assert f"AEGIS_PODMAN_DERIVATIVES_DIR={directory}\n" in rig.env_file.read_text(
+        encoding="utf-8")
+    assert f"derivatives in {directory}" in rig.stdout.getvalue()
+
+    assert rig("install") == 0, rig.output()
+    unit = volume_unit(rig)
+    assert unit.value("Volume", "Device") == str(directory)
+    assert (unit.value("Volume", "Type"), unit.value("Volume", "Options")) == ("none", "bind")
+    for name, text in rendered_for(rig, derivatives_dir=str(directory)).items():
+        assert unit_path(rig, name).read_text(encoding="utf-8") == text, name
+    assert rig("start") == 0, rig.output()
+    assert rig.system.volumes[f"{SAMPLE_PREFIX}derivatives"]["Options"] == {
+        "device": str(directory), "type": "none", "o": "bind",
+    }
+    rig.fresh_output()
+    assert rig("status") == 0, rig.output()
+    assert f"  derivatives in {directory}\n" in rig.stdout.getvalue()
+
+
+def test_without_a_derivatives_directory_the_volume_stays_a_plain_named_volume(rig: Rig) -> None:
+    rig.started()
+
+    assert rig.state()["derivatives"] is None
+    assert volume_unit(rig).keys("Volume") == {"VolumeName", "Label"}
+    assert rig.system.volumes[f"{SAMPLE_PREFIX}derivatives"]["Options"] == {}
+    assert "AEGIS_PODMAN_DERIVATIVES_DIR" not in rig.env_file.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("value", [
+    "relative/derivatives", "/srv/with space", "/srv/a:b", "/srv/a,b", "/srv/../derivatives",
+    "/srv/derivatives/", "/srv/%h", "/",
+])
+def test_an_unsafe_derivatives_path_is_refused_before_anything_runs(
+    rig: Rig, value: str,
+) -> None:
+    rig.refused(*INIT, "--derivatives-dir", value, match="--derivatives-dir")
+    assert not rig.system.calls
+
+
+def _missing(rig: Rig) -> str:
+    return str(rig.originals.parent / "missing")
+
+
+def _file(rig: Rig) -> str:
+    path = rig.originals.parent / "file"
+    path.write_text("x", encoding="ascii")
+    return str(path)
+
+
+def _symlink(rig: Rig) -> str:
+    link = rig.originals.parent / "link"
+    link.symlink_to(derivatives_directory(rig))
+    return str(link)
+
+
+def _through_symlink(rig: Rig) -> str:
+    target = rig.originals.parent / "target"
+    (target / "derivatives").mkdir(parents=True)
+    (rig.originals.parent / "alias").symlink_to(target)
+    return str(rig.originals.parent / "alias" / "derivatives")
+
+
+def _not_owned(rig: Rig) -> str:
+    return "/usr"  # owned by root on every host; an operator never owns it
+
+
+def _not_empty(rig: Rig) -> str:
+    directory = derivatives_directory(rig)
+    (directory / "earlier.webp").write_bytes(b"RIFF")
+    return str(directory)
+
+
+def _overlaps_units(rig: Rig) -> str:
+    # The parent of the systemd user unit directory, empty until install writes into it.
+    directory = rig.config_home / "systemd"
+    directory.mkdir(parents=True)
+    return str(directory)
+
+
+def _volatile(rig: Rig) -> str:
+    directory = derivatives_directory(rig, "volatile")
+    with rig.mountinfo.open("a", encoding="ascii") as handle:
+        handle.write(f"40 22 0:40 / {directory} rw,nosuid,nodev shared:20 - tmpfs tmpfs rw\n")
+    return str(directory)
+
+
+def _mount_point(rig: Rig) -> str:
+    directory = derivatives_directory(rig, "disk")
+    with rig.mountinfo.open("a", encoding="ascii") as handle:
+        handle.write(f"41 22 259:3 / {directory} rw,relatime shared:21 - xfs /dev/vdb1 rw\n")
+    return str(directory)
+
+
+@pytest.mark.parametrize(("make", "message"), [
+    (_missing, "does not exist; aegis-podman never creates"),
+    (_file, "is not a directory"),
+    (_symlink, "is a symbolic link"),
+    (_through_symlink, "is reached through a symbolic link"),
+    (_not_owned, "is not owned by you"),
+    (_not_empty, "is not empty"),
+    (_overlaps_units, "overlaps aegis-podman's own directory"),
+    (_volatile, "is on tmpfs"),
+    (_mount_point, "is a mount point itself"),
+], ids=["missing", "file", "symlink", "through-symlink", "not-owned", "not-empty",
+        "installer-directory", "tmpfs", "mount-point"])
+def test_an_unsuitable_derivatives_directory_is_refused_and_left_untouched(
+    rig: Rig, make: Callable[[Rig], str], message: str,
+) -> None:
+    rig.originals.parent.mkdir(parents=True, exist_ok=True)
+    value = make(rig)
+    before = os.lstat(value) if os.path.lexists(value) else None
+
+    rig.refused(*INIT, "--derivatives-dir", value, match=re.escape(message))
+    assert value not in rig.system.labelled and value not in rig.system.chowned
+    assert not rig.system.commands(*PODMAN, "pull")
+    if before is not None:
+        assert os.lstat(value).st_mode == before.st_mode
+
+
+def test_a_mount_table_entry_is_unescaped_and_the_deepest_mount_wins(rig: Rig) -> None:
+    rig.originals.parent.mkdir(parents=True, exist_ok=True)
+    directory = derivatives_directory(rig)
+    with rig.mountinfo.open("a", encoding="ascii") as handle:
+        # A tmpfs at a sibling whose name only starts the same, then the disk again deeper.
+        handle.write(f"40 22 0:40 / {directory}-cache rw shared:20 - tmpfs tmpfs rw\n")
+        handle.write(f"41 22 0:41 / {directory.parent} rw shared:21 - tmpfs tmpfs rw\n")
+        handle.write(f"42 41 259:3 / {directory} rw shared:22 - xfs /dev/vdb1 rw\n")
+    installer = rig.installer
+    host = rig.host()
+
+    assert installer._filesystem_type(host, str(directory)) == ("xfs", str(directory))
+    assert installer._filesystem_type(host, str(directory / "deeper")) == (
+        "xfs", str(directory))
+    assert installer._filesystem_type(host, str(directory.parent / "other")) == (
+        "tmpfs", str(directory.parent))
+    assert installer._filesystem_type(host, "/elsewhere") == ("ext4", "/")
+    rig.mountinfo.write_text(
+        "22 1 259:2 / / rw shared:1 - ext4 /dev/vda1 rw\n"
+        "50 22 0:50 / /srv/with\\040space rw shared:30 - tmpfs tmpfs rw\n",
+        encoding="ascii",
+    )
+    assert installer._filesystem_type(host, "/srv/with space/x") == ("tmpfs", "/srv/with space")
+
+
+def test_an_interrupted_preparation_records_nothing_and_the_next_init_prepares_again(
+    rig: Rig,
+) -> None:
+    directory = derivatives_directory(rig)
+    real = rig.system
+
+    def interrupted(command: tuple[str, ...]) -> tuple[int, str, str] | None:
+        if command[2:5] == ("unshare", "chown", "-h") and command[-1] == str(directory):
+            raise subprocess.TimeoutExpired(list(command), 60)
+        return None
+
+    real.intercept = interrupted
+    rig.refused(*INIT, "--derivatives-dir", str(directory), match="did not finish")
+    record = rig.state()
+    assert record["phase"] == "initializing" and record["derivatives"] is None
+    assert not list(rig.secrets.iterdir())  # nothing past the preparation ran
+
+    real.intercept = None
+    assert rig(*INIT, "--derivatives-dir", str(directory)) == 0, rig.output()
+    assert rig.state()["derivatives"]["path"] == str(directory)
+    assert real.chowned[str(directory)] == "10001:0"
+
+
+def test_a_directory_an_interrupted_adoption_prepared_is_recognized(rig: Rig) -> None:
+    installer = rig.installer
+    host = rig.host()
+    directory = derivatives_directory(rig)
+
+    # The user namespace shows a handed-over directory as 10001 and the operator's group.
+    assert not installer._prepared_for_containers(host, str(directory))
+    rig.system.chowned[str(directory)] = "10001:0"
+    directory.chmod(0o2770)
+    assert installer._prepared_for_containers(host, str(directory))
+    directory.chmod(0o750)
+    assert not installer._prepared_for_containers(host, str(directory))
+
+
+def labels_refused_in(directory: Path) -> Callable[[tuple[str, ...]], Any]:
+    """chcon refuses every file inside ``directory``, as on a file system without SELinux
+    labels (or one mounted with a fixed context=)."""
+    def refuse(command: tuple[str, ...]) -> tuple[int, str, str] | None:
+        if command[:len(CONTAINER_FILE_LABEL)] == CONTAINER_FILE_LABEL and command[-1].startswith(
+            f"{directory}/"
+        ):
+            return 1, "", f"chcon: failed to change context of '{command[-1]}': not supported"
+        return None
+    return refuse
+
+
+def test_a_directory_that_cannot_be_labelled_records_nothing_and_another_can_be_chosen(
+    rig: Rig,
+) -> None:
+    directory = derivatives_directory(rig)
+    rig.system.intercept = labels_refused_in(directory)
+
+    rig.refused(*INIT, "--derivatives-dir", str(directory),
+                match="cannot carry the SELinux label")
+    assert "Nothing was recorded" in rig.stderr.getvalue()
+    assert rig.state()["derivatives"] is None
+    assert list(directory.iterdir()) == []  # the probe file is gone
+    assert mode(directory) == 0o750 and str(directory) not in rig.system.chowned
+    other = derivatives_directory(rig, "other")
+    assert rig(*INIT, "--derivatives-dir", str(other)) == 0, rig.output()
+    assert rig.state()["derivatives"]["path"] == str(other)
+
+
+def test_an_unlabellable_directory_at_upgrade_leaves_the_stack_startable(rig: Rig) -> None:
+    rig.started()
+    assert rig("stop") == 0, rig.output()
+    del rig.system.volumes[f"{SAMPLE_PREFIX}derivatives"]
+    directory = derivatives_directory(rig)
+    rig.system.intercept = labels_refused_in(directory)
+
+    rig.refused("upgrade", "--release", SAMPLE_OTHER_RELEASE, "--derivatives-dir",
+                str(directory), match="cannot carry the SELinux label")
+    state = rig.state()
+    assert state["derivatives"] is None and state["pending"] is None
+    assert state["release"] == SAMPLE_RELEASE
+    assert rig("start") == 0, rig.output()
+    assert rig("stop") == 0, rig.output()
+    del rig.system.volumes[f"{SAMPLE_PREFIX}derivatives"]
+    other = derivatives_directory(rig, "other")
+    assert rig("upgrade", "--release", SAMPLE_OTHER_RELEASE, "--derivatives-dir",
+               str(other)) == 0, rig.output()
+    assert rig.state()["derivatives"]["path"] == str(other)
+
+
+def unbound_record(rig: Rig, directory: Path, *, prepared: bool) -> None:
+    """A derivatives record no installed unit binds: the units on disk name no Device=."""
+    raw = rig.state()
+    info = directory.lstat()
+    raw["derivatives"] = {"path": str(directory), "device": info.st_dev, "inode": info.st_ino,
+                          "prepared": prepared}
+    rig.state_path.write_text(json.dumps(raw), encoding="utf-8")
+
+
+@pytest.mark.parametrize("prepared", [False, True], ids=["unprepared", "unbound"])
+def test_a_record_no_unit_binds_never_blocks_and_can_be_replaced(
+    rig: Rig, prepared: bool,
+) -> None:
+    rig.install()
+    first = derivatives_directory(rig, "first")
+    unbound_record(rig, first, prepared=prepared)
+    first.rename(first.with_name("first-moved"))  # it is not even there any more
+
+    assert rig("start") == 0, rig.output()
+    rig.fresh_output()
+    rig("status")
+    if not prepared:
+        assert "--derivatives-dir replaces it" in rig.stdout.getvalue()
+    assert rig("stop") == 0, rig.output()
+    del rig.system.volumes[f"{SAMPLE_PREFIX}derivatives"]
+    second = derivatives_directory(rig, "second")
+    assert rig("upgrade", "--release", SAMPLE_OTHER_RELEASE, "--derivatives-dir",
+               str(second)) == 0, rig.output()
+    assert rig.state()["derivatives"]["path"] == str(second)
+    assert volume_unit(rig).value("Volume", "Device") == str(second)
+
+
+def test_abandoning_an_upgrade_that_adopted_a_directory_restores_the_record(rig: Rig) -> None:
+    rig.install()
+    directory = derivatives_directory(rig)
+    rig.system.failures[(*SYSTEMCTL, "daemon-reload")] = (1, "", "Failed to reload")
+    rig.refused("upgrade", "--release", SAMPLE_OTHER_RELEASE, "--derivatives-dir",
+                str(directory), match="daemon-reload")
+    rig.system.failures.clear()
+    state = rig.state()
+    assert state["derivatives"]["path"] == str(directory)
+    assert state["pending"]["previous_derivatives"] is None
+
+    assert rig("upgrade", "--abandon") == 0, rig.output()
+    assert rig.state()["derivatives"] is None
+    assert volume_unit(rig).keys("Volume") == {"VolumeName", "Label"}
+
+
+def test_a_downgrade_to_a_release_before_the_shared_level_is_refused(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rig.started()
+    installer = rig.installer
+    real = installer._release_renderer
+
+    def before_the_level(paths: Any, state: Any, release: str) -> tuple[Any, Any]:
+        module, templates = real(paths, state, release)
+        if release != SAMPLE_OTHER_RELEASE:
+            return module, templates
+        return types.SimpleNamespace(
+            RENDER_API=1, unit_directory=module.unit_directory, render_units=module.render_units,
+            UnitConfig=module.UnitConfig,
+        ), templates
+
+    monkeypatch.setattr(installer, "_release_renderer", before_the_level)
+    rig.refused("upgrade", "--release", SAMPLE_OTHER_RELEASE,
+                match="cannot read the volumes moved to this install's level")
+    assert rig.state()["pending"] is None
+
+
+def stopped_stack_without_a_derivatives_volume(rig: Rig) -> None:
+    rig.install()
+    assert rig.state()["desired"] == "stopped"
+    assert f"{SAMPLE_PREFIX}derivatives" not in rig.system.volumes
+
+
+def test_upgrade_adopts_a_derivatives_directory_while_stopped_and_without_the_volume(
+    rig: Rig,
+) -> None:
+    stopped_stack_without_a_derivatives_volume(rig)
+    rig.system.units[f"{SAMPLE_PREFIX}derivatives-volume.service"] = {
+        "ActiveState": "active", "SubState": "exited",
+    }
+    directory = derivatives_directory(rig)
+    first = len(rig.system.calls)
+
+    assert rig("upgrade", "--release", SAMPLE_OTHER_RELEASE, "--derivatives-dir",
+               str(directory)) == 0, rig.output()
+    later = rig.system.calls[first:]
+    state = rig.state()
+    assert state["release"] == SAMPLE_OTHER_RELEASE and state["pending"] is None
+    assert state["derivatives"]["path"] == str(directory) and state["derivatives"]["prepared"]
+    # Prepared once the images are in place, before any unit is written.
+    pulls = [index for index, call in enumerate(later) if call[2:3] == ("pull",)]
+    chown = later.index((*PODMAN, "unshare", "chown", "-h", "10001:0", str(directory)))
+    assert max(pulls) < chown < later.index((*SYSTEMCTL, "daemon-reload"))
+    assert volume_unit(rig).value("Volume", "Device") == str(directory)
+    # Its volume service runs again at the next start, so Quadlet creates the bind then.
+    stop = (*SYSTEMCTL, "--no-block", "stop", f"{SAMPLE_PREFIX}derivatives-volume.service")
+    assert later.index((*SYSTEMCTL, "daemon-reload")) < later.index(stop)
+    assert rig("start") == 0, rig.output()
+    assert rig.system.volumes[f"{SAMPLE_PREFIX}derivatives"]["Options"]["device"] == str(
+        directory)
+
+
+def test_upgrade_to_the_current_release_can_adopt_a_derivatives_directory(rig: Rig) -> None:
+    stopped_stack_without_a_derivatives_volume(rig)
+    directory = derivatives_directory(rig)
+
+    assert rig("upgrade", "--release", SAMPLE_RELEASE, "--derivatives-dir",
+               str(directory)) == 0, rig.output()
+    assert "nothing to do" not in rig.stdout.getvalue()
+    assert rig.state()["derivatives"]["prepared"] is True
+    assert volume_unit(rig).value("Volume", "Device") == str(directory)
+    rig.fresh_output()
+    assert rig("upgrade", "--release", SAMPLE_RELEASE, "--derivatives-dir",
+               str(directory)) == 0, rig.output()
+    assert "nothing to do" in rig.stdout.getvalue()
+
+
+def test_adopting_a_derivatives_directory_needs_aegis_stopped(rig: Rig) -> None:
+    rig.started()
+    directory = derivatives_directory(rig)
+    first = len(rig.system.calls)
+
+    rig.refused("upgrade", "--release", SAMPLE_OTHER_RELEASE, "--derivatives-dir",
+                str(directory), match="must be stopped first")
+    assert not [call for call in rig.system.calls[first:] if call[2:3] == ("pull",)]
+    assert rig.state()["derivatives"] is None and mode(directory) == 0o750
+
+
+def test_adopting_refuses_an_existing_derivatives_volume_until_it_is_removed(rig: Rig) -> None:
+    rig.started()
+    assert rig("stop") == 0, rig.output()
+    volume = f"{SAMPLE_PREFIX}derivatives"
+    assert volume in rig.system.volumes
+    directory = derivatives_directory(rig)
+    arguments = ("upgrade", "--release", SAMPLE_OTHER_RELEASE, "--derivatives-dir",
+                 str(directory))
+
+    rig.refused(*arguments, match=f"podman volume rm {volume}")
+    assert rig.state()["derivatives"] is None
+    del rig.system.volumes[volume]  # the operator removes the volume a release never wrote
+
+    assert rig(*arguments) == 0, rig.output()
+    unit = f"{SAMPLE_PREFIX}derivatives-volume.service"
+    assert rig.system.unit(unit)["ActiveState"] == "inactive"
+    assert rig("start") == 0, rig.output()
+    assert rig.system.volumes[volume]["Options"]["device"] == str(directory)
+
+
+def test_a_recorded_derivatives_directory_never_changes(rig: Rig) -> None:
+    directory = derivatives_directory(rig)
+    assert rig(*INIT, "--derivatives-dir", str(directory)) == 0, rig.output()
+    assert rig("install") == 0, rig.output()
+    other = derivatives_directory(rig, "other")
+
+    rig.refused("upgrade", "--release", SAMPLE_OTHER_RELEASE, "--derivatives-dir", str(other),
+                match="never moves derivatives to another directory")
+    assert str(other) not in rig.system.labelled
+    rig.refused("upgrade", "--abandon", "--derivatives-dir", str(directory),
+                match="goes with --release")
+    assert rig("upgrade", "--release", SAMPLE_OTHER_RELEASE) == 0, rig.output()
+    assert rig.state()["derivatives"]["path"] == str(directory)
+    assert volume_unit(rig).value("Volume", "Device") == str(directory)
+
+
+def test_a_replaced_derivatives_directory_or_volume_is_refused(rig: Rig) -> None:
+    directory = derivatives_directory(rig)
+    assert rig(*INIT, "--derivatives-dir", str(directory)) == 0, rig.output()
+    assert rig("install") == 0, rig.output()
+    assert rig("start") == 0, rig.output()
+    assert rig("stop") == 0, rig.output()
+
+    volume = rig.system.volumes[f"{SAMPLE_PREFIX}derivatives"]
+    volume["Options"] = {}
+    rig.refused("start", match="does not bind")
+    rig.refused("install", match="does not bind")
+    volume["Options"] = {"device": str(directory), "type": "none", "o": "bind"}
+    # A new directory under the same name; the old one is kept, so its inode stays taken.
+    directory.rename(directory.with_name("replaced"))
+    directory.mkdir()
+    rig.refused("start", match="no longer the derivatives directory")
+
+
+def test_derivatives_and_roots_never_overlap(rig: Rig) -> None:
+    rig.install()
+    root = covered_root(rig)
+    inside = root / "thumbnails"
+    inside.mkdir()
+    rig.refused("upgrade", "--release", SAMPLE_OTHER_RELEASE, "--derivatives-dir", str(inside),
+                match="overlaps the root photos")
+    assert str(inside) not in rig.system.labelled
+
+    directory = derivatives_directory(rig)
+    assert rig("upgrade", "--release", SAMPLE_OTHER_RELEASE, "--derivatives-dir",
+               str(directory)) == 0, rig.output()
+    nested = directory / "originals"
+    nested.mkdir()
+    rig.xattrs[str(nested)] = UNLABELED
+    rig.refused("roots", "add", "--slot", "nested", "--source", str(nested),
+                match="overlaps the derivatives directory")
+
+
+def test_uninstall_purge_keeps_the_derivatives_directory_and_its_content(rig: Rig) -> None:
+    directory = derivatives_directory(rig)
+    assert rig(*INIT, "--derivatives-dir", str(directory)) == 0, rig.output()
+    assert rig("install") == 0, rig.output()
+    assert rig("start") == 0, rig.output()
+    (directory / "ab").mkdir()
+
+    assert rig("uninstall", "--purge-data") == 0, rig.output()
+    assert (directory / "ab").is_dir()
+    assert f"The derivatives directory {directory} is kept" in rig.stdout.getvalue()
+
+
+# -- the shared SELinux level ------------------------------------------------------------------
+
+
+def test_init_draws_one_level_that_every_container_unit_shares(rig: Rig) -> None:
+    rig.install()
+    level = rig.state()["label_level"]
+    match = re.fullmatch(r"s0:c(0|[1-9][0-9]*),c(0|[1-9][0-9]*)", level)
+
+    assert match is not None and int(match[1]) < int(match[2]) <= 1023
+    assert level != rig.installer.DEV_LABEL_LEVEL
+    containers = sorted(rig.quadlet_units.glob(f"{SAMPLE_PREFIX}*.container"))
+    assert len(containers) == len(SERVICE_NAMES) + 1  # and migrate
+    for path in containers:
+        unit = parse_unit(path.read_text(encoding="utf-8"))
+        assert unit.values("Container", "SecurityLabelLevel") == [level], path.name
+    assert f"AEGIS_PODMAN_LABEL_LEVEL={level}\n" in rig.env_file.read_text(encoding="utf-8")
+    assert f"SELinux level {level}" in rig.stdout.getvalue()
+    rig.fresh_output()
+    rig("status")
+    assert f"SELinux level {level}, shared by every container" in rig.stdout.getvalue()
+
+
+def test_a_level_has_two_distinct_categories_and_is_never_the_dev_stacks() -> None:
+    installer = load_installer()
+    drawn = iter([7, 7, 871, 403, 900, 12])
+
+    def randbelow(bound: int) -> int:
+        assert bound == 1024
+        return next(drawn)
+
+    # Equal categories and the dev stacks' pair are drawn again; the lower comes first.
+    assert installer.new_label_level(randbelow) == "s0:c12,c900"
+    assert installer.DEV_LABEL_LEVEL == aegisctl_launch.DEV_LABEL_LEVEL == "s0:c403,c871"
+    overlay = (Path(installer.__file__).parents[2] / "compose.podman.yaml").read_text()
+    assert f"label=level:{installer.DEV_LABEL_LEVEL}" in overlay
+
+
+def test_the_level_is_kept_across_upgrades_and_abandons(rig: Rig) -> None:
+    rig.started()
+    level = rig.state()["label_level"]
+    rig.system.failures[(*SYSTEMCTL, "daemon-reload")] = (1, "", "Failed to reload")
+    rig.refused("upgrade", "--release", SAMPLE_OTHER_RELEASE, match="daemon-reload")
+    rig.system.failures.clear()
+    assert rig("upgrade", "--abandon") == 0, rig.output()
+    assert rig.state()["label_level"] == level
+
+    assert rig("upgrade", "--release", SAMPLE_OTHER_RELEASE) == 0, rig.output()
+    assert rig.state()["label_level"] == level
+    for name, text in rendered_for(rig, SAMPLE_OTHER_RELEASE).items():
+        assert unit_path(rig, name).read_text(encoding="utf-8") == text, name
+    web = parse_unit(unit_path(rig, f"{SAMPLE_PREFIX}web.container").read_text())
+    assert web.value("Container", "SecurityLabelLevel") == level
+
+
+def test_a_record_from_before_the_level_gets_one_at_the_next_render_and_keeps_it(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rig.install()
+    raw = rig.state()
+    del raw["label_level"]  # as the release before the media processor recorded it
+    rig.state_path.write_text(json.dumps(raw), encoding="utf-8")
+    rig.fresh_output()
+    rig("status")
+    assert "SELinux level" not in rig.stdout.getvalue()
+    drawn = iter([40, 3])  # exactly one draw: a second one would raise
+    monkeypatch.setattr(rig.installer.secrets, "randbelow", lambda bound: next(drawn))
+
+    assert rig("install") == 0, rig.output()
+    assert rig.state()["label_level"] == "s0:c3,c40"
+    web = parse_unit(unit_path(rig, f"{SAMPLE_PREFIX}web.container").read_text())
+    assert web.value("Container", "SecurityLabelLevel") == "s0:c3,c40"
+    assert rig("upgrade", "--release", SAMPLE_OTHER_RELEASE) == 0, rig.output()
+    assert rig.state()["label_level"] == "s0:c3,c40"
+
+
+def test_files_and_directories_for_the_containers_are_labelled_at_level_s0(rig: Rig) -> None:
+    directory = derivatives_directory(rig)
+    assert rig(*INIT, "--derivatives-dir", str(directory)) == 0, rig.output()
+    assert rig("install") == 0, rig.output()
+    covered_root(rig)
+
+    labels = rig.system.commands("chcon")
+    assert labels and all(call[:6] == CONTAINER_FILE_LABEL for call in labels)
+    labelled = {call[6] for call in labels}
+    assert str(directory) in labelled
+    # Each secret under its temporary name, before it is handed over and renamed.
+    assert len([path for path in labelled if Path(path).parent == rig.secrets]) == len(
+        SECRET_NAMES)
+    (generation,) = rig.state()["mounts"]["generations"]
+    assert {str(path) for path in generation_files(rig, generation)} <= labelled
+
+
+
+# -- the one-time move of existing volumes to the shared level ----------------------------------
+
+
+def stack_from_before_the_level(rig: Rig) -> list[str]:
+    """A started stack whose record predates the shared level, as the deployed release's:
+    its volumes hold files at the containers' old random levels. Returns those volumes."""
+    rig.started()
+    raw = rig.state()
+    del raw["label_level"], raw["level_migration"]
+    rig.state_path.write_text(json.dumps(raw), encoding="utf-8")
+    assert set(raw["volumes"]) == set(VOLUMES)
+    return list(raw["volumes"])
+
+
+def mount_point(name: str) -> str:
+    return f"{SAMPLE_VOLUME_STORAGE}/{name}/_data"
+
+
+def relabel_calls(rig: Rig, since: int = 0) -> list[tuple[str, ...]]:
+    return [call for call in rig.system.calls[since:] if call[2:4] == ("unshare", "chcon")]
+
+
+def test_a_fresh_install_never_moves_volumes(rig: Rig) -> None:
+    rig.started()
+    assert rig("upgrade", "--release", SAMPLE_OTHER_RELEASE) == 0, rig.output()
+
+    assert relabel_calls(rig) == [] and rig.system.relabelled == []
+    assert rig.state()["level_migration"] is None
+
+
+def test_the_upgrade_stops_everything_relabels_the_recorded_volumes_then_restarts(
+    rig: Rig,
+) -> None:
+    volumes = stack_from_before_the_level(rig)
+    units = [SOCKET, *sorted(LONG_RUNNING), MIGRATE]
+    first = len(rig.system.calls)
+
+    assert rig("upgrade", "--release", SAMPLE_OTHER_RELEASE) == 0, rig.output()
+    later = rig.system.calls[first:]
+    state = rig.state()
+    level = state["label_level"]
+    assert level is not None
+    (stop,) = [index for index, call in enumerate(later)
+               if call[:4] == (*SYSTEMCTL, "--no-block", "stop")]
+    assert sorted(later[stop][4:]) == sorted(units)
+    relabels = [index for index, call in enumerate(later) if call[2:4] == ("unshare", "chcon")]
+    reload = later.index((*SYSTEMCTL, "daemon-reload"))
+    restart = next(index for index, call in enumerate(later)
+                   if call[:4] == (*SYSTEMCTL, "--no-block", "restart"))
+    # Stopped, relabelled, then the units are written, loaded and restarted.
+    assert stop < min(relabels) and max(relabels) < reload < restart
+    assert [later[index][4:] for index in relabels] == [
+        ("-R", "-h", "-l", level, mount_point(name)) for name in volumes
+    ]
+    assert state["level_migration"] == dict.fromkeys(volumes, True)
+    for name, text in rendered_for(rig, SAMPLE_OTHER_RELEASE).items():
+        assert unit_path(rig, name).read_text(encoding="utf-8") == text, name
+    assert f"SecurityLabelLevel={level}" in unit_path(
+        rig, f"{SAMPLE_PREFIX}postgres.container").read_text(encoding="utf-8")
+    assert rig("status") == 0, rig.output()
+
+
+def test_only_recorded_volumes_that_carry_the_install_label_are_relabelled(rig: Rig) -> None:
+    volumes = stack_from_before_the_level(rig)
+    system = rig.system
+    system.volumes[f"{SAMPLE_PREFIX}quarantine"]["Labels"] = {INSTALL_LABEL: "f" * 32}
+    del system.volumes[f"{SAMPLE_PREFIX}staging"]
+    system.volumes[f"{SAMPLE_PREFIX}derivatives"]["Options"] = {
+        "device": "/srv/aegis-operator/derivatives", "type": "none", "o": "bind",
+    }
+    system.volumes["other-application-data"] = {
+        "Name": "other-application-data", "Labels": {},
+        "Mountpoint": mount_point("other-application-data"),
+    }
+
+    assert rig("upgrade", "--release", SAMPLE_OTHER_RELEASE) == 0, rig.output()
+    touched = {path for path, _ in system.relabelled}
+    skipped = {"quarantine", "staging", "derivatives"}
+    assert touched == {mount_point(f"{SAMPLE_PREFIX}{name}") for name in VOLUME_NAMES
+                       if name not in skipped}
+    assert mount_point("other-application-data") not in touched
+    assert f"{SAMPLE_PREFIX}quarantine does not carry this install's label" in rig.output()
+    # Every recorded volume is settled: relabelled, or nothing of the install's to relabel.
+    assert rig.state()["level_migration"] == dict.fromkeys(volumes, True)
+
+
+def test_the_move_happens_once(rig: Rig) -> None:
+    stack_from_before_the_level(rig)
+    assert rig("upgrade", "--release", SAMPLE_OTHER_RELEASE) == 0, rig.output()
+    level = rig.state()["label_level"]
+    first = len(rig.system.calls)
+
+    assert rig("upgrade", "--release", SAMPLE_THIRD_RELEASE) == 0, rig.output()
+    assert rig("stop") == 0, rig.output()
+    assert rig("install") == 0, rig.output()
+    assert relabel_calls(rig, first) == []
+    assert rig.state()["label_level"] == level
+
+
+def test_an_interrupted_move_resumes_with_the_volumes_left(rig: Rig) -> None:
+    volumes = stack_from_before_the_level(rig)
+    failing = mount_point(f"{SAMPLE_PREFIX}indexer-coordination")
+
+    def refuse(command: tuple[str, ...]) -> tuple[int, str, str] | None:
+        if command[2:4] == ("unshare", "chcon") and command[-1] == failing:
+            return 1, "", "chcon: failed to change context: Operation not permitted"
+        return None
+
+    rig.system.intercept = refuse
+    rig.refused("upgrade", "--release", SAMPLE_OTHER_RELEASE, match="relabelling the volume")
+    state = rig.state()
+    done = volumes[:volumes.index(f"{SAMPLE_PREFIX}indexer-coordination")]
+    assert state["pending"]["release"] == SAMPLE_OTHER_RELEASE
+    assert state["level_migration"] == {name: name in done for name in volumes}
+    rig.refused("start", match="did not finish")
+    rig.fresh_output()
+    assert rig("status") == 3
+    assert "volumes not yet relabelled to that level" in rig.stdout.getvalue()
+
+    rig.system.intercept = None
+    first = len(rig.system.relabelled)
+    assert rig("upgrade", "--release", SAMPLE_OTHER_RELEASE) == 0, rig.output()
+    assert [path for path, _ in rig.system.relabelled[first:]] == [
+        mount_point(name) for name in volumes if name not in done
+    ]
+    assert rig.state()["level_migration"] == dict.fromkeys(volumes, True)
+    assert rig.state()["pending"] is None
+
+
+@pytest.mark.parametrize("mountpoint", [
+    "/srv/elsewhere/_data",
+    f"{SAMPLE_VOLUME_STORAGE}/../escape/_data",
+    f"{SAMPLE_VOLUME_STORAGE}/other-volume/_data",
+    f"{SAMPLE_VOLUME_STORAGE}/{SAMPLE_PREFIX}postgres-data",
+])
+def test_a_mount_point_outside_the_volume_storage_is_refused(rig: Rig, mountpoint: str) -> None:
+    stack_from_before_the_level(rig)
+    rig.system.volumes[f"{SAMPLE_PREFIX}postgres-data"]["Mountpoint"] = mountpoint
+
+    rig.refused("upgrade", "--release", SAMPLE_OTHER_RELEASE,
+                match="relabels nothing outside Podman's volume storage")
+    assert all(path != mountpoint and not path.endswith("postgres-data/_data")
+               for path, _ in rig.system.relabelled)
+    assert rig.state()["level_migration"][f"{SAMPLE_PREFIX}postgres-data"] is False
+
+
+def test_install_moves_the_volumes_only_while_aegis_is_stopped(rig: Rig) -> None:
+    volumes = stack_from_before_the_level(rig)
+
+    rig.refused("install", match="run aegis-podman stop, then install again")
+    assert relabel_calls(rig) == [] and rig.state()["label_level"] is None
+    assert rig("stop") == 0, rig.output()
+    assert rig("install") == 0, rig.output()
+    state = rig.state()
+    assert state["level_migration"] == dict.fromkeys(volumes, True)
+    assert {level for _, level in rig.system.relabelled} == {state["label_level"]}
+    assert rig("start") == 0, rig.output()
+
+
+def test_abandoning_to_a_release_before_the_level_moves_the_volumes_back_to_s0(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    volumes = stack_from_before_the_level(rig)
+    rig.system.failures[(*SYSTEMCTL, "daemon-reload")] = (1, "", "Failed to reload")
+    rig.refused("upgrade", "--release", SAMPLE_OTHER_RELEASE, match="daemon-reload")
+    rig.system.failures.clear()
+    assert rig.state()["level_migration"] == dict.fromkeys(volumes, True)
+    installer = rig.installer
+    real = installer._release_renderer
+
+    def before_the_level(paths: Any, state: Any, release: str) -> tuple[Any, Any]:
+        """The current release as one from before the shared level (render API 1)."""
+        module, templates = real(paths, state, release)
+        if release != SAMPLE_RELEASE:
+            return module, templates
+        return types.SimpleNamespace(
+            RENDER_API=1, unit_directory=module.unit_directory,
+            render_units=module.render_units,
+            UnitConfig=lambda **values: module.UnitConfig(
+                **values, image_media=state.images["media"], label_level="s0:c1,c2",
+            ),
+        ), templates
+
+    monkeypatch.setattr(installer, "_release_renderer", before_the_level)
+    first = len(rig.system.relabelled)
+    assert rig("upgrade", "--abandon") == 0, rig.output()
+    assert rig.system.relabelled[first:] == [(mount_point(name), "s0") for name in volumes]
+    state = rig.state()
+    assert state["label_level"] is None and state["level_migration"] is None
+    assert state["pending"] is None

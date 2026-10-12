@@ -17,6 +17,7 @@ from aegisctl.container_engine import (
     podman_compose_provider,
     selected_engine,
 )
+from aegisctl.container_launch import LEVEL_OPTION
 from aegisctl.container_resources import (
     ProjectInventory,
     ProjectResource,
@@ -116,7 +117,8 @@ POSTGRES_BOOTSTRAP_COMPOSE_ENTRYPOINT = compose_encoded(POSTGRES_BOOTSTRAP_ENTRY
 
 
 def expected_security_options() -> list[str]:
-    return ["no-new-privileges:true", *([MASK_OPTION] if selected_engine() == "podman" else [])]
+    return ["no-new-privileges:true",
+            *([MASK_OPTION, LEVEL_OPTION] if selected_engine() == "podman" else [])]
 
 
 def _boundary_up_rules(arguments: tuple[str, ...]) -> tuple[ProjectResourceRule, ...]:
@@ -132,7 +134,7 @@ def _boundary_up_rules(arguments: tuple[str, ...]) -> tuple[ProjectResourceRule,
         *(ProjectResourceRule("volume", (("com.docker.compose.volume", volume),))
           for volume in (
               "indexer-coordination", "postgres-data", "staging", "derivatives",
-              "model-cache", "quarantine", "frontier-outbox",
+              "model-cache", "quarantine", "frontier-outbox", "media-scratch",
           )),
     )
 
@@ -197,6 +199,33 @@ def test_application_services_have_fail_closed_container_isolation() -> None:
         assert set(services[name]["networks"]) == {"backend"}
 
 
+def test_media_processor_is_isolated_from_network_credentials_and_writes() -> None:
+    """Spec M2: the decoder of hostile media gets no network namespace beyond loopback, no
+    secret or credential, no database setting, nothing writable but scratch and /tmp, and
+    no way to gain privileges."""
+    services = rendered_compose()["services"]
+    processor = services["media-processor"]
+
+    assert processor["network_mode"] == "none" and "networks" not in processor
+    assert "secrets" not in processor and secret_sources(processor) == set()
+    # No setting at all: no database host, user or password file, no Django secret.
+    assert "environment" not in processor and "env_file" not in processor
+    assert processor["read_only"] is True
+    assert processor["cap_drop"] == ["ALL"] and not processor.get("cap_add")
+    assert processor["security_opt"] == expected_security_options()
+    assert processor["user"] not in ("", "0", "0:0", "root")
+    assert processor.get("privileged", False) is False
+    assert not {"pid", "ipc", "devices", "sysctls", "ports"} & set(processor)
+    assert processor["init"] is True and processor["pids_limit"] == 256
+    for mount in processor["tmpfs"]:
+        assert {"noexec", "nosuid", "nodev"} <= set(mount.partition(":")[2].split(","))
+        assert "size=" in mount
+    assert volume_sources(processor) == {"media-scratch"}
+    for mount in processor["volumes"]:
+        assert "docker.sock" not in mount.get("source", "") and not mount.get("read_only")
+        assert mount["target"] == "/srv/aegis/scratch"
+
+
 def test_gateway_has_only_delivery_state_and_no_application_credentials() -> None:
     gateway = rendered_compose()["services"]["gateway"]
 
@@ -240,7 +269,7 @@ def test_database_credentials_commands_and_volumes_are_role_scoped() -> None:
         "web": {"staging"},
         "operations": {"staging"},
         "indexer": {"indexer-coordination"},
-        "media": {"derivatives", "quarantine"},
+        "media": {"derivatives", "quarantine", "media-scratch"},
     }
     expected_users = {
         "migrate": "aegis_migrator",
@@ -412,7 +441,7 @@ def test_web_and_migrate_have_no_original_mount_and_every_root_consumer_is_read_
             not mount["target"].startswith("/srv/aegis/roots/")
             for mount in services[name].get("volumes", [])
         )
-    for name in ("gateway", *WORKER_SERVICES):
+    for name in ("gateway", *WORKER_SERVICES, "media-processor"):
         for mount in services[name].get("volumes", []):
             if mount["target"].startswith("/srv/aegis/roots/"):
                 assert mount["read_only"] is True

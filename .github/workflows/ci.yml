@@ -257,7 +257,7 @@ jobs:
           set -euo pipefail
           printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
       # Same Dockerfiles, repository-root context and default build arguments
-      # (UID/GID 10001) as the deployment gate's Compose build. Build all four
+      # (UID/GID 10001) as the deployment gate's Compose build. Build all five
       # before pushing any, so a failed build never leaves a partial release.
       - name: Build, label, and push the runtime images for this commit
         env:
@@ -269,7 +269,7 @@ jobs:
           [[ "$(git rev-parse HEAD)" == "$REVISION" ]]
           OWNER="${REPOSITORY_OWNER,,}"
           CREATED="$(git log -1 --format=%cI)"
-          roles=(backend gateway postgres caddy)
+          roles=(backend gateway postgres caddy media)
           for role in "${roles[@]}"; do
             docker build --file "docker/$role.Dockerfile" \
               --label "org.opencontainers.image.source=https://github.com/$REPOSITORY" \

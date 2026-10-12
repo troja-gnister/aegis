@@ -104,6 +104,14 @@ def _safe_compose() -> dict:
                 for name in ("alice", "bob")
             ],
         }
+    # The media decoder: no network at all, no credential, the roots read-only (spec M2).
+    services["media-processor"] = {
+        "read_only": True, "cap_drop": ["ALL"], "network_mode": "none",
+        "volumes": [
+            {"type": "volume", "source": "media-scratch", "target": "/srv/aegis/scratch"},
+            *(dict(volume) for volume in services["media"]["volumes"]),
+        ],
+    }
     services["gateway"]["ports"] = [{"host_ip": "127.0.0.1"}]
     services["postgres"] = {"ports": [{"host_ip": "127.0.0.1"}]}
     return {
@@ -113,7 +121,11 @@ def _safe_compose() -> dict:
     }
 
 
-@pytest.mark.parametrize("drift", ("protected_volume", "external", "writable", "egress", "port"))
+@pytest.mark.parametrize("drift", (
+    "protected_volume", "external", "writable", "egress", "port", "processor_network",
+    "processor_bridge", "processor_secret", "processor_setting", "processor_writable",
+    "processor_missing",
+))
 def test_compose_gate_rejects_unsafe_resource_or_original_mount_changes(drift: str) -> None:
     original = _safe_compose()
     SUPPORT["check_compose"](original)
@@ -126,6 +138,18 @@ def test_compose_gate_rejects_unsafe_resource_or_original_mount_changes(drift: s
         changed["services"]["operations"]["volumes"][0]["read_only"] = False
     elif drift == "egress":
         changed["services"]["indexer"]["networks"]["edge"] = {}
+    elif drift == "processor_network":
+        changed["services"]["media-processor"]["networks"] = {"backend": {}}
+    elif drift == "processor_bridge":
+        changed["services"]["media-processor"]["network_mode"] = "bridge"
+    elif drift == "processor_secret":
+        changed["services"]["media-processor"]["secrets"] = [{"source": "django-secret-key"}]
+    elif drift == "processor_setting":
+        changed["services"]["media-processor"]["environment"] = {"AEGIS_DB_HOST": "postgres"}
+    elif drift == "processor_writable":
+        changed["services"]["media-processor"]["volumes"][1]["read_only"] = False
+    elif drift == "processor_missing":
+        del changed["services"]["media-processor"]
     else:
         changed["services"]["postgres"]["ports"][0]["host_ip"] = "0.0.0.0"
     with pytest.raises(ValueError):

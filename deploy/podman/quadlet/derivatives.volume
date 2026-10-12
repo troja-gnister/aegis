@@ -3,3 +3,9 @@
 VolumeName=@@PREFIX@@derivatives
 # The install's token: aegis-podman removes only objects that carry it.
 Label=io.aegis.install=@@INSTALL_TOKEN@@
+# With aegis-podman --derivatives-dir (spec M8) the renderer keeps a bind of that operator
+# directory here (Device=, Type=none, Options=bind), so a large library's derivatives can live
+# on another disk; without one, this is a plain named volume.
+Device=@@DERIVATIVES_DIR@@
+Type=none
+Options=bind

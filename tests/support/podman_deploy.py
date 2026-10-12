@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import textwrap
@@ -35,8 +36,16 @@ SAMPLE_BACKEND_SUBNET = "10.123.45.0/24"
 SAMPLE_INSTALL_TOKEN = "5a17" * 8
 SAMPLE_IMAGES = {
     role: f"registry.example.test/aegis-{role}@sha256:{digit * 64}"
-    for role, digit in (("backend", "a"), ("gateway", "b"), ("postgres", "c"), ("caddy", "d"))
+    for role, digit in (
+        ("backend", "a"), ("gateway", "b"), ("postgres", "c"), ("caddy", "d"), ("media", "f"),
+    )
 }
+# A synthetic operator directory for the derivatives volume's bind form (spec M8).
+SAMPLE_DERIVATIVES_DIR = "/srv/aegis-operator/derivatives"
+# A synthetic install's shared SELinux MCS level (the installer draws one at random).
+SAMPLE_LABEL_LEVEL = "s0:c17,c912"
+# Where the fake Podman keeps the operator's named volumes (podman info: store.volumePath).
+SAMPLE_VOLUME_STORAGE = "/home/aegis-operator/.local/share/containers/storage/volumes"
 
 
 def load_installer() -> ModuleType:
@@ -71,6 +80,7 @@ def sample_config(**overrides: Any) -> Any:
         "secrets_dir": SAMPLE_SECRETS_DIR,
         "backend_subnet": SAMPLE_BACKEND_SUBNET,
         "install_token": SAMPLE_INSTALL_TOKEN,
+        "label_level": SAMPLE_LABEL_LEVEL,
         **{f"image_{role}": image for role, image in SAMPLE_IMAGES.items()},
     }
     return installer.UnitConfig(**(fields | overrides))
@@ -247,6 +257,8 @@ PODMAN = ("podman", "--remote=false")
 # How the installer runs the release's aegisctl on the host Python.
 AEGISCTL = (sys.executable, "-B", "-P", "-S", "-m", "aegisctl")
 SYSTEMCTL = ("systemctl", "--user")
+# How the installer labels what the containers read: container_file_t at level s0.
+CONTAINER_FILE_LABEL = ("chcon", "-h", "-t", "container_file_t", "-l", "s0")
 # A structurally valid stand-in for Caddy's root certificate: one DER SEQUENCE, PEM-armored.
 SAMPLE_CERTIFICATE_DER = bytes([0x30, 0x82, 0x01, 0x00]) + bytes(range(256))
 
@@ -353,6 +365,9 @@ class FakeSystem:
         # Every aegisctl run: its argument vector and environment.
         self.aegisctl_runs: list[tuple[tuple[str, ...], dict[str, str]]] = []
         self.host_gid = SAMPLE_HOST_GID
+        # What podman unshare chcon -R relabelled, in order: (mount point, level).
+        self.relabelled: list[tuple[str, str]] = []
+        self.volume_storage = SAMPLE_VOLUME_STORAGE
         # SELinux as the reader probe meets it: each source's label (shared with the test's
         # fake xattrs) and the types whose read rules the loaded module grants.
         self.labels: dict[str, bytes] = {}
@@ -393,9 +408,11 @@ class FakeSystem:
         elif command[:2] == ("loginctl", "show-user"):
             assert command[3:] == ("--property=Linger", "--value"), command
             code, stdout = 0, f"{self.linger}\n"
-        elif command[:4] == ("chcon", "-h", "-t", "container_file_t") and len(command) == 5:
-            assert Path(command[4]).is_file() and not Path(command[4]).is_symlink(), command
-            self.labelled.append(command[4])
+        elif command[:6] == CONTAINER_FILE_LABEL and len(command) == 7:
+            # Files, and the derivatives directory, at level s0; never through a link.
+            target = Path(command[6])
+            assert (target.is_file() or target.is_dir()) and not target.is_symlink(), command
+            self.labelled.append(command[6])
             code, stdout = 0, ""
         elif command[:2] == ("ip", "-j"):
             code, stdout = self.routes(command[2:])
@@ -427,9 +444,12 @@ class FakeSystem:
     def podman(self, words: tuple[str, ...]) -> tuple[int, str]:
         match words:
             case ("info", "--format", "json"):
-                return 0, json.dumps({"host": {"security": {
-                    "rootless": self.rootless, "selinuxEnabled": self.selinux_enabled,
-                }}})
+                return 0, json.dumps({
+                    "host": {"security": {
+                        "rootless": self.rootless, "selinuxEnabled": self.selinux_enabled,
+                    }},
+                    "store": {"volumePath": self.volume_storage},
+                })
             case ("ps", "-a", "--format", "json"):
                 return 0, json.dumps(self.containers)
             case ("network", "ls", "--format", "json"):
@@ -519,8 +539,23 @@ class FakeSystem:
                     return 1, ""
                 self.removed.append(identifier)
                 return 0, identifier + "\n"
+            case ("unshare", "stat", "--format=%u:%g:%a", "--", path):
+                # As the containers' user namespace shows it: a directory handed over looks
+                # owned by 10001 and the operator's group (0 there).
+                info = os.stat(path)
+                owner = self.chowned.get(path, f"{info.st_uid}:{info.st_gid}")
+                return 0, f"{owner}:{stat.S_IMODE(info.st_mode):o}\n"
+            case ("unshare", "chcon", "-R", "-h", "-l", level, path):
+                # Only ever a volume's own mount point inside the volume storage.
+                assert path.startswith(f"{self.volume_storage}/"), path
+                assert path.endswith("/_data") and path.count("/") == (
+                    self.volume_storage.count("/") + 2
+                ), path
+                self.relabelled.append((path, level))
+                return 0, ""
             case ("unshare", "chown", "-h", "10001:10001" | "10001:0" as owner, path):
-                assert Path(path).is_file() and not Path(path).is_symlink(), path
+                target = Path(path)
+                assert (target.is_file() or target.is_dir()) and not target.is_symlink(), path
                 self.chowned[path] = owner
                 return 0, ""
             case ("container", "inspect", name) if name in self.probe_containers:
@@ -754,7 +789,16 @@ class FakeSystem:
             unit = parse_unit(path.read_text(encoding="utf-8"))
             if path.suffix == ".volume":
                 name = unit.value("Volume", "VolumeName") or ""
-                self.volumes.setdefault(name, {"Name": name, "Labels": labels(unit, "Volume")})
+                # Podman's local driver keeps the mount options it was created with.
+                options = {
+                    option: value for key, option in (
+                        ("Device", "device"), ("Type", "type"), ("Options", "o"),
+                    ) if (value := unit.value("Volume", key)) is not None
+                }
+                self.volumes.setdefault(name, {
+                    "Name": name, "Labels": labels(unit, "Volume"), "Options": options,
+                    "Mountpoint": f"{self.volume_storage}/{name}/_data",
+                })
                 self.activate(f"{path.stem}-volume.service")
             elif path.suffix == ".network":
                 name = unit.value("Network", "NetworkName") or ""

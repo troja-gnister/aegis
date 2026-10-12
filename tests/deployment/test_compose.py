@@ -15,7 +15,11 @@ import yaml
 from aegis_apps.common import runtime_checks
 from aegisctl.container_engine import compose_environment as validated_compose_environment
 from aegisctl.container_engine import container_command, selected_engine
-from aegisctl.container_launch import _checked_compose_inputs, canonical_compose_arguments
+from aegisctl.container_launch import (
+    LEVEL_OPTION,
+    _checked_compose_inputs,
+    canonical_compose_arguments,
+)
 from aegisctl.container_resources import (
     ProjectInventory,
     ProjectResource,
@@ -58,8 +62,10 @@ CADDY_TMPFS_MODES = (("/config", "0700"), ("/tmp", "1777"))
 
 
 def expected_security_options() -> list[str]:
-    """Base NNP everywhere; Podman's explicit overlay contributes only the mask."""
-    return ["no-new-privileges:true", *([MASK_OPTION] if selected_engine() == "podman" else [])]
+    """Base NNP everywhere; Podman's explicit overlay contributes the mask and the shared dev
+    MCS level, nothing else."""
+    return ["no-new-privileges:true",
+            *([MASK_OPTION, LEVEL_OPTION] if selected_engine() == "podman" else [])]
 
 
 def expected_caddy_sysctls() -> dict[str, str] | None:
@@ -325,7 +331,7 @@ def test_core_services_are_unprivileged_and_postgres_is_private() -> None:
         services
     )
     assert "ports" not in services["postgres"]
-    for name in ("gateway", "web", "operations", "indexer", "media"):
+    for name in ("gateway", "web", "operations", "indexer", "media", "media-processor"):
         assert services[name]["read_only"] is True
         assert services[name]["cap_drop"] == ["ALL"]
         assert services[name]["security_opt"] == expected_security_options()
@@ -862,7 +868,7 @@ def test_only_core_gateway_joins_non_internal_edge_network_for_host_ingress() ->
     assert set(services["gateway"]["networks"]) == {"backend", "edge", "tls-hop"}
     for name, service in services.items():
         if name != "gateway" and not service.get("profiles"):
-            assert "edge" not in service["networks"]
+            assert "edge" not in service.get("networks", {})
 
 
 def test_base_compose_has_no_original_or_docker_socket_mounts() -> None:
@@ -892,7 +898,7 @@ def test_worker_commands_and_volumes_are_role_scoped() -> None:
     expected = {
         "operations": {"staging"},
         "indexer": {"indexer-coordination"},
-        "media": {"derivatives", "quarantine"},
+        "media": {"derivatives", "quarantine", "media-scratch"},
     }
 
     for role, volume_sources in expected.items():
@@ -908,6 +914,129 @@ def test_worker_commands_and_volumes_are_role_scoped() -> None:
         "type": "volume", "source": "indexer-coordination",
         "target": "/srv/aegis/indexer-coordination", "volume": {},
     }]
+
+
+CANONICAL_SERVICES = {
+    "postgres", "migrate", "web", "operations", "indexer", "media", "media-processor", "gateway",
+}
+
+
+def test_the_canonical_service_set_is_pinned() -> None:
+    assert set(rendered_compose()["services"]) == CANONICAL_SERVICES
+    assert set(rendered_compose("tls", "tls-local")["services"]) == CANONICAL_SERVICES | {
+        "caddy", "caddy-local",
+    }
+
+
+def test_media_processor_is_offline_credential_free_and_shares_only_scratch() -> None:
+    """Spec M2: the only decoder has no network, no secret, no database setting, no root
+    of the base stack, and the scratch volume as its one writable mount."""
+    services = rendered_compose(
+        environment={"AEGIS_UID": "10001", "AEGIS_GID": "10001"},
+    )["services"]
+    processor = services["media-processor"]
+
+    assert processor["image"] == "aegis-media"
+    assert processor["build"]["dockerfile"] == "docker/media.Dockerfile"
+    assert processor["build"]["args"] == {"AEGIS_UID": "10001", "AEGIS_GID": "10001"}
+    assert processor["user"] == "10001:10001" == services["media"]["user"]
+    assert processor["network_mode"] == "none"
+    assert "networks" not in processor
+    assert "ports" not in processor and "expose" not in processor
+    assert "secrets" not in processor
+    assert "environment" not in processor
+    assert "command" not in processor and "entrypoint" not in processor
+    assert processor["read_only"] is True
+    assert processor["cap_drop"] == ["ALL"] and "cap_add" not in processor
+    assert processor["security_opt"] == expected_security_options()
+    assert processor["init"] is True
+    assert processor["tmpfs"] == ["/tmp:size=64m,noexec,nosuid,nodev"]
+    assert processor["pids_limit"] == 256
+    assert int(processor["mem_limit"]) == 7 * 2**30
+    assert float(processor["cpus"]) == 2.0
+    assert processor["restart"] == "unless-stopped"
+    assert "depends_on" not in processor and "healthcheck" not in processor
+    assert processor["volumes"] == [{
+        "type": "volume", "source": "media-scratch", "target": "/srv/aegis/scratch",
+        "volume": {},
+    }]
+    # The media worker is the only other service on the scratch volume.
+    assert {
+        name for name, service in services.items()
+        if any(mount.get("source") == "media-scratch" for mount in service.get("volumes", []))
+    } == {"media", "media-processor"}
+    media_scratch = next(
+        mount for mount in services["media"]["volumes"] if mount["source"] == "media-scratch"
+    )
+    assert media_scratch["target"] == "/srv/aegis/scratch"
+    assert not media_scratch.get("read_only")
+
+
+def test_media_processor_runs_as_the_configured_runtime_identity() -> None:
+    services = rendered_compose(environment={"AEGIS_UID": "501", "AEGIS_GID": "20"})["services"]
+
+    assert services["media-processor"]["user"] == services["media"]["user"] == "501:20"
+    assert services["media-processor"]["build"]["args"] == {"AEGIS_UID": "501", "AEGIS_GID": "20"}
+
+
+def test_gateway_reads_derivatives_read_only_through_the_runtime_group() -> None:
+    services = rendered_compose(environment={"AEGIS_GID": "20"})["services"]
+    gateway = services["gateway"]
+
+    assert gateway["user"] == "101:101"
+    assert gateway["group_add"] == ["20"]
+    assert {
+        name for name, service in services.items() if service.get("group_add")
+    } == {"gateway"}
+    derivatives = {
+        name: mount for name, service in services.items()
+        for mount in service.get("volumes", []) if mount.get("source") == "derivatives"
+    }
+    assert set(derivatives) == {"media", "gateway"}
+    assert derivatives["gateway"]["read_only"] is True
+    assert not derivatives["media"].get("read_only")
+
+
+def test_backend_image_precreates_volume_mount_points_for_the_runtime_user() -> None:
+    dockerfile = (REPOSITORY / "docker" / "backend.Dockerfile").read_text(encoding="utf-8")
+    final_stage = dockerfile.rsplit("\nFROM ", 1)[1]
+
+    assert (
+        'install -d -o "$AEGIS_UID" -g "$AEGIS_GID" -m 0750 /srv/aegis/derivatives '
+        "/srv/aegis/quarantine"
+    ) in final_stage
+    assert 'install -d -o "$AEGIS_UID" -g "$AEGIS_GID" -m 0770 /srv/aegis/scratch' in final_stage
+    assert final_stage.index("/srv/aegis/scratch") < final_stage.index("USER 10001:10001")
+    media = (REPOSITORY / "docker" / "media.Dockerfile").read_text(encoding="utf-8")
+    assert 'install -d -o "$AEGIS_UID" -g "$AEGIS_GID" -m 0770 /srv/aegis/scratch' in media
+
+
+def test_gateway_image_owns_the_derivatives_mount_point_as_the_worker_does() -> None:
+    dockerfile = (REPOSITORY / "docker" / "gateway.Dockerfile").read_text(encoding="utf-8")
+    final_stage = dockerfile.split(
+        "FROM docker.io/nginxinc/nginx-unprivileged:1.30.4-alpine@", maxsplit=1
+    )[1]
+    lines = final_stage.splitlines()
+
+    # The worker's uid (10001 unless compose passes its runtime uid) and the gateway's group.
+    install = lines.index('RUN install -d -o "$AEGIS_UID" -g 101 -m 0750 /srv/aegis/derivatives')
+    assert lines[install - 2:install] == ["ARG AEGIS_UID=10001", "USER 0"]
+    assert lines[-2:] == ["USER 101:101", 'CMD ["/usr/local/bin/aegis-gateway-start"]']
+    assert [line for line in lines if line.startswith("USER ")] == ["USER 0", "USER 101:101"]
+
+
+def test_compose_builds_the_gateway_with_the_workers_runtime_uid() -> None:
+    """Podman gives a fresh derivatives volume its first mounter's mount point: whichever of
+    the gateway and the worker comes first, the worker's uid owns it."""
+    default = rendered_compose(environment={"AEGIS_UID": "10001", "AEGIS_GID": "10001"})
+    configured = rendered_compose(environment={"AEGIS_UID": "501", "AEGIS_GID": "20"})
+
+    assert default["services"]["gateway"]["build"]["args"] == {"AEGIS_UID": "10001"}
+    services = configured["services"]
+    assert services["gateway"]["build"]["args"] == {"AEGIS_UID": "501"}
+    assert services["media"]["user"] == "501:20"
+    assert services["gateway"]["user"] == "101:101"
+    assert services["gateway"]["group_add"] == ["20"]
 
 
 def test_coordination_image_ownership_uses_configured_uid_gid() -> None:
