@@ -30,7 +30,8 @@ CONTEXT = TimelineCursorContext(
     year=None,
     limit=60,
 )
-ENTRY = uuid.UUID("33333333-3333-4333-8333-333333333333")
+# Hex letters, so the uppercased-id tamper case really changes the signed text.
+ENTRY = uuid.UUID("33333333-3333-4333-8333-3333333abcde")
 MOMENT = datetime(2024, 5, 1, 10, 30, 0, 123456, tzinfo=UTC)
 
 

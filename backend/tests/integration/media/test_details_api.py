@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 from aegis_apps.catalog.models import CatalogEntry
 from aegis_apps.media.links import fingerprint_token
+from aegis_apps.media.models import MediaDerivative
 from aegis_apps.roots.permissions import Permission
+from django.conf import settings
 from django.test import Client
+from django.utils import timezone
 
 from .conftest import MediaCatalog, other_root
 
@@ -155,9 +158,14 @@ def test_derivative_states_cover_pending_failed_stale_and_requested(
         "preview": {"state": "missing", "url": None},
     }
 
-    media_catalog.derivative(asset, "preview", state="failed")
+    failed = media_catalog.derivative(asset, "preview", state="failed")
     assert _details(media_catalog, entry).json()["derivatives"]["preview"]["state"] == "failed"
 
+    # A fresh failure backs requests off (test_requests); request once it has aged out.
+    backoff = settings.AEGIS_MEDIA_REQUEST_POLICY.backoff_for(1)
+    MediaDerivative.objects.filter(pk=failed.pk).update(
+        created_at=timezone.now() - timedelta(seconds=backoff + 1),
+    )
     requested = media_catalog.post(
         f"/api/v1/entries/{entry.pk}/media/requests", {"kind": "preview"},
     )

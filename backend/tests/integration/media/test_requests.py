@@ -527,15 +527,32 @@ def test_request_lookups_use_the_media_request_index(media_catalog: MediaCatalog
         ),
     ]
 
+    # On a near-empty table every job index costs the same, so the planner's pick is
+    # arbitrary. Hide the other secondary indexes in a rolled-back transaction: the only
+    # alternative left is a disabled seq scan, so each plan proves the partial index's
+    # expression and predicate match the lookup's SQL.
     with transaction.atomic(), connection.cursor() as cursor:
-        cursor.execute("ANALYZE operations_job")
+        cursor.execute(
+            "SELECT i.indexrelid::regclass::text, c.conname FROM pg_index i"
+            " LEFT JOIN pg_constraint c ON c.conindid = i.indexrelid AND c.conrelid = i.indrelid"
+            " WHERE i.indrelid = 'operations_job'::regclass AND NOT i.indisprimary"
+            " AND i.indexrelid <> 'operations_job_media_req_idx'::regclass",
+        )
+        competitors = cursor.fetchall()
+        assert competitors
+        for index_name, constraint_name in competitors:
+            if constraint_name is None:
+                cursor.execute(f"DROP INDEX {connection.ops.quote_name(index_name)}")
+            else:
+                cursor.execute(
+                    "ALTER TABLE operations_job DROP CONSTRAINT "
+                    + connection.ops.quote_name(constraint_name),
+                )
         cursor.execute("SET LOCAL enable_seqscan = off")
         plans = [query.explain() for query in queries]
+        transaction.set_rollback(True)
 
-    # The entry-scoped lookups seek the partial (kind, state, payload entry) index; the
-    # cap's count is bounded to open jobs of one kind by an index either way.
-    for plan in plans[:2]:
+    for plan in plans:
         assert "operations_job_media_req_idx" in plan, plan
-    assert "Seq Scan on operations_job" not in plans[2], plans[2]
-    assert "Index" in plans[2], plans[2]
+        assert "Seq Scan on operations_job" not in plan, plan
     assert active_request_count(actor_id, JobKind.MEDIA_PREVIEW) == 1
