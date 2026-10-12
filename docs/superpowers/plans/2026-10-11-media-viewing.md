@@ -367,7 +367,7 @@ The controller runs, in order:
 2. `make verify`.
 3. `make verify-compose`, with the O11 module exception unchanged.
 4. `make test-e2e`.
-5. `make verify-podman-deploy`.
+5. `make verify-podman-deploy`, plus its `--rehearse-level-migration` mode: a throwaway test-prefixed stack installed with the pre-level installer, then upgraded, which proves the one-time volume relabel before the live install sees it.
 6. `git diff --check`.
 
 Then fix failures, using subagents per failure class with reviews, and repeat until green. Next comes the performance work:
