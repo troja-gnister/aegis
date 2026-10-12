@@ -3578,6 +3578,10 @@ def _install_drop_ins(paths: Paths, state: State, rendered: RenderedRoots) -> se
         if role not in rendered.drop_ins and str(path) in state.files:
             _check_removable(paths, state, path, force=False)
             stale.append(path)
+    # An interrupted switch may have written drop-ins that no restart applied: the rerun
+    # finds the processor's, which binds the roots alone and names no generation, already
+    # in place. Every rendered role counts as changed then, so each unit restarts.
+    interrupted = state.mounts["installing"] is not None
     state.mounts["installing"] = rendered.generation
     save_state(paths, state)
     changed = set()
@@ -3586,7 +3590,9 @@ def _install_drop_ins(paths: Paths, state: State, rendered: RenderedRoots) -> se
             continue
         path = paths.drop_in(state.prefix, role)
         _own_directory(path.parent)
-        if _publish(paths, state, path, rendered.drop_ins[role], "drop-in", 0o644):
+        if _publish(paths, state, path, rendered.drop_ins[role], "drop-in", 0o644) or (
+            interrupted
+        ):
             changed.add(role)
     _remove_drop_ins(paths, state, stale)
     state.mounts["current"] = rendered.generation

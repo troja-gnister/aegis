@@ -4014,7 +4014,10 @@ def test_a_failed_restart_keeps_the_slot_too(rig: Rig) -> None:
     rig.refused("roots", "remove", "--slot", "music", match="roots remove --slot music")
     assert "music" in rig.state()["roots"]
     rig.system.failures.clear()
+    first = len(rig.system.calls)
     assert rig("roots", "remove", "--slot", "music") == 0, rig.output()
+    # The failed restart applied none of the drop-ins written, the processor's included.
+    assert restarts(rig, first) == [ROOT_SERVICES]
 
 
 def originals_snapshot(rig: Rig) -> dict[str, Any]:
@@ -5478,9 +5481,12 @@ def test_a_mount_point_outside_the_volume_storage_is_refused(rig: Rig, mountpoin
 
 def test_install_moves_the_volumes_only_while_aegis_is_stopped(rig: Rig) -> None:
     volumes = stack_from_before_the_level(rig)
+    before = rig.state()
 
     rig.refused("install", match="run aegis-podman stop, then install again")
-    assert relabel_calls(rig) == [] and rig.state()["label_level"] is None
+    # The refusal draws no level and writes nothing: the record still predates the level.
+    assert relabel_calls(rig) == [] and rig.state() == before
+    assert "label_level" not in before
     assert rig("stop") == 0, rig.output()
     assert rig("install") == 0, rig.output()
     state = rig.state()

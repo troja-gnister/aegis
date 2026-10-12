@@ -18,6 +18,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -356,7 +357,8 @@ class FakeHost:
             if "deploy-check" in self.administrators:
                 found = self.administrators["deploy-check"]
                 return completed(command, 0, f"{shown}user_id={found} created=false\n")
-            self.administrators["deploy-check"] = str(7 + len(self.administrators))
+            self.administrators["deploy-check"] = str(
+                uuid.UUID(int=7 + len(self.administrators)))
             created = self.administrators["deploy-check"]
             return completed(command, 0, f"{shown}user_id={created} created=true\n")
         if verb == "upgrade":
@@ -1538,8 +1540,9 @@ def test_what_the_builds_leave_is_reported_not_removed(rig: Rig) -> None:
     assert rig() == 0, rig.output()
     caches = [identifier for identifier, image in rig.fake.images.items()
               if not image["tags"] and not image["labels"]]
-    assert len(caches) == 4
-    assert "kept, as any build's: 4 new images (build cache)" in rig.fake.stderr.getvalue()
+    # One untagged cache image per built role: backend, gateway, postgres, caddy, media.
+    assert len(caches) == len(harness.ROLES) == 5
+    assert "kept, as any build's: 5 new images (build cache)" in rig.fake.stderr.getvalue()
 
 
 def test_unit_files_of_earlier_runs_are_reported_and_left_alone(rig: Rig) -> None:
@@ -1885,11 +1888,11 @@ def test_a_rehearsal_moves_a_previous_install_to_the_shared_level_and_leaves_not
     assert rig.checks() == dict.fromkeys(
         ("preflight", "build_images", *REHEARSAL, *FINAL), "passed")
     assert "commit c60a2f400000 (render API 1)" in rig.detail("level_migration_previous_install")
-    assert "created administrator 7" in rig.detail("level_migration_marker")
+    assert f"created administrator {uuid.UUID(int=7)}" in rig.detail("level_migration_marker")
     assert "shared level s0:c17,c912" in rig.detail("level_migration_upgrade")
     assert f"{PREFIX}postgres healthy at the shared level s0:c17,c912" in rig.detail(
         "level_migration_start")
-    assert "administrator 7 from before the upgrade found again" in rig.detail(
+    assert f"administrator {uuid.UUID(int=7)} from before the upgrade found again" in rig.detail(
         "level_migration_marker_survives")
     # None of the checks runs in a rehearsal.
     assert not set(CHECKS) & set(rig.checks())
@@ -1970,7 +1973,8 @@ def test_a_failed_bootstrap_shows_its_error_but_never_the_password(rig: Rig) -> 
     ("upgrade-fails", "level_migration_upgrade", "upgrade refused (fake)"),
     ("postgres-unhealthy", "level_migration_start", "is unhealthy at the level"),
     ("marker-lost", "level_migration_marker_survives",
-     "user_id=7 created=true, not the marker administrator 7 found again"),
+     f"user_id={uuid.UUID(int=7)} created=true, "
+     f"not the marker administrator {uuid.UUID(int=7)} found again"),
 ])
 def test_each_rehearsal_step_fails_on_its_own_fault_and_cleanup_still_runs(
     rig: Rig, fault: str, failed: str, message: str,

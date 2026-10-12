@@ -945,7 +945,9 @@ def test_media_processor_is_offline_credential_free_and_shares_only_scratch() ->
     assert "ports" not in processor and "expose" not in processor
     assert "secrets" not in processor
     assert "environment" not in processor
-    assert "command" not in processor and "entrypoint" not in processor
+    # Compose's JSON rendering always carries command and entrypoint (null when unset), so
+    # "unset" is None here; an explicit empty list would still be an override and fail.
+    assert processor["command"] is None and processor["entrypoint"] is None
     assert processor["read_only"] is True
     assert processor["cap_drop"] == ["ALL"] and "cap_add" not in processor
     assert processor["security_opt"] == expected_security_options()

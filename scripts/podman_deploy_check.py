@@ -214,7 +214,10 @@ REHEARSAL_CHECKS = (
 # again after it. Its password is generated and kept by the installer, never seen here.
 MARKER_USER = "deploy-check"
 MARKER_EMAIL = "deploy-check@example.org"
-BOOTSTRAPPED = re.compile(r"user_id=(\d+) created=(true|false)")
+# bootstrap_admin prints the user's UUID primary key.
+BOOTSTRAPPED = re.compile(
+    r"user_id=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) created=(true|false)"
+)
 LABEL_LEVEL = re.compile(r"s0:c\d{1,4},c\d{1,4}")
 # The upgrade stops the stack and relabels every recorded volume once.
 UPGRADE_TIMEOUT = 3600
@@ -1724,7 +1727,7 @@ def _bootstrap(rehearsal: Rehearsal, installer: Path) -> tuple[str, bool]:
     found = [match for line in (result.stdout or "").splitlines()
              if (match := BOOTSTRAPPED.fullmatch(line.strip())) is not None]
     if len(found) != 1:
-        raise CheckFailed("bootstrap-password printed no single user_id=<n> created=<bool> line")
+        raise CheckFailed("bootstrap-password printed no single user_id=<uuid> created=<bool> line")
     return found[0].group(1), found[0].group(2) == "true"
 
 

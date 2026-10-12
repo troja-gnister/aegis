@@ -570,13 +570,15 @@ def test_created_identity_is_inspected_before_start_and_database_survives_recrea
 @pytest.mark.parametrize("subject", ["application", "postgres"])
 @pytest.mark.parametrize("drift", [
     "none", "missing-nnp", "missing-mask", "extra-mask", "duplicate-nnp", "duplicate-mask",
+    "missing-level", "duplicate-level",
 ])
 def test_static_security_requires_exact_engine_options(
     engine: PostgresEngine, monkeypatch: pytest.MonkeyPatch, subject: str, drift: str,
 ) -> None:
     options = ["no-new-privileges:true"]
     if engine.prefix[0] == "podman":
-        options.append("unmask=/sys/devices/virtual/powercap")
+        # compose.podman.yaml adds the mask exception and the fixed MCS level (M8a).
+        options.extend(("unmask=/sys/devices/virtual/powercap", "label=level:s0:c403,c871"))
     if drift == "missing-nnp":
         options.remove("no-new-privileges:true")
     elif drift == "missing-mask":
@@ -587,6 +589,10 @@ def test_static_security_requires_exact_engine_options(
         options.append("no-new-privileges:true")
     elif drift == "duplicate-mask":
         options.append("unmask=/sys/devices/virtual/powercap")
+    elif drift == "missing-level":
+        options = [value for value in options if not value.startswith("label=")]
+    elif drift == "duplicate-level":
+        options.append("label=level:s0:c403,c871")
     if subject == "postgres":
         config = yaml.safe_load((boundary.REPOSITORY / "compose.yaml").read_text())
         config["services"]["postgres"]["build"]["context"] = str(boundary.REPOSITORY)
@@ -603,7 +609,9 @@ def test_static_security_requires_exact_engine_options(
         }
         assertion = boundary.test_application_services_have_fail_closed_container_isolation
     monkeypatch.setattr(boundary, "rendered_compose", lambda: config)
-    valid = drift == "none" or (drift == "missing-mask" and engine.prefix[0] == "docker")
+    valid = drift == "none" or (
+        drift in {"missing-mask", "missing-level"} and engine.prefix[0] == "docker"
+    )
     if valid:
         assertion()
     else:
