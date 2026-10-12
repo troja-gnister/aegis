@@ -163,7 +163,7 @@ def test_checkpoint_functions_require_actual_indexer_login(
 @pytest.mark.parametrize("field,value", [
     ("raw", "Li4="), ("raw", "YQAv"), ("raw", "L2E="), ("raw", "c2FmZQ=\n="),
     ("raw", "c2FmZR=="), ("raw", "a"), ("raw", ""), ("raw", 1),
-    ("name_key", "a"), ("name_key", ""), ("name_key", "eA==\n"),
+    ("name_key", "a"), ("name_key", ""), ("name_key", "eA==\n"), ("name_key", "/w=="),
     ("display", ""), ("display", "x" * 1531), ("display", 1),
     ("type_hint", "JPG"), ("type_hint", []), ("kind", "unknown"),
     ("kind", "special"), ("state", "missing"), ("state", "unsupported"),
@@ -188,6 +188,24 @@ def test_direct_sql_validates_entire_observation_before_any_write(
         caller.execute("SELECT public.aegis_record_scan_batch(%s,%s)", [Jsonb(lease), Jsonb(batch)])
     assert CatalogEntry.objects.filter(root=root).count() == 1
     assert DirectoryWork.objects.get(pk=lease["work_id"]).last_batch_sequence == 0
+
+
+def test_checkpoint_writes_the_search_name_as_the_migrator(
+    role_database: RoleDatabase,
+) -> None:
+    from aegis_apps.catalog.models import CatalogEntry
+
+    root, lease, batch = _checkpoint_fixture(role_database)
+    batch["observations"][0].update(raw="Q2Fmw6k=", display="Café", name_key="Y2Fmw6k=")
+    with role_database.connect("aegis_indexer") as caller:
+        caller.execute("SELECT public.aegis_record_scan_batch(%s,%s)", [Jsonb(lease), Jsonb(batch)])
+        # The generated column's function stays out of every runtime role's reach.
+        assert _scan_scalar(caller.execute(
+            "SELECT pg_catalog.has_function_privilege("
+            "current_user, 'public.aegis_search_name(bytea)', 'EXECUTE')"
+        )) is False
+    entry = CatalogEntry.objects.get(root=root, source_parent__isnull=False)
+    assert (bytes(entry.name_key), entry.search_name) == ("café".encode(), "café")
 
 
 def test_direct_checkpoint_replay_fail_and_stale_root_keep_metadata(
@@ -593,6 +611,7 @@ def test_catalog_actual_login_read_and_mutation_boundary(
             for column in (
                 "display_name",
                 "name_key",
+                "search_name",
                 "logical_name",
                 "logical_parent_id",
                 "ctime_ns",
@@ -605,7 +624,8 @@ def test_catalog_actual_login_read_and_mutation_boundary(
         else:
             _assert_sqlstate(runtime, "SELECT id FROM catalog_catalogentry")
         for statement in (
-            "INSERT INTO catalog_catalogentry SELECT * FROM catalog_catalogentry WHERE false",
+            # Named columns: the generated search name refuses any value before privileges.
+            "INSERT INTO catalog_catalogentry (id) SELECT id FROM catalog_catalogentry WHERE false",
             "UPDATE catalog_catalogentry SET display_name = 'changed'",
             "UPDATE catalog_catalogentry SET size = size",
             "DELETE FROM catalog_catalogentry",

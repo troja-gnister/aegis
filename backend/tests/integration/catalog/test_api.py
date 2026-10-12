@@ -522,6 +522,78 @@ def test_http_root_scope_lists_nested_matches_with_their_folder_only(api_catalog
     assert hidden.status_code == 404
 
 
+def test_http_name_search_as_the_web_login(api_catalog: Any) -> None:
+    def add(raw: bytes, parent: CatalogEntry, kind: str = "file") -> CatalogEntry:
+        name = source_name(raw)
+        return CatalogEntry.objects.create(
+            root=api_catalog.root,
+            source_parent=parent,
+            logical_parent=parent,
+            source_parent_revision=parent.source_revision,
+            raw_name=name.raw,
+            display_name=name.display,
+            name_key=name.order_key,
+            type_hint=name.type_hint,
+            kind=kind,
+        )
+
+    trips = add(b"Trips 2026", api_catalog.anchor, "directory")
+    nested = add(b"IMG_trip_7.JPG", trips)
+    top = add(b"tripod.png", api_catalog.anchor)
+    add(b"notes.txt", trips)
+    path = _root_path(api_catalog.root.pk)
+    search = json.dumps({"v": 1, "contains": "TRIP"})
+    page = api_catalog.get(path, data={"filters": search, "scope": "root", "limit": "2"})
+
+    assert page.status_code == 200
+    _assert_private(page)
+    payload = page.json()
+    assert [(item["displayName"], item["parentName"]) for item in payload["entries"]] == [
+        ("Trips 2026", ""),
+        ("IMG_trip_7.JPG", "Trips 2026"),
+    ]
+    following = api_catalog.get(
+        path,
+        data={"filters": search, "scope": "root", "limit": "2", "cursor": payload["nextCursor"]},
+    )
+    assert [item["id"] for item in following.json()["entries"]] == [str(top.pk)]
+    folder = api_catalog.get(path, data={"filters": search, "parent": str(trips.pk)})
+    assert [item["id"] for item in folder.json()["entries"]] == [str(nested.pk)]
+    # The cursor binds the search text: other text restarts the listing.
+    replayed = api_catalog.get(
+        path,
+        data={
+            "filters": json.dumps({"v": 1, "contains": "tripod"}),
+            "scope": "root",
+            "limit": "2",
+            "cursor": payload["nextCursor"],
+        },
+    )
+    assert replayed.status_code == 409
+    assert replayed.json()["type"] == "cursor_restart_required"
+    for text in ("", "tr", "E\u0301t"):
+        short = api_catalog.get(
+            path, data={"filters": json.dumps({"v": 1, "contains": text}), "scope": "root"},
+        )
+        assert short.status_code == 400
+        assert short.json() == {"type": "search_too_short", "title": "Search text too short"}
+        _assert_private(short)
+    for value in ("x" * 256, 123):
+        invalid = api_catalog.get(
+            path, data={"filters": json.dumps({"v": 1, "contains": value}), "scope": "root"},
+        )
+        assert invalid.status_code == 400
+        assert invalid.json()["type"] == "invalid_catalog_query"
+    # An unknown or ungranted root stays unknown, whatever the search text.
+    for text in ("trip", "tr"):
+        hidden = api_catalog.get(
+            _root_path(uuid.uuid4()),
+            data={"filters": json.dumps({"v": 1, "contains": text}), "scope": "root"},
+        )
+        assert hidden.status_code == 404
+        assert hidden.json()["type"] == "catalog_not_found"
+
+
 def test_authenticated_http_browse_stays_within_middleware_inclusive_budget(
     api_catalog: Any,
 ) -> None:

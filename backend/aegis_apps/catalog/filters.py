@@ -16,6 +16,9 @@ MAX_FILTER_FIELDS = 8
 MAX_SELECTED_VALUES = 32
 MAX_FILTER_BYTES = 8192
 MAX_PREFIX_BYTES = 2048
+# Name search matches trigrams, so it needs three characters; a name is at most 255 bytes.
+MIN_CONTAINS_CHARACTERS = 3
+MAX_CONTAINS_CHARACTERS = 255
 MAX_SIZE = 2**64 - 1
 MIN_TIMESTAMP_NS = -(2**63)
 MAX_TIMESTAMP_NS = 2**63 - 1
@@ -32,7 +35,7 @@ _TIMESTAMP_RE = re.compile(
 )
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _FILTER_FIELDS = frozenset(
-    {"v", "kind", "type", "size", "modified", "availability", "prefix"}
+    {"v", "kind", "type", "size", "modified", "availability", "prefix", "contains"}
 )
 
 
@@ -64,6 +67,14 @@ class FileFilter:
     modified: ModifiedRange | None = None
     availability: tuple[SourceState, ...] = ()
     prefix: str | None = None
+    contains: str | None = None
+
+
+class SearchTooShort(ValueError):
+    """Name search text with fewer than ``MIN_CONTAINS_CHARACTERS`` once normalized."""
+
+    def __init__(self) -> None:
+        super().__init__("search too short")
 
 
 def _invalid() -> ValueError:
@@ -271,6 +282,20 @@ def _prefix(value: object) -> str | None:
     return normalized or None
 
 
+def _contains(value: object) -> str:
+    """Literal name search text, normalized like ``prefix`` and the stored name key."""
+    if type(value) is not str or len(value) > MAX_CONTAINS_CHARACTERS:
+        raise _invalid()
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise _invalid() from None
+    normalized = unicodedata.normalize("NFC", value.casefold())
+    if len(normalized) < MIN_CONTAINS_CHARACTERS:
+        raise SearchTooShort()
+    return normalized
+
+
 def parse_filters(value: object) -> FileFilter:
     """Validate and normalize a versioned filter request without external access."""
 
@@ -292,6 +317,7 @@ def parse_filters(value: object) -> FileFilter:
             else ()
         ),
         prefix=_prefix(value["prefix"]) if "prefix" in value else None,
+        contains=_contains(value["contains"]) if "contains" in value else None,
     )
     canonical_filter_bytes(filters)
     return filters
@@ -329,6 +355,8 @@ def canonical_filter_bytes(filters: FileFilter) -> bytes:
         document["availability"] = [value.value for value in filters.availability]
     if filters.prefix is not None:
         document["prefix"] = filters.prefix
+    if filters.contains is not None:
+        document["contains"] = filters.contains
     try:
         raw = json.dumps(
             document,

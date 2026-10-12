@@ -6,6 +6,12 @@ export type SizeUnit = "B" | "KB" | "MB" | "GB" | "TB";
 
 export const UNKNOWN_TYPE = "__unknown__";
 export const MAX_FIELD_SELECTIONS = 32;
+/** Name search matches trigrams of the text, so it needs three characters, with letters or
+ *  digits among them (the server decides exactly, by the trigrams its index can use). */
+export const MIN_SEARCH_CHARACTERS = 3;
+export const MAX_SEARCH_CHARACTERS = 255;
+export const SEARCH_HINT = `Type at least ${MIN_SEARCH_CHARACTERS} letters or digits`;
+const LETTER_OR_DIGIT = /[\p{L}\p{N}]/u;
 const MAX_PREFIX_BYTES = 2048;
 const MAX_FILTER_BYTES = 8192;
 const MAX_SIZE = 18_446_744_073_709_551_615n;
@@ -17,7 +23,7 @@ const LOCAL_DAY_START = /^(\d{4}-\d{2}-\d{2})T00:00:00([+-]\d{2}:\d{2})$/;
 const encoder = new TextEncoder();
 
 export const FILTER_FIELDS: readonly FilterField[] = [
-  "kind", "type", "size", "modified", "availability", "prefix",
+  "contains", "kind", "type", "size", "modified", "availability", "prefix",
 ];
 
 export const KIND_OPTIONS: readonly {value: EntryKind; label: string}[] = [
@@ -84,6 +90,21 @@ export function removeFilter(
 
 export function activeFilterFields(filters: FileFilters): FilterField[] {
   return FILTER_FIELDS.filter((field) => filters[field] !== undefined);
+}
+
+/** Search box text as the search it applies: trimmed, and whether it is too short to search. */
+export function parseSearch(value: string): {text: string; tooShort: boolean} {
+  const text = value.trim();
+  const tooShort = text !== "" &&
+    ([...text].length < MIN_SEARCH_CHARACTERS || !LETTER_OR_DIGIT.test(text));
+  return {text, tooShort};
+}
+
+/** The filters with the name search set to *text*, or without one for empty text. */
+export function withSearch(filters: FileFilters, text: string): FileFilters {
+  const rest = removeFilter(filters, "contains");
+  // The search comes first, so equal filters always serialize the same way.
+  return text === "" ? rest : Object.assign({v: 1, contains: text} as FileFilters, rest);
 }
 
 /** The scope a route lists: a chosen root-wide scope applies only while filters are set. */
@@ -230,10 +251,13 @@ function uniqueInOrder<T>(values: T[]): T[] {
   return [...new Set(values)];
 }
 
-/** Validate a draft once and produce the bounded wire filters. */
-export function filtersFromDraft(draft: FilterDraft): FilterDraftResult {
+/**
+ * Validate a draft once and produce the bounded wire filters, keeping the applied name
+ * search (`contains`), which the search box edits rather than the draft.
+ */
+export function filtersFromDraft(draft: FilterDraft, contains?: string): FilterDraftResult {
   const errors: FilterDraftErrors = {};
-  const filters: FileFilters = {v: 1};
+  const filters: FileFilters = {v: 1, ...(contains ? {contains} : {})};
 
   const kind = KIND_OPTIONS.map((option) => option.value).filter((value) => draft.kind.includes(value));
   if (kind.length > 0) filters.kind = kind;
@@ -350,6 +374,8 @@ export function describeFilterField(filters: FileFilters, field: FilterField): s
         AVAILABILITY_OPTIONS.find((option) => option.value === value)?.label ?? value))}`;
     case "prefix":
       return `Filename starts with "${filters.prefix ?? ""}"`;
+    case "contains":
+      return `Name contains "${filters.contains ?? ""}"`;
     case "size": {
       const size = filters.size;
       if (!size || size.unknown) return "Size: unknown";

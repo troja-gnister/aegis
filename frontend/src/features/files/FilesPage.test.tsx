@@ -1065,6 +1065,109 @@ describe("FilesPage root-wide scope", () => {
     expect(state).not.toMatch(/jpg|pdf|DCIM|filters/);
   });
 
+  function search(text: string) {
+    fireEvent.change(screen.getByRole("searchbox", {name: "Search names"}), {target: {value: text}});
+  }
+
+  it("searches names in all folders from the toolbar, shows each match's folder and clears", async () => {
+    const requests: URL[] = [];
+    server.use(rootsWith(["browse"]), entriesHandler(requests));
+    await renderFiles(`/files/${FIXTURE_ROOT_ID}/directories/${ROUTE_FOLDER}`);
+    await screen.findByRole("list", {name: "Files"});
+    expect(screen.getByRole("search", {name: "Search names"})).toBeVisible();
+
+    search("IMG");
+    // The search applies after a pause in typing, in every folder, as filters do.
+    await waitFor(() => expect(requests.at(-1)!.searchParams.get("scope")).toBe("root"));
+    const sent = requests.at(-1)!;
+    expect(sent.searchParams.has("parent")).toBe(false);
+    expect(JSON.parse(sent.searchParams.get("filters")!)).toEqual({v: 1, contains: "IMG"});
+    expect(await screen.findByRole("button", {name: "Select file IMG_0001.pdf in DCIM"}))
+      .toHaveTextContent("in DCIM");
+    expect(screen.getByRole("button", {name: 'Remove filter Name contains "IMG"'})).toBeVisible();
+    // Filters and search text stay in memory, never in the URL or history state.
+    expect(screen.getByLabelText("Current route")).toHaveTextContent(
+      `/files/${FIXTURE_ROOT_ID}/directories/${ROUTE_FOLDER}`,
+    );
+    expect(screen.getByLabelText("History state")).toHaveTextContent("null");
+
+    const scope = screen.getByRole("group", {name: "Search in"});
+    expect(within(scope).getByRole("button", {name: "All folders"})).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(within(scope).getByRole("button", {name: "This folder"}));
+    await waitFor(() => expect(requests.at(-1)!.searchParams.has("scope")).toBe(false));
+    expect(requests.at(-1)!.searchParams.get("parent")).toBe(ROUTE_FOLDER);
+    expect(JSON.parse(requests.at(-1)!.searchParams.get("filters")!)).toEqual({v: 1, contains: "IMG"});
+
+    fireEvent.click(screen.getByRole("button", {name: 'Remove filter Name contains "IMG"'}));
+    await waitFor(() => expect(JSON.parse(requests.at(-1)!.searchParams.get("filters")!)).toEqual({v: 1}));
+    expect(screen.getByRole("searchbox", {name: "Search names"})).toHaveValue("");
+    expect(screen.queryByRole("group", {name: "Search in"})).not.toBeInTheDocument();
+  });
+
+  it("combines the search with the panel's filters", async () => {
+    const requests: URL[] = [];
+    server.use(rootsWith(["browse"]), entriesHandler(requests));
+    await renderFiles();
+    await screen.findByRole("list", {name: "Files"});
+    search("IMG");
+    fireEvent.submit(screen.getByRole("search", {name: "Search names"}));
+    await waitFor(() => expect(JSON.parse(requests.at(-1)!.searchParams.get("filters")!))
+      .toEqual({v: 1, contains: "IMG"}));
+    fireEvent.click(screen.getByRole("button", {name: "Filters"}));
+    fireEvent.click(screen.getByRole("checkbox", {name: ".pdf"}));
+    fireEvent.click(screen.getByRole("button", {name: "Apply filters"}));
+    await waitFor(() => expect(JSON.parse(requests.at(-1)!.searchParams.get("filters")!))
+      .toEqual({v: 1, contains: "IMG", type: ["pdf"]}));
+    expect(requests.at(-1)!.searchParams.get("scope")).toBe("root");
+    expect(screen.getByRole("searchbox", {name: "Search names"})).toHaveValue("IMG");
+    expect(screen.getByRole("button", {name: 'Remove filter Name contains "IMG"'})).toBeVisible();
+    expect(screen.getByRole("button", {name: "Remove filter Type: .pdf"})).toBeVisible();
+    fireEvent.click(screen.getByRole("button", {name: "Clear all filters"}));
+    await waitFor(() => expect(JSON.parse(requests.at(-1)!.searchParams.get("filters")!)).toEqual({v: 1}));
+    expect(screen.getByRole("searchbox", {name: "Search names"})).toHaveValue("");
+  });
+
+  it("says when nothing matches and when the server finds the text too short", async () => {
+    const requests: URL[] = [];
+    server.use(rootsWith(["browse"]), http.get(`/api/v1/roots/${FIXTURE_ROOT_ID}/entries`, ({request}) => {
+      const url = new URL(request.url);
+      requests.push(url);
+      const filters = JSON.parse(url.searchParams.get("filters")!) as {contains?: string};
+      if (filters.contains === "e\u0301a") {
+        return HttpResponse.json({type: "search_too_short", title: "Search text too short"}, {status: 400});
+      }
+      return HttpResponse.json(pageResponse(null, filters.contains ? [] : [fixtureEntry(0)], "ready", url));
+    }));
+    await renderFiles();
+    await screen.findByRole("list", {name: "Files"});
+
+    search("zzz");
+    expect(await screen.findByText("No files match “zzz”.")).toBeVisible();
+    await waitFor(() => expect(screen.getByTestId("files-announcement"))
+      .toHaveTextContent("No files match “zzz”."));
+    // Three characters typed, two once normalized: the server refuses it.
+    search("e\u0301a");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Type at least 3 letters or digits to search.");
+    expect(screen.queryByText(/could not be loaded/)).not.toBeInTheDocument();
+  });
+
+  it("opens a media match of a search in the viewer, which steps through the results", async () => {
+    const requests: URL[] = [];
+    server.use(rootsWith(["browse", "preview"]), entriesHandler(requests));
+    await renderFiles();
+    await screen.findByRole("list", {name: "Files"});
+    search("IMG");
+    fireEvent.click(await screen.findByRole("button", {name: "Open photo IMG_0002.jpg in DCIM"}));
+    await waitFor(() => expect(screen.getByLabelText("Current route")).toHaveTextContent(
+      `/files/${FIXTURE_ROOT_ID}/view/${photo.id}`,
+    ));
+    const state = screen.getByLabelText("History state").textContent ?? "";
+    expect(JSON.parse(state).aegisMediaViewer.context).toMatchObject({
+      source: "search", rootId: FIXTURE_ROOT_ID, parentId: null,
+    });
+    expect(state).not.toMatch(/IMG|contains|DCIM/);
+  });
+
   it("opens media matches in details without PREVIEW", async () => {
     server.use(
       rootsWith(["browse"]),

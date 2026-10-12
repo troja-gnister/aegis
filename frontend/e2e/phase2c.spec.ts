@@ -957,3 +957,63 @@ test("filters search all folders: .jpg finds the nested photo and the viewer fol
   await expect(fileRow(page, "photo.JPG")).toBeVisible();
   await expect(page.getByText("beach.jpg", {exact: true})).toHaveCount(0);
 });
+
+test("name search finds text anywhere in names, in every folder, and opens a result in the viewer", async ({page}) => {
+  await signIn(page, "alice", requiredSecret("E2E_ALICE_PASSWORD"));
+  const rootId = await aliceRootId(page);
+  const beach = named(await mediaItems(page, rootId), "beach.jpg");
+  await openFiles(page, rootId);
+
+  const box = page.getByRole("searchbox", {name: "Search names"});
+  // Fewer than three characters never search.
+  await box.fill(".j");
+  await expect(page.getByRole("search").getByRole("status")).toHaveText("Type at least 3 letters or digits");
+  const searched = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return ENTRIES_PATH.test(url.pathname) && response.request().method() === "GET" &&
+      url.searchParams.get("filters")?.includes("contains") === true;
+  });
+  await box.fill(".JP");
+  const response = await searched;
+  expect(response.status()).toBe(200);
+  const sent = new URL(response.url()).searchParams;
+  expect(sent.get("scope")).toBe("root");
+  expect(sent.has("parent")).toBe(false);
+  expect(JSON.parse(sent.get("filters")!)).toEqual({v: 1, contains: ".JP"});
+
+  // Case is ignored; the photo two folders down is found with its folder.
+  const files = page.getByRole("list", {name: "Files"});
+  await expect(files.getByRole("listitem")).toHaveCount(3);
+  const nested = page.getByRole("button", {name: "Open photo beach.jpg in summer", exact: true});
+  await expect(nested).toContainText("in summer");
+  await expect(page.getByRole("button", {name: "Open photo photo.JPG in Alice files", exact: true}))
+    .toBeVisible();
+  await expect(page.getByRole("button", {name: 'Remove filter Name contains ".JP"', exact: true}))
+    .toBeVisible();
+  // The search stays in memory, never in the address.
+  await expect(page).toHaveURL(new RegExp(`/files/${rootId}$`));
+
+  await nested.click();
+  const viewer = page.getByRole("dialog");
+  await expect(viewer.getByRole("heading", {level: 2})).toHaveText("beach.jpg");
+  await expect(page).toHaveURL(new RegExp(`/files/${rootId}/view/${beach.id}$`));
+  // The viewer steps through the search results.
+  await expect(viewer.getByText("1 of 3", {exact: true})).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page).toHaveURL(new RegExp(`/files/${rootId}$`));
+  await expect(nested).toBeFocused();
+  await expect(box).toHaveValue(".JP");
+
+  // Escape in the box clears the search: the folder is listed again.
+  const cleared = page.waitForResponse((answer) =>
+    ENTRIES_PATH.test(new URL(answer.url()).pathname) && answer.request().method() === "GET");
+  await box.focus();
+  await page.keyboard.press("Escape");
+  const listing = new URL((await cleared).url()).searchParams;
+  expect(JSON.parse(listing.get("filters")!)).toEqual({v: 1});
+  expect(listing.has("scope")).toBe(false);
+  await expect(box).toHaveValue("");
+  // Folders lead the unfiltered listing again.
+  await expect(directoryRow(page, "albums")).toBeVisible();
+});

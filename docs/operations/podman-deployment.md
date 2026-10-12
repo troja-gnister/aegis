@@ -275,6 +275,8 @@ If an upgrade stops between the phases, `status` shows it as pending, and most o
 
 **The scan interval.** Releases from before `--scan-interval-hours` scan every root hourly. The first upgrade to a release that has the setting moves to 24 hours and therefore rescans every root once; on a large library that takes hours. Pass `--scan-interval-hours 1` to that upgrade to keep hourly scans and avoid the rescan, or another value to choose it now. Later upgrades keep the recorded value, and going back to a release from before the setting scans hourly again until the next upgrade to one that has it.
 
+**Name search.** The first upgrade to a release with name search rewrites the catalog table once, while its migration runs and before the services start. It briefly needs free disk of about twice the catalog's size (table and indexes) plus WAL, and takes from seconds to a few minutes depending on library size.
+
 **Downgrades.** Releases are ordered by the backend image's commit-time label. `upgrade` refuses an older release, or one that cannot be ordered, unless `--allow-downgrade` is given. **A downgrade does not reverse migrations: restore a matching database backup first**, then rerun with `--allow-downgrade`.
 
 Previous release trees and pulled images are kept. Never use volume removal as an upgrade step.

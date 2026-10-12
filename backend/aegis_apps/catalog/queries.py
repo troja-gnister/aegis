@@ -39,7 +39,7 @@ from .cursors import (
     encode_cursor,
 )
 from .domain import EntryKind
-from .filters import UNKNOWN_TYPE, FileFilter, canonical_filter_bytes
+from .filters import UNKNOWN_TYPE, FileFilter, SearchTooShort, canonical_filter_bytes
 from .models import CatalogEntry
 from .serializers import entry_summary, index_status
 
@@ -164,37 +164,52 @@ def _navigation_current(alias: str) -> str:
     )"""
 
 
-def _filter(query: Any, filters: FileFilter) -> Any:
+def _prefix_range(filters: FileFilter) -> Q:
+    if not filters.prefix:
+        return Q()
+    prefix = filters.prefix.encode("utf-8")
+    # UTF-8 ends below 0xff. Byte ranges implement literal prefix matching,
+    # independent of SQL LIKE wildcards, text collation and escaping.
+    upper = prefix[:-1] + bytes([prefix[-1] + 1])
+    return Q(name_key__gte=prefix, name_key__lt=upper)
+
+
+def _filter_q(filters: FileFilter) -> Q:
+    """Every selected filter as one condition. Leaving out missing tombstones by default
+    is the caller's (a branch rank or an explicit condition)."""
+    condition = Q()
     if filters.kind:
-        query = query.filter(kind__in=filters.kind)
+        condition &= Q(kind__in=filters.kind)
     if filters.type:
         selected = Q(type_hint__in=[value for value in filters.type if value != UNKNOWN_TYPE])
         if UNKNOWN_TYPE in filters.type:
             selected |= Q(type_hint__isnull=True)
-        query = query.filter(selected)
+        condition &= selected
     if filters.availability:
-        query = query.filter(source_state__in=filters.availability)
+        condition &= Q(source_state__in=filters.availability)
     if filters.size is not None:
         value = filters.size
-        query = query.filter(size__isnull=value.unknown)
+        condition &= Q(size__isnull=value.unknown)
         if value.minimum is not None:
-            query = query.filter(size__gte=value.minimum)
+            condition &= Q(size__gte=value.minimum)
         if value.maximum is not None:
-            query = query.filter(size__lte=value.maximum)
+            condition &= Q(size__lte=value.maximum)
     if filters.modified is not None:
         modified = filters.modified
-        query = query.filter(mtime_ns__isnull=modified.unknown)
+        condition &= Q(mtime_ns__isnull=modified.unknown)
         if modified.from_ns is not None:
-            query = query.filter(mtime_ns__gte=modified.from_ns)
+            condition &= Q(mtime_ns__gte=modified.from_ns)
         if modified.before_ns is not None:
-            query = query.filter(mtime_ns__lt=modified.before_ns)
-    if filters.prefix:
-        prefix = filters.prefix.encode("utf-8")
-        # UTF-8 ends below 0xff. Byte ranges implement literal prefix matching,
-        # independent of SQL LIKE wildcards, text collation and escaping.
-        upper = prefix[:-1] + bytes([prefix[-1] + 1])
-        query = query.filter(name_key__gte=prefix, name_key__lt=upper)
-    return query
+            condition &= Q(mtime_ns__lt=modified.before_ns)
+    condition &= _prefix_range(filters)
+    if filters.contains:
+        # A literal LIKE '%...%': the lookup escapes %, _ and \ in the search text.
+        condition &= Q(search_name__contains=filters.contains)
+    return condition
+
+
+def _filter(query: Any, filters: FileFilter) -> Any:
+    return query.filter(_filter_q(filters))
 
 
 def _key(row: dict[str, Any], sort: str) -> CursorKey:
@@ -203,12 +218,12 @@ def _key(row: dict[str, Any], sort: str) -> CursorKey:
             name, row["id"])
 
 
-def _ranked(query: Any, sort: str) -> tuple[Any, tuple[str, ...]]:
+def _ranked(query: Any, sort: str, *, media: bool = True) -> tuple[Any, tuple[str, ...]]:
     """Annotate the order ranks shared by both scopes; returns the query and its keyset."""
     query = query.annotate(
         _missing=models.Case(models.When(source_state="missing", then=True), default=False),
         _kind=models.Case(models.When(kind="directory", then=0), default=1),
-        **MEDIA_ANNOTATIONS,
+        **(MEDIA_ANNOTATIONS if media else {}),
     )
     if sort == "name":
         query = query.annotate(_null=models.Value(0), _value=models.F("name_key"))
@@ -233,6 +248,48 @@ def _rows(sql: str, params: Any) -> list[dict[str, Any]]:
         assert result.description is not None
         columns = [column[0] for column in result.description]
         return [dict(zip(columns, row, strict=True)) for row in result.fetchall()]
+
+
+# Planner settings for one search read: a trigram read uses bitmap scans only (never an
+# ordered walk under its LIMIT n+1), and an ordered window index scans only (never a
+# whole rank read and sorted).
+_SCANS = {
+    "bitmap": ("enable_seqscan", "enable_indexscan", "enable_indexonlyscan"),
+    "index": ("enable_seqscan", "enable_bitmapscan"),
+}
+
+
+def _scan_rows(sql: str, params: Any, scan: str | None) -> list[dict[str, Any]]:
+    """Rows of *sql*, planned with only the *scan* kind if given. A failure aborts the
+    transaction, which reverts the settings."""
+    if scan is None:
+        return _rows(sql, params)
+    with connection.cursor() as cursor:
+        cursor.execute("; ".join(f"SET LOCAL {setting} = off" for setting in _SCANS[scan]))
+    rows = _rows(sql, params)
+    with connection.cursor() as cursor:
+        cursor.execute("; ".join(f"SET LOCAL {setting} TO DEFAULT" for setting in _SCANS[scan]))
+    return rows
+
+
+# Whether pg_trgm extracts a trigram from LIKE '%text%'. It reads runs of letters and
+# digits as the database's character type classifies them, as these regex classes do,
+# padding a run with two blanks before it and one after unless that side is a wildcard
+# (the ends of the text): a run after another character always yields one, a run at the
+# start needs two characters and a character after them, and the whole text needs three.
+_INDEXABLE_SQL = (
+    "SELECT %(text)s ~ '[^[:alnum:]][[:alnum:]]' "
+    "OR %(text)s ~ '^[[:alnum:]]{2,}[^[:alnum:]]' OR %(text)s ~ '^[[:alnum:]]{3,}$'"
+)
+
+
+def _require_indexable(text: str) -> None:
+    """Refuse search text no trigram index can look up: it would read every entry."""
+    with connection.cursor() as cursor:
+        cursor.execute(_INDEXABLE_SQL, {"text": text})
+        row = cursor.fetchone()
+    if row is None or row[0] is not True:
+        raise SearchTooShort()
 
 
 def _directory_rows(
@@ -295,8 +352,8 @@ _ROOT_KEYSET_SQL = {
 }
 
 
-def _root_keyset(sort: str, key: CursorKey, forward: bool) -> RawSQL:
-    operator = ">" if forward else "<"
+def _root_keyset(sort: str, key: CursorKey, forward: bool, *, inclusive: bool = False) -> RawSQL:
+    operator = (">" if forward else "<") + ("=" if inclusive else "")
     if sort == "name":
         return RawSQL(
             f"{_ROOT_KEYSET_SQL[sort]} {operator} (%s, %s)",
@@ -330,6 +387,20 @@ def _value_bounds(filters: FileFilter, sort: str) -> Q:
     return bounds
 
 
+_ROOT_PROJECTION = (
+    *_SUMMARY, *MEDIA_FIELDS, "name_key", "logical_parent_id", "_kind", "_null", "_value",
+)
+# What each search read returns per candidate: its order key, then ``_hit`` (whether it
+# matches) and ``_frontier`` (whether the read stopped there without knowing what follows).
+_SEARCH_KEY = ("id", "_kind", "_null", "_value", "name_key")
+# Per page row: how many file matches name search first takes from the trigram index, and
+# how many entries it then reads from each ordered file branch, which share the rows of at
+# most SEARCH_WINDOW_SHARE branches between them (see _root_search_rows).
+SEARCH_MATCH_FACTOR = 100
+SEARCH_WINDOW_FACTOR = 20
+SEARCH_WINDOW_SHARE = 4
+
+
 def _type_branch() -> RawSQL:
     """The type value of the current row of a LATERAL type branch."""
     return RawSQL('"type_branch"."type_hint"', (), output_field=models.CharField())
@@ -352,6 +423,8 @@ def _root_rows(
     branches are merged in SQL; ``_current`` and ``_parent_name`` come from one join on
     the page's distinct parent directories.
     """
+    if filters.contains is not None:
+        return _root_search_rows(context, filters, sort, order, limit, position)
     previous = position is not None and position.travel == "previous"
     ascending = order == "asc"
     named = sort == "name"
@@ -378,15 +451,7 @@ def _root_rows(
         if named
         else ((0, 1) if selected_range is None else (1,) if selected_range.unknown else (0,))
     )
-    projection = (
-        *_SUMMARY,
-        *MEDIA_FIELDS,
-        "name_key",
-        "logical_parent_id",
-        "_kind",
-        "_null",
-        "_value",
-    )
+    projection = _ROOT_PROJECTION
     parts: list[str] = []
     params: list[object] = []
     merge_order = ", ".join(
@@ -445,6 +510,18 @@ def _root_rows(
             + f" ORDER BY {merge_order} LIMIT {limit + 1}"
         )
     )
+    return _located(context, sql, params, fields, directions, previous)
+
+
+def _located(
+    context: BrowseContext,
+    sql: str,
+    params: Any,
+    fields: tuple[str, ...],
+    directions: tuple[bool, ...],
+    previous: bool,
+) -> list[dict[str, Any]]:
+    """The page's candidate rows (*sql*) with ``_current`` and their parent's name."""
     final_order = ", ".join(
         f'candidates."{field}" {"ASC" if direction != previous else "DESC"}'
         for field, direction in zip(fields, directions, strict=True)
@@ -464,6 +541,272 @@ def _root_rows(
     for row in rows:
         row["_current"] = row["_current"] is True
     return rows
+
+
+def _known(keys: list[dict[str, Any]], needed: int) -> list[dict[str, Any]] | None:
+    """The matches among a read's *keys*, if every match among the first *needed* of the
+    read's order is known: no ``_frontier`` comes before them (a matching one may end them).
+    """
+    known: list[dict[str, Any]] = []
+    for key in keys:
+        if key["_frontier"] and (len(known) + 1 < needed or not key["_hit"]):
+            return None if len(known) < needed else known
+        if key["_hit"]:
+            known.append(key)
+        if key["_frontier"]:
+            break
+    return known
+
+
+def _root_search_rows(
+    context: BrowseContext,
+    filters: FileFilter,
+    sort: str,
+    order: str,
+    limit: int,
+    position: CursorPosition | None,
+) -> list[dict[str, Any]]:
+    """Entries anywhere in the root whose name contains the search text.
+
+    A trigram index finds matches in no particular order, and an ordered index walk may
+    pass any number of other names between two matches. Folders and files never mix in
+    an order (folders come first), so each kind is read apart, from the first of these
+    reads that decides its share of the page; the page's rows are then read by ID:
+
+    1. The kind's trigram index, stopping after ``SEARCH_MATCH_FACTOR * (limit + 1)``
+       matches past the cursor. Rare and medium terms end here, in one bitmap pass.
+    2. For files, the ordered root-scope branches, as without a search (per type when
+       types are selected), each reading a bounded window of entries and stopping once
+       the page is full. A branch that reads its whole window marks the window's last
+       entry: every match up to it is known, none after it. Common terms end here when
+       their matches are dense past the cursor.
+    3. The matches up to a bound. The first read's matches are a sample of more than
+       ``limit + 1``, so the page needs nothing past the sample's last needed key. Read
+       per rank between the cursor and that key, a root-scope index range (one per type
+       selection) offers itself next to the trigram index, so the read costs the cheaper
+       of the rows in that range and the matches past the cursor.
+
+    A read that cannot decide the page marks its rows ``_frontier``. Each read is planned
+    with one kind of scan only (see ``_SCANS``).
+    """
+    previous = position is not None and position.travel == "previous"
+    ascending = order == "asc"
+    named = sort == "name"
+    narrow, fields = _ranked(
+        CatalogEntry.objects.filter(root_id=context.root.pk, logical_parent__isnull=False),
+        sort,
+        media=False,
+    )
+    forward = ascending != previous
+    directions = (
+        (True, ascending, ascending) if named else (True, True, ascending, ascending, ascending)
+    )
+    ordering = tuple(
+        field if direction != previous else f"-{field}"
+        for field, direction in zip(fields, directions, strict=True)
+    )
+
+    def order_by(columns: tuple[str, ...]) -> str:
+        return ", ".join(
+            f'"{field}" {"ASC" if direction != previous else "DESC"}'
+            for field, direction in zip(fields, directions, strict=True)
+            if field in columns
+        )
+
+    merge_order = order_by(fields)
+    # Within one branch the ranks are constant, so its index order is the rest of the key.
+    stream_order = order_by(fields[1:] if named else fields[2:])
+    kinds = (
+        tuple(sorted({0 if kind == EntryKind.DIRECTORY else 1 for kind in filters.kind}))
+        if filters.kind
+        else (0, 1)
+    )
+    selected_range = filters.size if sort == "size" else filters.modified
+    nulls = (
+        (0,)
+        if named
+        else ((0, 1) if selected_range is None else (1,) if selected_range.unknown else (0,))
+    )
+    matching = _filter_q(filters)
+    if not filters.availability:
+        matching &= ~Q(source_state="missing")
+    keyset = None
+    if position is not None:
+        boundary = (position.key[0], position.key[3], position.key[4]) if named else position.key
+        keyset = keyset_predicate(fields, directions, boundary, previous=previous)
+    key_columns = ", ".join(f'{{0}}."{column}"' for column in _SEARCH_KEY)
+    known_types = [value for value in filters.type if value != UNKNOWN_TYPE]
+    Part = tuple[str, list[object]]
+
+    def matched(query: Any, cap: int | None = None) -> Part:
+        """The first ``limit + 1`` matches past the cursor; with a *cap*, among at most
+        that many matches (a sample), all marked ``_frontier`` if there are more."""
+        if keyset is not None:
+            query = query.filter(keyset)
+        sql, params = query.filter(matching).order_by().values(*_SEARCH_KEY).query.sql_with_params()
+        if cap is None:
+            source, flags = sql, 'true AS "_hit", false AS "_frontier"'
+        else:
+            source = (
+                f'SELECT capped.*, count(*) OVER () AS "_matches" FROM ({sql} LIMIT {cap + 1}) '
+                "AS capped"
+            )
+            flags = (
+                f'matched."_matches" <= {cap} AS "_hit", '
+                f'matched."_matches" > {cap} AS "_frontier"'
+            )
+        return (
+            f"SELECT {key_columns.format('matched')}, {flags} FROM ({source}) AS matched "
+            f"ORDER BY {merge_order} LIMIT {limit + 1}",
+            list(params),
+        )
+
+    def windows() -> list[Part]:
+        """File windows: one per rank and missing state, and per type when types are
+        selected, sharing ``SEARCH_WINDOW_FACTOR * (limit + 1) * SEARCH_WINDOW_SHARE``
+        rows (each at least a page)."""
+        selections = len(known_types) + (UNKNOWN_TYPE in filters.type) or 1
+        count = len(_missing_branches(filters)) * len(nulls) * selections
+        budget = SEARCH_WINDOW_FACTOR * (limit + 1) * min(count, SEARCH_WINDOW_SHARE)
+        window = max(limit + 1, budget // count)
+        hit = models.ExpressionWrapper(matching, output_field=models.BooleanField())
+
+        def walk(query: Any) -> tuple[str, list[object]]:
+            walked = query.annotate(_hit=hit).order_by(*ordering)
+            sql, params = walked.values(*_SEARCH_KEY, "_hit")[:window].query.sql_with_params()
+            # Numbered in index order, so a dense window stops after its page.
+            return (
+                f'SELECT {key_columns.format("walked")}, walked."_hit", '
+                f'walked."_walked" = {window} AS "_frontier" FROM ('
+                f"SELECT walked.*, row_number() OVER (ORDER BY {stream_order}) "
+                f'AS "_walked" FROM ({sql}) AS walked) AS walked '
+                f'WHERE walked."_hit" OR walked."_walked" = {window} '
+                f"ORDER BY {stream_order} LIMIT {limit + 1}",
+                list(params),
+            )
+
+        parts = []
+        for missing in _missing_branches(filters):
+            for null in nulls:
+                query = narrow.filter(_missing=missing, _kind=1)
+                if named:
+                    query = query.filter(_prefix_range(filters))
+                else:
+                    query = query.filter(_null=null)
+                    if null == 0:
+                        query = query.filter(_value_bounds(filters, sort))
+                if position is not None:
+                    rank, boundary = (1, null), (position.key[0], position.key[1])
+                    if rank == boundary:
+                        query = query.filter(_root_keyset(sort, position.key, forward))
+                    elif (rank < boundary) != previous:
+                        continue  # The whole branch lies behind the cursor.
+                if not filters.type:
+                    parts.append(walk(query))
+                if UNKNOWN_TYPE in filters.type:
+                    parts.append(walk(query.filter(type_hint__isnull=True)))
+                if len(known_types) == 1:
+                    parts.append(walk(query.filter(type_hint=known_types[0])))
+                elif known_types:
+                    # One planned window reads each type's keyset in turn (LATERAL).
+                    sql, params = walk(query.filter(type_hint=_type_branch()))
+                    values = ", ".join(["(%s)"] * len(known_types))
+                    parts.append((
+                        f'SELECT picked.* FROM (VALUES {values}) AS "type_branch"("type_hint") '
+                        f"CROSS JOIN LATERAL ({sql}) AS picked "
+                        f"ORDER BY {stream_order} LIMIT {limit + 1}",
+                        [*known_types, *params],
+                    ))
+        return parts
+
+    def keys(parts: list[Part], scan: str | None) -> list[dict[str, Any]]:
+        if not parts:
+            return []
+        sql = (
+            parts[0][0]
+            if len(parts) == 1
+            else " UNION ALL ".join(f"({part})" for part, _ in parts)
+            + f" ORDER BY {merge_order} LIMIT {limit + 1}"
+        )
+        return _scan_rows(sql, [param for _, part in parts for param in part], scan)
+
+    def travel(rank: tuple[int, int]) -> tuple[int, int]:
+        return (-rank[0], -rank[1]) if previous else rank
+
+    def bounded(kind: int, bound: dict[str, Any]) -> list[Part]:
+        """The kind's matches past the cursor and not past *bound*, a sampled match."""
+        top = _key(bound, sort)
+        top_rank = (top[0], top[1])
+        cursor_rank = None if position is None else (position.key[0], position.key[1])
+        parts = []
+        for missing in _missing_branches(filters):
+            for null in nulls:
+                rank = (kind, null)
+                if travel(rank) > travel(top_rank) or (
+                    cursor_rank is not None and travel(rank) < travel(cursor_rank)
+                ):
+                    continue
+                # The plain kind condition keeps the partial trigram index in play.
+                query = narrow.filter(_missing=missing, _kind=kind)
+                query = (
+                    query.filter(kind=EntryKind.DIRECTORY)
+                    if kind == 0
+                    else query.exclude(kind=EntryKind.DIRECTORY)
+                )
+                if named:
+                    query = query.filter(_prefix_range(filters))
+                else:
+                    query = query.filter(_null=null)
+                    if null == 0:
+                        query = query.filter(_value_bounds(filters, sort))
+                if position is not None and rank == cursor_rank:
+                    query = query.filter(_root_keyset(sort, position.key, forward))
+                if rank == top_rank:
+                    query = query.filter(_root_keyset(sort, top, not forward, inclusive=True))
+                if not filters.type:
+                    parts.append(matched(query))
+                if UNKNOWN_TYPE in filters.type:
+                    parts.append(matched(query.filter(type_hint__isnull=True)))
+                if known_types:
+                    parts.append(matched(query.filter(type_hint__in=known_types)))
+        return parts
+
+    def kind_matches(kind: int, needed: int) -> list[dict[str, Any]]:
+        """The kind's matches past the cursor in travel order, with all of the first
+        *needed* among them."""
+        query = (
+            narrow.filter(kind=EntryKind.DIRECTORY)
+            if kind == 0
+            else narrow.exclude(kind=EntryKind.DIRECTORY)
+        )
+        # The sample must exceed a page for its keys to bound one (see bounded()).
+        cap = max(SEARCH_MATCH_FACTOR, 1) * (limit + 1)
+        sample = keys([matched(query, cap)], "bitmap")
+        known = _known(sample, needed)
+        if known is None and kind == 1:
+            known = _known(keys(windows(), "index"), needed)
+        if known is None:
+            # At least *needed* matches lie at or before the sample's needed-th key.
+            known = keys(bounded(kind, sample[needed - 1]), "bitmap")
+        return known
+
+    # Folders are behind a cursor among the files when reading forward, and files behind
+    # one among the folders when reading backward.
+    folders_ahead = 0 in kinds and (position is None or previous or position.key[0] == 0)
+    files_ahead = 1 in kinds and (position is None or not previous or position.key[0] == 1)
+    # In the travel order: folders before files reading forward, after them backward.
+    first, second = ((1, files_ahead), (0, folders_ahead)) if previous else (
+        (0, folders_ahead), (1, files_ahead)
+    )
+    found = kind_matches(first[0], limit + 1) if first[1] else []
+    if second[1] and len(found) <= limit:
+        found = [*found, *kind_matches(second[0], limit + 1 - len(found))]
+    if not found:
+        return []
+    page = [key["id"] for key in found[: limit + 1]]
+    candidates, _ = _ranked(CatalogEntry.objects.filter(root_id=context.root.pk, pk__in=page), sort)
+    sql, params = candidates.order_by().values(*_ROOT_PROJECTION).query.sql_with_params()
+    return _located(context, sql, params, fields, directions, previous)
 
 
 def directory_page(
@@ -489,6 +832,9 @@ def directory_page(
         or (scope == "root" and parent_id is not None)
     ):
         raise ValueError("invalid_catalog_query")
+    if filters.contains is not None:
+        # In both scopes, so one filter document is valid or invalid wherever it is used.
+        _require_indexable(filters.contains)
     parent = _entry(context.root.pk, parent_id)
     if parent["kind"] != "directory":
         raise CatalogNotFound()

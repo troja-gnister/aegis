@@ -5,7 +5,12 @@ from typing import cast
 
 import pytest
 from aegis_apps.catalog.domain import EntryKind, SourceState
-from aegis_apps.catalog.filters import _ascii_json_size, canonical_filter_bytes, parse_filters
+from aegis_apps.catalog.filters import (
+    SearchTooShort,
+    _ascii_json_size,
+    canonical_filter_bytes,
+    parse_filters,
+)
 from hypothesis import given
 from hypothesis import strategies as st
 
@@ -258,6 +263,53 @@ def test_prefix_rejects_wrong_types_invalid_unicode_and_more_than_2kib(value: ob
 def test_prefix_accepts_exactly_2kib_without_path_component_validation() -> None:
     prefix = "/" + "a" * 2047
     assert parse_filters({"v": 1, "prefix": prefix}).prefix == prefix
+
+
+def test_contains_is_literal_text_normalized_like_prefix_and_bound_by_the_digest() -> None:
+    text = "%_\\E\u0301Stra\u00dfe"
+    filters = parse_filters({"v": 1, "contains": text})
+    assert filters.contains == parse_filters({"v": 1, "prefix": text}).prefix
+    assert filters.contains == "%_\\\u00e9strasse"
+    assert json.loads(canonical_filter_bytes(filters))["contains"] == filters.contains
+    others = (parse_filters({"v": 1, "contains": "IMG"}), parse_filters({"v": 1}))
+    assert all(canonical_filter_bytes(filters) != canonical_filter_bytes(o) for o in others)
+    # Case and composition differences are one search, and so one cursor context.
+    assert canonical_filter_bytes(parse_filters({"v": 1, "contains": "IMG"})) == (
+        canonical_filter_bytes(parse_filters({"v": 1, "contains": "img"}))
+    )
+
+
+@pytest.mark.parametrize("value", ["", "a", "ab", "AB", "e\u0301a", "\u00e9a"])
+def test_contains_needs_three_characters_once_normalized(value: str) -> None:
+    with pytest.raises(SearchTooShort, match="search too short"):
+        parse_filters({"v": 1, "contains": value})
+
+
+def test_contains_counts_the_normalized_text() -> None:
+    # Case folding can lengthen text: "ß" folds to "ss".
+    assert parse_filters({"v": 1, "contains": "\u00dfa"}).contains == "ssa"
+    assert parse_filters({"v": 1, "contains": "a" * 255}).contains == "a" * 255
+
+
+@pytest.mark.parametrize("value", [None, True, 3, b"name", ["abc"], "\udcff" * 3, "a" * 256])
+def test_contains_rejects_wrong_types_invalid_unicode_and_more_than_255_characters(
+    value: object,
+) -> None:
+    with pytest.raises(ValueError, match="invalid filters") as raised:
+        parse_filters({"v": 1, "contains": value})
+    assert not isinstance(raised.value, SearchTooShort)
+
+
+def test_contains_combines_with_every_other_filter() -> None:
+    filters = parse_filters({
+        "v": 1, "kind": ["file"], "type": ["jpg"], "size": {"min": "1"},
+        "modified": {"unknown": True}, "availability": ["present"], "prefix": "img",
+        "contains": "trip",
+    })
+    assert (filters.prefix, filters.contains) == ("img", "trip")
+    assert set(json.loads(canonical_filter_bytes(filters))) == {
+        "v", "kind", "type", "size", "modified", "availability", "prefix", "contains",
+    }
 
 
 def test_normalized_filter_document_is_bounded() -> None:

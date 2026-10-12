@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import ClassVar
 
+from django.contrib.postgres.indexes import GinIndex
 from django.db import models
 from django.db.models.functions import Coalesce
 from django.db.models.lookups import Exact, GreaterThan, LessThanOrEqual
@@ -91,6 +92,33 @@ def cascade_indexes() -> list[models.Index]:
     ]
 
 
+# pg_trgm and btree_gin live in their own schema, apart from the application schema's
+# privilege sweeps (see common.database_privileges).
+EXTENSION_SCHEMA = "aegis_extensions"
+SEARCH_INDEXES = {"directory": "catalog_search_directories", "file": "catalog_search_files"}
+
+
+def search_indexes() -> list[models.Index]:
+    """Trigram indexes of the searchable name within each root, folders apart from the rest.
+
+    Folders come first in every root-scope order. Their own small index finds the
+    matching folders without reading the matching files, which far outnumber them.
+    """
+    return [
+        GinIndex(
+            fields=("root", "search_name"),
+            opclasses=(f"{EXTENSION_SCHEMA}.uuid_ops", f"{EXTENSION_SCHEMA}.gin_trgm_ops"),
+            condition=(
+                models.Q(kind=EntryKind.DIRECTORY)
+                if kind == "directory"
+                else ~models.Q(kind=EntryKind.DIRECTORY)
+            ),
+            name=name,
+        )
+        for kind, name in SEARCH_INDEXES.items()
+    ]
+
+
 class CatalogEntry(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     root = models.ForeignKey(Root, on_delete=models.PROTECT)
@@ -133,6 +161,17 @@ class CatalogEntry(models.Model):
     # The entry's children must be retired (marked missing): it went missing as a directory
     # or a file or link now stands in its place. Cleared once none is left.
     retire_children = models.BooleanField(default=False, db_default=False)
+    # The order key as text (NFC of the casefolded display name), which name search
+    # matches literally. Stored, so reads never decode name keys.
+    search_name = models.GeneratedField(
+        expression=models.Func(
+            models.F("name_key"),
+            function="public.aegis_search_name",
+            output_field=models.TextField(),
+        ),
+        output_field=models.TextField(),
+        db_persist=True,
+    )
 
     objects = CatalogEntryQuerySet.as_manager()
 
@@ -140,7 +179,7 @@ class CatalogEntry(models.Model):
         base_manager_name = "objects"
         default_manager_name = "objects"
         indexes: ClassVar[list[models.Index]] = [
-            *browse_indexes(), *root_scope_indexes(), *cascade_indexes(),
+            *browse_indexes(), *root_scope_indexes(), *cascade_indexes(), *search_indexes(),
         ]
         constraints: ClassVar[list[models.BaseConstraint]] = [
             models.UniqueConstraint(fields=("root", "id"), name="catalog_root_id_uniq"),

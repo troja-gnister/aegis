@@ -4,13 +4,17 @@ import {afterEach, describe, expect, it, vi} from "vitest";
 import {FilterChips, ScopeToggle} from "./FilterChips";
 import {FilterPanel} from "./FilterPanel";
 import {
+  activeFilterFields,
   describeFilterField,
   draftFromFilters,
   emptyFilterDraft,
   filtersFromDraft,
+  listingScope,
   localDayStart,
+  parseSearch,
   parseSizeBytes,
   removeFilter,
+  withSearch,
 } from "./filter-state";
 import {setTestTimeZone} from "./test-fixtures";
 import type {BrowseScope, FileFilters} from "./types";
@@ -25,8 +29,8 @@ afterEach(() => {
   while (restorers.length > 0) restorers.pop()!();
 });
 
-function applied(draft: Parameters<typeof filtersFromDraft>[0]): FileFilters {
-  const result = filtersFromDraft(draft);
+function applied(draft: Parameters<typeof filtersFromDraft>[0], contains?: string): FileFilters {
+  const result = filtersFromDraft(draft, contains);
   if (!result.ok) throw new Error(`unexpected validation errors ${JSON.stringify(result.errors)}`);
   return result.filters;
 }
@@ -62,6 +66,30 @@ function PanelHarness({initial = {v: 1} as FileFilters, initialScope = "director
 }
 
 describe("filter state", () => {
+  it("treats the name search as a filter that comes first", () => {
+    const filters = withSearch({v: 1, type: ["jpg"], prefix: "IMG"}, "Trip");
+    expect(JSON.stringify(filters)).toBe('{"v":1,"contains":"Trip","type":["jpg"],"prefix":"IMG"}');
+    expect(activeFilterFields(filters)).toEqual(["contains", "type", "prefix"]);
+    expect(describeFilterField(filters, "contains")).toBe('Name contains "Trip"');
+    expect(listingScope(withSearch({v: 1}, "Trip"), "root")).toBe("root");
+    // The panel keeps the applied search, serialized like the search box does.
+    expect(JSON.stringify(applied({...emptyFilterDraft(), type: ["jpg"], prefix: "IMG"}, "Trip")))
+      .toBe(JSON.stringify(filters));
+    expect(withSearch(filters, "")).toEqual({v: 1, type: ["jpg"], prefix: "IMG"});
+    expect(withSearch(withSearch({v: 1}, "Trip"), "Map")).toEqual({v: 1, contains: "Map"});
+  });
+
+  it("applies search text trimmed and only from three characters with a letter or digit", () => {
+    expect(parseSearch("  trip ")).toEqual({text: "trip", tooShort: false});
+    expect(parseSearch("")).toEqual({text: "", tooShort: false});
+    expect(parseSearch(" tr ")).toEqual({text: "tr", tooShort: true});
+    // Characters, not UTF-16 code units: two letters outside the BMP are two characters.
+    expect(parseSearch("𝒜𝒜")).toEqual({text: "𝒜𝒜", tooShort: true});
+    expect(parseSearch("𝒜𝒜𝒜").tooShort).toBe(false);
+    expect(parseSearch("東京駅").tooShort).toBe(false);
+    for (const text of ["---", "...", "😀😀😀"]) expect(parseSearch(text).tooShort).toBe(true);
+  });
+
   it("removes exactly one filter field without mutating the applied filters", () => {
     const filters: FileFilters = {v: 1, kind: ["file"], prefix: "IMG_", size: {unknown: true}};
     const result = removeFilter(filters, "prefix");
@@ -295,6 +323,20 @@ describe("FilterPanel", () => {
     expect(screen.getByRole("radio", {name: "All folders"})).toBeChecked();
   });
 
+  it("keeps the applied name search, which only the search box edits", () => {
+    const onApply = vi.fn();
+    render(<PanelHarness initial={{v: 1, contains: "trip"}} initialScope="root" onApply={onApply} />);
+    fireEvent.click(screen.getByRole("button", {name: "Filters"}));
+    expect(screen.getByRole("radio", {name: "All folders"})).toBeChecked();
+    fireEvent.click(screen.getByRole("checkbox", {name: ".jpg"}));
+    fireEvent.click(screen.getByRole("button", {name: "Apply filters"}));
+    expect(onApply).toHaveBeenLastCalledWith({v: 1, contains: "trip", type: ["jpg"]}, "root");
+    fireEvent.click(screen.getByRole("button", {name: "Filters"}));
+    fireEvent.click(screen.getByRole("button", {name: "Clear all"}));
+    fireEvent.click(screen.getByRole("button", {name: "Apply filters"}));
+    expect(onApply).toHaveBeenLastCalledWith({v: 1, contains: "trip"}, "root");
+  });
+
   it("keeps a scope change in the draft until Apply", () => {
     const onApply = vi.fn();
     render(<PanelHarness initial={{v: 1, prefix: "IMG"}} initialScope="root" onApply={onApply} />);
@@ -336,6 +378,15 @@ describe("FilterChips", () => {
     expect(onChange).toHaveBeenLastCalledWith({v: 1, kind: ["file"], prefix: "IMG_"});
     fireEvent.click(screen.getByRole("button", {name: "Clear all filters"}));
     expect(onChange).toHaveBeenLastCalledWith({v: 1});
+  });
+
+  it("shows the name search as a removable chip", () => {
+    const onChange = vi.fn();
+    render(<FilterChips value={{v: 1, contains: "Trip", kind: ["file"]}} onChange={onChange} />);
+    const chips = within(screen.getByRole("list", {name: "Active filters"})).getAllByRole("button");
+    expect(chips[0]).toHaveAccessibleName('Remove filter Name contains "Trip"');
+    fireEvent.click(chips[0]!);
+    expect(onChange).toHaveBeenLastCalledWith({v: 1, kind: ["file"]});
   });
 
   it("describes size, modified and unknown metadata filters explicitly", () => {

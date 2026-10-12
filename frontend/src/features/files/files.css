@@ -290,6 +290,60 @@
   margin-block-start: 1rem;
 }
 
+.name-search {
+  position: relative;
+  display: flex;
+  flex: 1 1 16rem;
+  flex-wrap: wrap;
+  min-inline-size: 0;
+  max-inline-size: 32rem;
+}
+
+.name-search__input {
+  /* The flex basis sizes the box; a zero preferred size keeps the input's intrinsic
+     width out of the page's minimum width, which widened phone layouts. */
+  flex: 1 1 100%;
+  inline-size: 0;
+  min-inline-size: 0;
+  min-block-size: var(--touch-target);
+  padding-inline: 0.875rem calc(var(--touch-target) + 0.25rem);
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  color: var(--color-text);
+  background: var(--color-canvas);
+  font: inherit;
+}
+
+/* The box draws its own clear button. */
+.name-search__input::-webkit-search-cancel-button {
+  appearance: none;
+}
+
+.name-search__clear {
+  position: absolute;
+  inset-block-start: 0;
+  inset-inline-end: 0;
+  inline-size: var(--touch-target);
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  color: var(--color-text-muted);
+  background: transparent;
+  font-size: 1.25rem;
+  cursor: pointer;
+}
+
+.name-search__hint {
+  flex: 1 1 100%;
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+}
+
+.name-search__hint:not(:empty) {
+  margin-block-start: 0.25rem;
+}
+
 .file-page-control {
   cursor: pointer;
 }

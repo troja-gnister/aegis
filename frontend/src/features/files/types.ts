@@ -16,6 +16,8 @@ export type FileFilters = {
   modified?: {from?: string; before?: string; unknown?: true};
   availability?: SourceState[];
   prefix?: string;
+  /** Name search: literal text anywhere in a name, letter case ignored (3–255 characters). */
+  contains?: string;
 };
 
 export type EntrySummary = {

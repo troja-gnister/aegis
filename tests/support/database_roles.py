@@ -9,6 +9,8 @@ from typing import Any
 import psycopg
 import pytest
 from aegis_apps.common.database_privileges import (
+    EXTENSION_SCHEMA,
+    HELPER_FUNCTION_SIGNATURES,
     MANAGED_FUNCTION_SIGNATURES,
     MANAGED_SEQUENCES,
     MANAGED_TABLE_COLUMNS,
@@ -23,6 +25,7 @@ ALL_TEST_ROLES = (MIGRATOR_ROLE, *RUNTIME_DATABASE_ROLES)
 AclEntry = tuple[str, str, bool]
 TEST_OWNED_FUNCTION_SIGNATURES = (
     *MANAGED_FUNCTION_SIGNATURES.values(),
+    *HELPER_FUNCTION_SIGNATURES.values(),
     "public.aegis_directory_counter_guard()",
 )
 
@@ -207,6 +210,7 @@ def _restore_and_drop_roles(
     *,
     original_database_owner: str,
     original_schema_owner: str,
+    original_extension_schema_owner: str,
     original_relation_owners: dict[str, tuple[str, str]],
     original_functions: dict[str, tuple[str, str]],
     original_database_acl: tuple[AclEntry, ...],
@@ -252,6 +256,11 @@ def _restore_and_drop_roles(
 
         cursor.execute(
             sql.SQL("ALTER SCHEMA public OWNER TO {}").format(_quote(original_schema_owner))
+        )
+        cursor.execute(
+            sql.SQL("ALTER SCHEMA {} OWNER TO {}").format(
+                _quote(EXTENSION_SCHEMA), _quote(original_extension_schema_owner)
+            )
         )
         cursor.execute(
             sql.SQL("ALTER DATABASE {} OWNER TO {}").format(
@@ -364,6 +373,7 @@ def managed_role_database() -> Iterator[RoleDatabase]:
     created_roles: list[str] = []
     original_database_owner = ""
     original_schema_owner = ""
+    original_extension_schema_owner = ""
     original_relation_owners: dict[str, tuple[str, str]] = {}
     original_functions: dict[str, tuple[str, str]] = {}
     original_database_acl: tuple[AclEntry, ...] = ()
@@ -387,6 +397,17 @@ def managed_role_database() -> Iterator[RoleDatabase]:
         database_name, server_version, original_database_owner, original_schema_owner = row
         if not str(database_name).startswith("test_") or server_version // 10_000 != 18:
             pytest.fail("database-role tests require a disposable PostgreSQL 18 test database")
+        # Migrations ran as the test login, which therefore owns the extension schema; a
+        # deployment's migrator creates and owns it.
+        cursor.execute(
+            "SELECT pg_catalog.pg_get_userbyid(nspowner) FROM pg_catalog.pg_namespace "
+            "WHERE nspname = %s",
+            [EXTENSION_SCHEMA],
+        )
+        extension_row = cursor.fetchone()
+        if extension_row is None:
+            pytest.fail("the extension schema is missing")
+        original_extension_schema_owner = extension_row[0]
 
         cursor.execute(
             "SELECT rolname FROM pg_catalog.pg_roles WHERE rolname = ANY(%s)",
@@ -455,6 +476,11 @@ def managed_role_database() -> Iterator[RoleDatabase]:
                 )
             )
             cursor.execute(sql.SQL("ALTER SCHEMA public OWNER TO {}").format(_quote(MIGRATOR_ROLE)))
+            cursor.execute(
+                sql.SQL("ALTER SCHEMA {} OWNER TO {}").format(
+                    _quote(EXTENSION_SCHEMA), _quote(MIGRATOR_ROLE)
+                )
+            )
         for relation, (kind, _owner) in original_relation_owners.items():
             if kind == "S":
                 continue
@@ -499,6 +525,7 @@ def managed_role_database() -> Iterator[RoleDatabase]:
             _restore_and_drop_roles(
                 original_database_owner=original_database_owner,
                 original_schema_owner=original_schema_owner,
+                original_extension_schema_owner=original_extension_schema_owner,
                 original_relation_owners=original_relation_owners,
                 original_functions=original_functions,
                 original_database_acl=original_database_acl,

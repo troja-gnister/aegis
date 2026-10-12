@@ -25,6 +25,7 @@ const FILE_RESPONSE_BYTES = 1024 * 1024;
 const MAX_CURSOR_BYTES = 8192;
 const MAX_FILTER_BYTES = 8192;
 const MAX_LABEL_LENGTH = 4096;
+const MAX_SEARCH_CHARACTERS = 255;
 const UNSIGNED_DECIMAL = /^(?:0|[1-9][0-9]*)$/;
 const SIGNED_DECIMAL = /^(?:0|-?[1-9][0-9]*)$/;
 const TYPE_HINT = /^[a-z0-9]{1,16}$/;
@@ -216,7 +217,7 @@ function validFilterTimestamp(value: unknown): boolean {
 function validatedFilters(value: FileFilters): FileFilters {
   if (!value || typeof value !== "object" || Array.isArray(value)) invalidResponse();
   const fields = value as Record<string, unknown>;
-  const allowed = new Set(["v", "kind", "type", "size", "modified", "availability", "prefix"]);
+  const allowed = new Set(["v", "kind", "type", "size", "modified", "availability", "prefix", "contains"]);
   if (Object.keys(fields).length > 8 || Object.keys(fields).some((key) => !allowed.has(key)) || fields.v !== 1) {
     invalidResponse();
   }
@@ -233,6 +234,10 @@ function validatedFilters(value: FileFilters): FileFilters {
         (item !== "__unknown__" && !TYPE_HINT.test(item))))) invalidResponse();
   if (fields.prefix !== undefined && (typeof fields.prefix !== "string" ||
       encoder.encode(fields.prefix).byteLength > 2048)) invalidResponse();
+  if (fields.contains !== undefined && (typeof fields.contains !== "string" ||
+      fields.contains.trim() === "" || [...fields.contains].length > MAX_SEARCH_CHARACTERS)) {
+    invalidResponse();
+  }
   if (fields.size !== undefined) {
     const size = fields.size as Record<string, unknown>;
     if (!size || typeof size !== "object" || Array.isArray(size) || Object.keys(size).length < 1 ||

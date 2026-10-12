@@ -5,6 +5,14 @@ the default; ``parent`` names the directory, the root anchor when omitted) or, w
 ``scope=root``, the entries matching the filters anywhere in the root. A root-scope
 request refuses ``parent`` (400) rather than ignoring it, so one URL never stands for
 two different listings; its entries also carry ``parentId`` and ``parentName``.
+
+The ``filters`` document's ``contains`` searches names: a literal, case-insensitive
+substring of the entry's name, normalized like ``prefix`` and the name order (NFC of the
+casefolded name). It combines with every other filter, sort and both scopes, and a cursor
+binds it like any filter. Text that a trigram index cannot look up is refused with its own
+problem type, ``search_too_short`` (400): shorter than three characters once normalized,
+or without letters or digits forming a trigram (three in a row always do). Longer than 255
+characters is an invalid query.
 """
 
 from __future__ import annotations
@@ -43,7 +51,7 @@ from .authorization import (
     CatalogUnavailable,
 )
 from .cursors import MAX_CURSOR_BYTES, CursorRestartRequired
-from .filters import MAX_FILTER_BYTES, FileFilter, parse_filters
+from .filters import MAX_FILTER_BYTES, FileFilter, SearchTooShort, parse_filters
 
 CATALOG_NOT_FOUND = {"type": "catalog_not_found", "title": "Catalog item not found"}
 CATALOG_NOT_READY = {"type": "catalog_not_ready", "title": "Catalog not ready"}
@@ -55,6 +63,7 @@ INVALID_CATALOG_QUERY = {
     "type": "invalid_catalog_query",
     "title": "Invalid catalog query",
 }
+SEARCH_TOO_SHORT = {"type": "search_too_short", "title": "Search text too short"}
 CATALOG_UNAVAILABLE = {"type": "catalog_unavailable", "title": "Catalog unavailable"}
 SCAN_REQUEST_DENIED = {"type": "scan_request_denied", "title": "Scan request denied"}
 
@@ -142,6 +151,8 @@ def _directory_input(request: Request) -> DirectoryInput:
             raise ValueError("invalid_catalog_query")
         try:
             filters = parse_filters(json.loads(encoded_filters))
+        except SearchTooShort:
+            raise
         except (json.JSONDecodeError, UnicodeError, RecursionError, ValueError):
             raise ValueError("invalid_catalog_query") from None
     sort = values.get("sort", "name")
@@ -219,6 +230,8 @@ class CatalogAPIView(APIView):
             return response
         if isinstance(error, CursorRestartRequired):
             return _response(CURSOR_RESTART_REQUIRED, status=409)
+        if isinstance(error, SearchTooShort):
+            return _response(SEARCH_TOO_SHORT, status=400)
         if isinstance(error, (CatalogUnavailable, SchemaCompatibilityError)) or (
             _database_is_unavailable(error)
         ):

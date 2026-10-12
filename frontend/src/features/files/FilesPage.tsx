@@ -27,13 +27,14 @@ import {useAuthorizedRoot} from "../roots/useAuthorizedRoot";
 import {EntryDetailsPanel} from "./EntryDetailsPanel";
 import {FilterChips, ScopeToggle} from "./FilterChips";
 import {FilterPanel} from "./FilterPanel";
-import {activeFilterFields, listingScope} from "./filter-state";
+import {activeFilterFields, listingScope, SEARCH_HINT, withSearch} from "./filter-state";
 import {IndexStatusPanel} from "./IndexStatusPanel";
 import {
   createFileNavigation,
   type FileNavigation,
   type FileNavigationRecord,
 } from "./navigation";
+import {NameSearch} from "./NameSearch";
 import {directoryQueryOptions} from "./queries";
 import type {BrowseInput, BrowseScope, EntrySummary, FileFilters, IndexStatus} from "./types";
 import {ACTIVE_STATUS_INTERVAL} from "./useIndexStatus";
@@ -89,11 +90,13 @@ function statusMessage(state: string): string | null {
 }
 
 /** Empty-window text; a zero-match filter result never reads as an unindexed directory. */
-function emptyMessage(state: string | undefined, filtersActive: boolean): string | null {
+function emptyMessage(state: string | undefined, filters: FileFilters): string | null {
   if (state === "not_indexed") return "This location has not been indexed yet.";
   if (state === "queued" || state === "scanning") return null;
-  if (filtersActive && (state === "ready" || state === "degraded" || state === "unavailable")) {
-    return "No entries match these filters.";
+  const filtered = activeFilterFields(filters);
+  if (filtered.length > 0 && (state === "ready" || state === "degraded" || state === "unavailable")) {
+    if (filters.contains === undefined) return "No entries match these filters.";
+    return `No files match “${filters.contains}”${filtered.length > 1 ? " with these filters" : ""}.`;
   }
   if (state === "ready") return "No files in this location.";
   return null;
@@ -118,6 +121,11 @@ function isCursorRestart(error: unknown): boolean {
   return error instanceof ApiProblem && error.status === 409 && error.type === "cursor_restart_required";
 }
 
+/** Search text the server's trigram index cannot look up (the box checks only roughly). */
+function isSearchTooShort(error: unknown): boolean {
+  return error instanceof ApiProblem && error.status === 400 && error.type === "search_too_short";
+}
+
 export function FilesPage() {
   const {rootId = "", parentId} = useParams();
   const {session} = useAuthSession();
@@ -135,7 +143,7 @@ export function FilesPage() {
   const filtersButtonRef = useRef<HTMLButtonElement>(null);
   const filtersWereOpenRef = useRef(false);
   const detailsReturnRef = useRef<HTMLElement | null>(null);
-  const announceResultRef = useRef<"filters" | "restart" | null>(null);
+  const announceResultRef = useRef<"filters" | "search" | "restart" | null>(null);
   const discardedWindowRef = useRef<unknown>(undefined);
   const lastProgressRef = useRef<string | null>(null);
   const lastProgressRetryRef = useRef(0);
@@ -188,6 +196,7 @@ export function FilesPage() {
     ? selection.id
     : null;
   const restartRequired = directoryQuery.isError && isCursorRestart(directoryQuery.error);
+  const searchTooShort = directoryQuery.isError && isSearchTooShort(directoryQuery.error);
   const directoryKeyRef = useRef(directoryQueryOptions(input).queryKey);
   const refetchDirectory = directoryQuery.refetch;
   // A viewer opened from this route leaves the entry it showed last; Back focuses that row once.
@@ -261,21 +270,28 @@ export function FilesPage() {
     void queryClient.resetQueries({queryKey: directoryKeyRef.current, exact: true});
   }, [queryClient, resetRequest]);
 
+  const searching = filters.contains !== undefined;
+  const emptyText = windowEmpty ? emptyMessage(status?.state, filters) : null;
   useEffect(() => {
     const reason = announceResultRef.current;
     if (!reason || directoryQuery.isPending) return;
     announceResultRef.current = null;
     if (directoryQuery.isError) {
-      setAnnouncement(reason === "restart" ? "Files could not be loaded." : "Files could not be loaded for these filters.");
+      setAnnouncement(searchTooShort
+        ? `${SEARCH_HINT} to search.`
+        : reason === "restart" ? "Files could not be loaded." : "Files could not be loaded for these filters.");
       return;
     }
-    const empty = windowEmpty ? emptyMessage(status?.state, filtersActive) : null;
     if (reason === "restart") {
-      setAnnouncement(empty ?? "Showing files from the beginning.");
+      setAnnouncement(emptyText ?? "Showing files from the beginning.");
       return;
     }
-    setAnnouncement(empty ?? (filtersActive ? "Filters applied. Results updated." : "Filters cleared. Results updated."));
-  }, [directoryQuery.isError, directoryQuery.isPending, filtersActive, status?.state, windowEmpty]);
+    if (reason === "search") {
+      setAnnouncement(emptyText ?? (searching ? "Search results updated." : "Search cleared. Results updated."));
+      return;
+    }
+    setAnnouncement(emptyText ?? (filtersActive ? "Filters applied. Results updated." : "Filters cleared. Results updated."));
+  }, [directoryQuery.isError, directoryQuery.isPending, emptyText, filtersActive, searchTooShort, searching]);
 
   useEffect(() => {
     // Progress while the first page is empty or failed retries it, at most once per active interval.
@@ -336,6 +352,13 @@ export function FilesPage() {
     if (unchanged) restartWindow();
   };
 
+  /** Like filters, a search looks in every folder unless this folder was chosen for them. */
+  const applySearch = (text: string) => {
+    applyFilters(withSearch(filters, text), filtersActive ? scope : "root");
+    announceResultRef.current = "search";
+    setAnnouncement(text === "" ? "Clearing search…" : "Searching…");
+  };
+
   /** A stale cursor cannot be retried; drop every retained cursor and reload page one of the same query. */
   const restartFromBeginning = () => {
     setSelection(null);
@@ -369,7 +392,7 @@ export function FilesPage() {
     );
   }
 
-  const empty = !directoryQuery.isError && windowEmpty ? emptyMessage(status?.state, filtersActive) : null;
+  const empty = !directoryQuery.isError && windowEmpty ? emptyMessage(status?.state, filters) : null;
   const refreshAvailable = Boolean(
     live && status && entries.length > 0 && !directoryQuery.isFetching &&
       (live.generation !== status.generation || live.lastCompletedAt !== status.lastCompletedAt),
@@ -408,6 +431,7 @@ export function FilesPage() {
         onStatus={handleStatus}
       />
       <div className="files-toolbar">
+        <NameSearch applied={filters.contains} onSearch={applySearch} />
         <button
           ref={filtersButtonRef}
           className="file-page-control interactive"
@@ -432,7 +456,9 @@ export function FilesPage() {
       <p className="visually-hidden" role="status" aria-live="polite" {...announcementTestId}>
         {announcement}
       </p>
-      {directoryQuery.isPending ? <p role="status">Loading files…</p> : null}
+      {directoryQuery.isPending ? (
+        <p role="status">{searching ? "Searching…" : "Loading files…"}</p>
+      ) : null}
       {restartRequired ? (
         <div className="files-page__restart">
           <p className="notice notice--error" role="alert">
@@ -442,6 +468,10 @@ export function FilesPage() {
             Start from the beginning
           </button>
         </div>
+      ) : searchTooShort ? (
+        <p className="notice notice--error" role="alert">
+          {SEARCH_HINT} to search.
+        </p>
       ) : directoryQuery.isError ? (
         <p className="notice notice--error" role="alert">Files could not be loaded. Please try again.</p>
       ) : null}

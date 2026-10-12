@@ -67,6 +67,7 @@ EXPECTED_TABLE_COLUMNS = {
         "source_parent_id",
         "source_parent_revision",
         "retire_children",
+        "search_name",
     ),
     "django_migrations": ("id", "app", "name", "applied"),
     "django_admin_log": (
@@ -417,6 +418,7 @@ def test_catalog_is_select_only_and_media_reads_only_its_fixed_columns() -> None
     for hidden in (
         "display_name",
         "name_key",
+        "search_name",
         "logical_name",
         "logical_parent_id",
         "ctime_ns",
@@ -559,6 +561,34 @@ def test_function_execution_allowlist_is_exact_and_public_is_never_a_grantee() -
             "p_slot_limit",
         ):
             assert f"{argument} is null" in normalized
+
+
+def test_extensions_live_apart_and_no_runtime_role_runs_the_search_helper() -> None:
+    privilege_source = database_privileges
+
+    assert privilege_source.MANAGED_EXTENSIONS == {
+        "btree_gin": "aegis_extensions",
+        "pg_trgm": "aegis_extensions",
+        "plpgsql": "pg_catalog",
+    }
+    assert privilege_source.EXTENSION_SCHEMA == "aegis_extensions"
+    assert privilege_source.HELPER_FUNCTION_SIGNATURES == {
+        "aegis_search_name": "public.aegis_search_name(bytea)",
+    }
+    granted = {
+        function for functions in privilege_source.ROLE_FUNCTION_PRIVILEGES.values()
+        for function in functions
+    }
+    assert not granted & set(privilege_source.HELPER_FUNCTION_SIGNATURES)
+    assert not set(privilege_source.HELPER_FUNCTION_SIGNATURES) & set(
+        privilege_source.MANAGED_FUNCTION_SIGNATURES
+    )
+    synchronize = inspect.getsource(privilege_source.synchronize_database_privileges)
+    assert "_verify_extensions(cursor)" in synchronize
+    grants = inspect.getsource(privilege_source._apply_grants)
+    assert "ON SCHEMA {EXTENSION_SCHEMA} FROM PUBLIC" in grants
+    boundaries = inspect.getsource(privilege_source._verify_function_boundaries)
+    assert "provolatile" in boundaries and "HELPER_FUNCTION_SIGNATURES" in boundaries
 
 
 def test_media_touch_boundary_is_web_only_and_bounded() -> None:

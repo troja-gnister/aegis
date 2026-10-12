@@ -34,7 +34,7 @@ MANAGED_TABLE_COLUMNS: Final[dict[str, tuple[str, ...]]] = {
         "catalog_version", "children_version", "observation_epoch",
         "seen_generation", "seen_attempt",
         "observed_at", "logical_parent_id", "root_id", "source_parent_id",
-        "source_parent_revision", "retire_children",
+        "source_parent_revision", "retire_children", "search_name",
     ),
     "django_migrations": ("id", "app", "name", "applied"),
     "django_admin_log": (
@@ -271,6 +271,22 @@ MANAGED_TABLE_COLUMNS: Final[dict[str, tuple[str, ...]]] = {
         "last_access_at",
         "asset_id",
     ),
+}
+
+# Name search's trigram indexes need pg_trgm and btree_gin. Both are trusted, so the
+# migrator installs them, but their objects belong to the bootstrap superuser: privilege
+# sync could not revoke their functions in the application schema, so they live in a
+# schema of their own that the migrator owns and no other role may use.
+EXTENSION_SCHEMA: Final = "aegis_extensions"
+MANAGED_EXTENSIONS: Final[dict[str, str]] = {
+    "btree_gin": EXTENSION_SCHEMA,
+    "pg_trgm": EXTENSION_SCHEMA,
+    "plpgsql": "pg_catalog",
+}
+# Plain migrator-owned functions that no runtime role executes: the generated search
+# name is computed by the migrator's scan functions when they write a name key.
+HELPER_FUNCTION_SIGNATURES: Final[dict[str, str]] = {
+    "aegis_search_name": "public.aegis_search_name(bytea)",
 }
 
 MANAGED_SEQUENCES: Final[tuple[str, ...]] = (
@@ -1007,6 +1023,7 @@ MANAGED_FUNCTION_IDENTITY_ARGUMENTS: Final[dict[str, str]] = {
     "aegis_validate_operation_authorization": "uuid",
     "aegis_touch_media_derivative": "text",
 }
+HELPER_FUNCTION_IDENTITY_ARGUMENTS: Final[dict[str, str]] = {"aegis_search_name": "bytea"}
 
 
 class PrivilegeSynchronizationError(RuntimeError):
@@ -1076,6 +1093,85 @@ def _verify_schema_manifest(cursor: Any) -> None:
     sequences = tuple(row[0] for row in cursor.fetchall())
     if sequences != MANAGED_SEQUENCES:
         raise PrivilegeDriftError("database sequence privilege manifest drift")
+
+
+# Every kind of schema object a stray CREATE could leave in the extension schema.
+_SCHEMA_OBJECT_CATALOGS: Final = (
+    ("pg_class", "relnamespace"),
+    ("pg_proc", "pronamespace"),
+    ("pg_type", "typnamespace"),
+    ("pg_operator", "oprnamespace"),
+    ("pg_opclass", "opcnamespace"),
+    ("pg_opfamily", "opfnamespace"),
+    ("pg_collation", "collnamespace"),
+    ("pg_conversion", "connamespace"),
+    ("pg_statistic_ext", "stxnamespace"),
+    ("pg_ts_config", "cfgnamespace"),
+    ("pg_ts_dict", "dictnamespace"),
+)
+
+
+def _verify_extensions(cursor: Any) -> None:
+    """Exactly the managed extensions, each in its schema; the extension schema belongs to
+    the migrator and holds nothing but those extensions' own objects."""
+    cursor.execute(
+        """
+        SELECT extension.extname, namespace.nspname
+          FROM pg_catalog.pg_extension AS extension
+          JOIN pg_catalog.pg_namespace AS namespace
+            ON namespace.oid = extension.extnamespace
+        """
+    )
+    if dict(cursor.fetchall()) != MANAGED_EXTENSIONS:
+        raise PrivilegeDriftError("database extension manifest drift")
+
+    cursor.execute(
+        """
+        SELECT pg_catalog.pg_get_userbyid(namespace.nspowner)
+          FROM pg_catalog.pg_namespace AS namespace
+         WHERE namespace.nspname = %s
+        """,
+        [EXTENSION_SCHEMA],
+    )
+    if cursor.fetchone() != ("aegis_migrator",):
+        raise PrivilegeDriftError("the extension schema must be owned by the migrator")
+
+    members = " UNION ALL ".join(
+        f"SELECT 'pg_catalog.{catalog}'::pg_catalog.regclass AS classid, object.oid "
+        f"FROM pg_catalog.{catalog} AS object WHERE object.{column} = extension_schema.oid"
+        for catalog, column in _SCHEMA_OBJECT_CATALOGS
+    )
+    cursor.execute(
+        f"""
+        WITH extension_schema AS (
+            SELECT namespace.oid
+              FROM pg_catalog.pg_namespace AS namespace
+             WHERE namespace.nspname = %s
+        ), member AS (
+            SELECT object.classid, object.oid
+              FROM extension_schema CROSS JOIN LATERAL ({members}) AS object
+        )
+        SELECT pg_catalog.count(*)
+          FROM member
+         WHERE NOT EXISTS (
+            SELECT 1
+              FROM pg_catalog.pg_depend AS dependency
+              JOIN pg_catalog.pg_extension AS extension
+                ON extension.oid = dependency.refobjid
+             WHERE dependency.classid = member.classid
+               AND dependency.objid = member.oid
+               AND dependency.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass
+               AND dependency.deptype = 'e'
+               AND extension.extname = ANY(%s)
+         )
+        """,
+        [
+            EXTENSION_SCHEMA,
+            [name for name, schema in MANAGED_EXTENSIONS.items() if schema == EXTENSION_SCHEMA],
+        ],
+    )
+    if cursor.fetchone() != (0,):
+        raise PrivilegeDriftError("the extension schema holds unmanaged objects")
 
 
 def _verify_role_boundaries(
@@ -1238,7 +1334,7 @@ def _unexpected_explicit_grantees(cursor: Any) -> tuple[str, ...]:
             SELECT acl.grantee
               FROM pg_catalog.pg_namespace AS namespace
               CROSS JOIN LATERAL pg_catalog.aclexplode(namespace.nspacl) AS acl
-             WHERE namespace.nspname = 'public'
+             WHERE namespace.nspname IN ('public', %s)
             UNION
             SELECT acl.grantee
               FROM pg_catalog.pg_class AS relation
@@ -1292,9 +1388,10 @@ def _unexpected_explicit_grantees(cursor: Any) -> tuple[str, ...]:
          ORDER BY role.rolname
         """,
         [
+            EXTENSION_SCHEMA,
             [*MANAGED_TABLE_COLUMNS, *MANAGED_SEQUENCES],
             list(MANAGED_TABLE_COLUMNS),
-            list(MANAGED_FUNCTION_SIGNATURES),
+            [*MANAGED_FUNCTION_SIGNATURES, *HELPER_FUNCTION_SIGNATURES],
             list(MANAGED_DATABASE_ROLES),
         ],
     )
@@ -1340,6 +1437,10 @@ def _apply_grants(cursor: Any) -> None:
         f"REVOKE ALL PRIVILEGES ON SCHEMA public FROM {reset_role_list}"
     )
     cursor.execute(f"GRANT USAGE ON SCHEMA public TO {runtime_role_list}")
+    cursor.execute(f"REVOKE ALL PRIVILEGES ON SCHEMA {EXTENSION_SCHEMA} FROM PUBLIC")
+    cursor.execute(
+        f"REVOKE ALL PRIVILEGES ON SCHEMA {EXTENSION_SCHEMA} FROM {reset_role_list}"
+    )
     cursor.execute("REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM PUBLIC")
     cursor.execute(
         "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public "
@@ -1440,6 +1541,34 @@ def _verify_function_boundaries(cursor: Any) -> None:
         ):
             raise PrivilegeDriftError("database boundary function metadata drift")
 
+    cursor.execute(
+        """
+        SELECT function.proname,
+               function.prosecdef,
+               pg_catalog.pg_get_userbyid(function.proowner),
+               function.proconfig,
+               pg_catalog.oidvectortypes(function.proargtypes),
+               language.lanname,
+               function.provolatile
+          FROM pg_catalog.pg_proc AS function
+          JOIN pg_catalog.pg_namespace AS namespace
+            ON namespace.oid = function.pronamespace
+          JOIN pg_catalog.pg_language AS language
+            ON language.oid = function.prolang
+         WHERE namespace.nspname = 'public'
+           AND function.proname = ANY(%s)
+         ORDER BY function.proname
+        """,
+        [list(HELPER_FUNCTION_SIGNATURES)],
+    )
+    helpers = cursor.fetchall()
+    if [row[0] for row in helpers] != sorted(HELPER_FUNCTION_SIGNATURES) or any(
+        row[1:] != (False, "aegis_migrator", None, HELPER_FUNCTION_IDENTITY_ARGUMENTS[row[0]],
+                    "sql", "i")
+        for row in helpers
+    ):
+        raise PrivilegeDriftError("database helper function metadata drift")
+
 
 def _verify_effective_grants(cursor: Any) -> None:
     for role in RUNTIME_DATABASE_ROLES:
@@ -1461,6 +1590,13 @@ def _verify_effective_grants(cursor: Any) -> None:
         )
         if cursor.fetchone() != (True, False, False, True, False):
             raise PrivilegeDriftError("database or schema privilege drift")
+        cursor.execute(
+            "SELECT pg_catalog.has_schema_privilege(%s, %s, 'USAGE'), "
+            "pg_catalog.has_schema_privilege(%s, %s, 'CREATE')",
+            [role, EXTENSION_SCHEMA, role, EXTENSION_SCHEMA],
+        )
+        if cursor.fetchone() != (False, False):
+            raise PrivilegeDriftError("extension schema privilege drift")
 
         for table, columns in MANAGED_TABLE_COLUMNS.items():
             table_grants = ROLE_TABLE_PRIVILEGES[role].get(table, ())
@@ -1510,6 +1646,13 @@ def _verify_effective_grants(cursor: Any) -> None:
             )
             if cursor.fetchone() != (expected,):
                 raise PrivilegeDriftError("database function privilege drift")
+        for signature in HELPER_FUNCTION_SIGNATURES.values():
+            cursor.execute(
+                "SELECT has_function_privilege(%s, %s, 'EXECUTE')",
+                [role, signature],
+            )
+            if cursor.fetchone() != (False,):
+                raise PrivilegeDriftError("database helper function privilege drift")
 
     cursor.execute(
         """
@@ -1528,6 +1671,13 @@ def _verify_effective_grants(cursor: Any) -> None:
     )
     if cursor.fetchone() != (False, False, False, False, False):
         raise PrivilegeDriftError("public database or schema privilege drift")
+    cursor.execute(
+        "SELECT pg_catalog.has_schema_privilege('public', %s, 'USAGE'), "
+        "pg_catalog.has_schema_privilege('public', %s, 'CREATE')",
+        [EXTENSION_SCHEMA, EXTENSION_SCHEMA],
+    )
+    if cursor.fetchone() != (False, False):
+        raise PrivilegeDriftError("public extension schema privilege drift")
 
     for table, columns in MANAGED_TABLE_COLUMNS.items():
         for privilege in (
@@ -1563,7 +1713,7 @@ def _verify_effective_grants(cursor: Any) -> None:
             if cursor.fetchone() != (False,):
                 raise PrivilegeDriftError("public sequence privilege drift")
 
-    for signature in MANAGED_FUNCTION_SIGNATURES.values():
+    for signature in (*MANAGED_FUNCTION_SIGNATURES.values(), *HELPER_FUNCTION_SIGNATURES.values()):
         cursor.execute(
             """
             SELECT EXISTS (
@@ -1630,6 +1780,7 @@ def synchronize_database_privileges() -> None:
         cursor.execute("SELECT pg_advisory_xact_lock(%s, %s)", [1095059273, 11])
         _verify_role_boundaries(cursor)
         _verify_schema_manifest(cursor)
+        _verify_extensions(cursor)
         _install_boundary_functions(cursor)
         _apply_grants(cursor)
         _verify_function_boundaries(cursor)

@@ -87,7 +87,8 @@ function FilterDialog({value, scope, onApply, onCancel}: Omit<FilterPanelProps, 
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const result = filtersFromDraft(draft);
+    // The search box owns the name search; applying the panel keeps it.
+    const result = filtersFromDraft(draft, value.contains);
     if (!result.ok) {
       setErrors(result.errors);
       const first = ERROR_TARGETS.find((field) => result.errors[field] !== undefined);

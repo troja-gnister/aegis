@@ -243,6 +243,29 @@ describe("file API guards", () => {
     expect(sent[1]).toMatchObject({type: expect.arrayContaining(["__unknown__", "unknown"])});
   });
 
+  it("sends a name search with the other filters and refuses a malformed one before sending", async () => {
+    const sent: unknown[] = [];
+    server.use(http.get(`/api/v1/roots/${ROOT_ID}/entries`, ({request}) => {
+      const url = new URL(request.url);
+      sent.push(JSON.parse(url.searchParams.get("filters")!));
+      return HttpResponse.json({...page(), directoryId: url.searchParams.get("parent") ?? ENTRY_ID, entries: []});
+    }));
+    const searched = filtersFromDraft({...emptyFilterDraft(), type: ["jpg"]}, "Trip 2026");
+    if (!searched.ok) throw new Error(JSON.stringify(searched.errors));
+    await fetchDirectory({...input, parentId: null, scope: "root", filters: searched.filters},
+      new AbortController().signal);
+    await fetchDirectory({...input, filters: {v: 1, contains: "😀".repeat(255)}}, new AbortController().signal);
+    expect(sent).toEqual([{v: 1, contains: "Trip 2026", type: ["jpg"]}, {v: 1, contains: "😀".repeat(255)}]);
+
+    for (const contains of ["", "   ", "x".repeat(256), 7]) {
+      await expect(fetchDirectory(
+        {...input, filters: {v: 1, contains} as unknown as BrowseInput["filters"]},
+        new AbortController().signal,
+      )).rejects.toBeDefined();
+    }
+    expect(sent).toHaveLength(2);
+  });
+
   it("rejects oversized page arrays and success bodies before publication", async () => {
     const body = page();
     body.entries = Array.from({length: 251}, (_, index) =>

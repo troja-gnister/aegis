@@ -65,7 +65,10 @@ BEGIN
         BEGIN
             raw_bytes := pg_catalog.decode(observation->>'raw','base64');
             name_bytes := pg_catalog.decode(observation->>'name_key','base64');
-        EXCEPTION WHEN invalid_parameter_value OR invalid_text_representation THEN
+            -- The entry's search name is its name key as text.
+            PERFORM pg_catalog.convert_from(name_bytes, 'UTF8');
+        EXCEPTION WHEN invalid_parameter_value OR invalid_text_representation
+                       OR character_not_in_repertoire THEN
             RAISE EXCEPTION 'invalid scan observation' USING ERRCODE='22023';
         END;
         IF pg_catalog.replace(pg_catalog.encode(raw_bytes,'base64'),E'\n','') <> observation->>'raw'
