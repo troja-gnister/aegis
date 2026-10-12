@@ -150,16 +150,28 @@ def _fit_and_save(
     return save_webp(_final_mode(_to_srgb(image)), directory, spec, quality)
 
 
-def render_photo(
-    descriptor: int, directory: str, spec: OutputSpec, params: ImageParams,
+def render_image(
+    image: ImageFile.ImageFile, directory: str, spec: OutputSpec, params: ImageParams,
 ) -> Output:
-    """A thumbnail or preview of a photo: upright, fit within ``max_edge``, WebP."""
-    with open_image(descriptor) as image, _guarded():
+    """Render an image :func:`open_image` opened: upright, fit within ``max_edge``, WebP.
+
+    This decodes it (at a reduced JPEG scale), changes its size and drops its EXIF
+    orientation, so anything read from the header, such as the probe, must come first.
+    """
+    with _guarded():
         if image.format in _DRAFT_FORMATS:
             image.draft("RGB", (params.max_edge * 2, params.max_edge * 2))
         # pillow-heif already applied the HEIF transforms and reset the EXIF orientation.
         ImageOps.exif_transpose(image, in_place=True)
         return _fit_and_save(_normalize(image), directory, spec, params.max_edge, params.quality)
+
+
+def render_photo(
+    descriptor: int, directory: str, spec: OutputSpec, params: ImageParams,
+) -> Output:
+    """A thumbnail or preview of a photo: upright, fit within ``max_edge``, WebP."""
+    with open_image(descriptor) as image:
+        return render_image(image, directory, spec, params)
 
 
 def render_frame(

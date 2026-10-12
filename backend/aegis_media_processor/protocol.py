@@ -25,6 +25,13 @@ copy from it rather than renaming or linking the scratch file.
 Probe metadata never carries coordinates: GPS and location data are reduced to
 ``has_location`` inside the decoding child, no numeric or location field exists for one, and
 floats are refused everywhere.
+
+A ``backfill`` job is one asset's whole background stage in one child: the probe and, from the
+same opened descriptor (for a photo, the same decode), the renditions of its kind's derivative
+operation (:data:`BACKFILL_RENDITIONS`: a photo's ``thumbnail``, a video's ``poster`` pair). Its
+params, outputs and edge bounds are exactly that operation's, so its derivatives have the same
+keys, and its ``ok`` result carries the metadata as well. :func:`rendition_op` maps a job to the
+operation whose outputs it writes.
 """
 
 from __future__ import annotations
@@ -78,7 +85,7 @@ _CAPTURED_RE: Final = re.compile(
 )
 _MAX_INTEGER: Final = (1 << 63) - 1
 
-Op = Literal["probe", "thumbnail", "preview", "poster", "transcode"]
+Op = Literal["probe", "thumbnail", "preview", "poster", "transcode", "backfill"]
 MediaKind = Literal["photo", "video"]
 Lane = Literal["interactive", "background"]
 Status = Literal["ok", "unsupported", "changed", "failed", "timeout"]
@@ -86,7 +93,9 @@ OutputFormat = Literal["webp", "mp4"]
 CapturedSource = Literal["exif", "container"]
 Container = Literal["mp4", "mov", "3gp", "matroska", "webm", "avi", "mpegts"]
 
-OPS: Final[tuple[Op, ...]] = ("probe", "thumbnail", "preview", "poster", "transcode")
+OPS: Final[tuple[Op, ...]] = (
+    "probe", "thumbnail", "preview", "poster", "transcode", "backfill",
+)
 MEDIA_KINDS: Final[tuple[MediaKind, ...]] = ("photo", "video")
 LANES: Final[tuple[Lane, ...]] = ("interactive", "background")
 STATUSES: Final[tuple[Status, ...]] = ("ok", "unsupported", "changed", "failed", "timeout")
@@ -108,7 +117,14 @@ OP_KINDS: Final[Mapping[Op, frozenset[MediaKind]]] = MappingProxyType({
     "preview": frozenset({"photo"}),
     "poster": frozenset({"video"}),
     "transcode": frozenset({"video"}),
+    "backfill": frozenset({"photo", "video"}),
 })
+# The derivative operation whose params and outputs a backfill job of each kind has.
+BACKFILL_RENDITIONS: Final[Mapping[MediaKind, Op]] = MappingProxyType({
+    "photo": "thumbnail", "video": "poster",
+})
+# The operations whose ``ok`` result carries probe metadata.
+METADATA_OPS: Final[frozenset[Op]] = frozenset({"probe", "backfill"})
 
 # Safe error codes, by status. A code is the only failure detail that crosses the volume.
 ERROR_CODES: Final[Mapping[Status, frozenset[str]]] = MappingProxyType({
@@ -145,7 +161,7 @@ class OutputSpec:
 
 
 # A video's thumbnail-size poster frame is its ``thumbnail`` derivative; the preview-size
-# frame is its ``poster``.
+# frame is its ``poster``. A backfill job writes its rendition's outputs (job_outputs).
 OP_OUTPUTS: Final[Mapping[Op, tuple[OutputSpec, ...]]] = MappingProxyType({
     "probe": (),
     "thumbnail": (OutputSpec("thumbnail", "webp"),),
@@ -363,6 +379,21 @@ def job_id_from_filename(name: str) -> str | None:
     return candidate if JOB_ID_RE.fullmatch(candidate) else None
 
 
+def rendition_op(op: Op, kind: MediaKind) -> Op:
+    """The operation whose params and outputs a job has: itself, or a backfill's rendition."""
+    return BACKFILL_RENDITIONS[kind] if op == "backfill" else op
+
+
+def job_outputs(op: Op, kind: MediaKind) -> tuple[OutputSpec, ...]:
+    """The outputs an ``ok`` result of ``op`` for ``kind`` lists, in this order."""
+    return OP_OUTPUTS[rendition_op(op, kind)]
+
+
+def default_params(op: Op, kind: MediaKind) -> Params:
+    """The M4 params of ``op`` for ``kind`` (a backfill's are its rendition's)."""
+    return DEFAULT_PARAMS[rendition_op(op, kind)]
+
+
 def output_magic_matches(output_format: OutputFormat, head: bytes) -> bool:
     """Whether a file's first 12 bytes carry its format's signature (RIFF/WEBP, MP4 ``ftyp``)."""
     if len(head) < 12:
@@ -414,7 +445,7 @@ def output_edge_bounds(job: Job) -> Mapping[str, tuple[int, int]]:
     """Per output name, the (long edge, short edge) bounds its dimensions must respect."""
     params = job.params
     if type(params) is ImageParams:
-        return {OP_OUTPUTS[job.op][0].name: (params.max_edge, params.max_edge)}
+        return {job_outputs(job.op, job.kind)[0].name: (params.max_edge, params.max_edge)}
     if type(params) is PosterParams:
         return {
             "thumbnail": (params.thumbnail_edge, params.thumbnail_edge),
@@ -545,7 +576,7 @@ def check_job(job: object) -> Job:
     source = _check_source(job.input)
     if kind not in OP_KINDS[op] or media_kind_for_path(source.path) != kind:
         raise ProtocolError
-    _check_params(op, job.params)
+    _check_params(rendition_op(op, kind), job.params)
     _check_limits(job.limits)
     return job
 
@@ -625,10 +656,10 @@ def check_result(result: object, job: Job | None = None) -> Result:
         raise ProtocolError
     if status != "ok":
         return result
-    if (result.metadata is None) != (job.op != "probe"):
+    if (result.metadata is None) != (job.op not in METADATA_OPS):
         raise ProtocolError
     if tuple(output.name for output in outputs) != tuple(
-        spec.name for spec in OP_OUTPUTS[job.op]
+        spec.name for spec in job_outputs(job.op, job.kind)
     ):
         raise ProtocolError
     bounds = output_edge_bounds(job)
@@ -806,12 +837,13 @@ def decode_job(raw: bytes) -> Job:
     if _integer(document["version"]) != PROTOCOL_VERSION:
         raise ProtocolError
     op = _choice(document["op"], OPS)
+    kind = _choice(document["kind"], MEDIA_KINDS)
     source = _fields(document["input"], {"slot", "path", "device", "inode", "size", "mtime_ns"})
     limits = _fields(document["limits"], set(LIMIT_BOUNDS))
     job = Job(
         id=cast(str, document["id"]),
         op=op,
-        kind=cast(MediaKind, document["kind"]),
+        kind=kind,
         lane=cast(Lane, document["lane"]),
         input=SourceInput(
             slot=cast(str, source["slot"]),
@@ -821,7 +853,7 @@ def decode_job(raw: bytes) -> Job:
             size=cast(int, source["size"]),
             mtime_ns=cast(int, source["mtime_ns"]),
         ),
-        params=_decode_params(op, document["params"]),
+        params=_decode_params(rendition_op(op, kind), document["params"]),
         limits=Limits(**{name: cast(int, limits[name]) for name in LIMIT_BOUNDS}),
     )
     return check_job(job)

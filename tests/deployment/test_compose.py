@@ -954,8 +954,9 @@ def test_media_processor_is_offline_credential_free_and_shares_only_scratch() ->
     assert processor["init"] is True
     assert processor["tmpfs"] == ["/tmp:size=64m,noexec,nosuid,nodev"]
     assert processor["pids_limit"] == 256
-    assert int(processor["mem_limit"]) == 7 * 2**30
-    assert float(processor["cpus"]) == 2.0
+    # Four children at the largest stage budget (3 GiB) plus 1 GiB; four CPUs.
+    assert int(processor["mem_limit"]) == 13 * 2**30
+    assert float(processor["cpus"]) == 4.0
     assert processor["restart"] == "unless-stopped"
     assert "depends_on" not in processor and "healthcheck" not in processor
     assert processor["volumes"] == [{

@@ -13,11 +13,17 @@ The pattern is the operations ``Job`` lease (Task 2's models):
 - a claim never touches ``attempts``: that counts consecutive failures for the current
   fingerprint and is changed only when a result is recorded.
 
-Interactive assets (``lane = interactive``) are claimed before background ones. Within a lane
-the order is ``next_attempt_at``, then entry: discovery queues an asset at its discovery time,
-and a successful probe re-queues it at the tail, so a backfill probes the whole library first
-(giving every item its timeline date) and then builds thumbnails and posters. Lease lengths
-are bounded in code because the database has no cap on them.
+Interactive assets (``lane = interactive``) are claimed first, by ``next_attempt_at`` then
+entry. Background assets are claimed **newest file first**, so the top of the Photos timeline
+fills early: per active root, the claim looks at the :data:`NEWEST_WINDOW` newest
+(``mtime_ns``, then entry, descending) assets that need work and are not parked, through the
+partial index ``media_asset_backfill_idx``, and takes the newest eligible ones across roots.
+The window bounds each claim's cost whatever the root holds; only when the window is all
+leased or backing off does the claim fall back to the oldest ``next_attempt_at`` (through
+``media_asset_work_idx``), so no eligible asset is starved. A pristine asset's one job is a
+backfill that probes and renders (``pipeline.py``), and a probed asset is claimable again at
+once for its thumbnail or poster, so a library fills newest first, thumbnails included. Lease
+lengths are bounded in code because the database has no cap on them.
 """
 
 from __future__ import annotations
@@ -32,14 +38,19 @@ from django.db import transaction
 from django.db.models import Q
 
 from .enums import Lane
-from .models import ASSET_NEEDS_WORK, MediaAsset
+from .models import ASSET_NEEDS_WORK, BACKFILL_CANDIDATE, MediaAsset
+
+# Defined with the index whose predicate names it; discovery and the worker import it here.
+from .models import PARKED_UNTIL as PARKED_UNTIL
 
 DEFAULT_ASSET_LEASE_SECONDS: Final = 300
 MAX_ASSET_LEASE_SECONDS: Final = 3_600
 MAX_CLAIM_BATCH: Final = 32
-# A parked asset (its entry is gone or no longer a present media file) waits here, far beyond
-# any real retry time, so the claim range never reaches it. See discovery.py.
-PARKED_UNTIL: Final = datetime.fromisoformat("9999-01-01T00:00:00+00:00")
+# How many of a root's newest needs-work assets a background claim reads at most. While all
+# of them are leased or backing off (for example a new folder of unreadable files), claims
+# take the oldest queue time instead: the cost stays bounded and nothing starves, but the
+# order is not newest first until those assets clear.
+NEWEST_WINDOW: Final = 256
 
 CLAIM_FIELDS: Final = (
     "entry_id", "root_id", "kind", "device", "inode", "size", "mtime_ns", "fingerprint",
@@ -80,6 +91,53 @@ def fenced(lease: AssetLease, *, now: datetime) -> Q:
     )
 
 
+def _claimable(now: datetime) -> Q:
+    return Q(lease_expires_at__isnull=True) | Q(lease_expires_at__lte=now)
+
+
+def _by_queue_time(
+    lane: str, roots: Sequence[uuid.UUID], now: datetime, limit: int,
+    exclude: Collection[uuid.UUID] = (),
+) -> list[dict[str, Any]]:
+    """Lock up to ``limit`` eligible assets of a lane, oldest ``next_attempt_at`` first."""
+    query = (
+        MediaAsset.objects.select_for_update(skip_locked=True, of=("self",))
+        .filter(ASSET_NEEDS_WORK)
+        .filter(lane=lane, next_attempt_at__lte=now, root_id__in=roots)
+        .filter(_claimable(now))
+    )
+    if exclude:
+        # Rows this transaction already locked: SKIP LOCKED does not skip our own locks.
+        query = query.exclude(entry_id__in=list(exclude))
+    return list(query.order_by("next_attempt_at", "entry_id").values(*CLAIM_FIELDS)[:limit])
+
+
+def _newest(root_id: uuid.UUID, now: datetime, limit: int) -> list[dict[str, Any]]:
+    """Lock up to ``limit`` of a root's newest eligible background assets.
+
+    Only the root's :data:`NEWEST_WINDOW` newest candidates are read (an index range of
+    ``media_asset_backfill_idx``); leased and backing-off assets among them are skipped.
+    """
+    window = (
+        MediaAsset.objects.filter(BACKFILL_CANDIDATE)
+        .filter(root_id=root_id)
+        .order_by("-mtime_ns", "-entry_id")
+        .values("entry_id")[:NEWEST_WINDOW]
+    )
+    return list(
+        MediaAsset.objects.select_for_update(skip_locked=True, of=("self",))
+        .filter(BACKFILL_CANDIDATE)
+        .filter(entry_id__in=window, root_id=root_id, next_attempt_at__lte=now)
+        .filter(_claimable(now))
+        .order_by("-mtime_ns", "-entry_id")
+        .values(*CLAIM_FIELDS)[:limit]
+    )
+
+
+def _newest_key(row: dict[str, Any]) -> tuple[Any, uuid.UUID]:
+    return row["mtime_ns"], row["entry_id"]
+
+
 def claim_assets(
     owner: uuid.UUID,
     *,
@@ -88,44 +146,47 @@ def claim_assets(
     now: datetime,
     lease_seconds: int = DEFAULT_ASSET_LEASE_SECONDS,
 ) -> list[ClaimedAsset]:
-    """Lease up to ``limit`` assets that need work, interactive lane first."""
+    """Lease up to ``limit`` assets that need work: interactive first, then newest files."""
     if type(limit) is not int or not 0 <= limit <= MAX_CLAIM_BATCH:
         raise ValueError("invalid asset claim limit")
     if limit == 0 or not root_ids:
         return []
     expires_at = now + lease_delta(lease_seconds)
     claimed: list[ClaimedAsset] = []
-    roots: Sequence[uuid.UUID] = sorted(root_ids)
+    roots: Sequence[uuid.UUID] = sorted(set(root_ids))
     with transaction.atomic():
-        for lane in (Lane.INTERACTIVE, Lane.BACKGROUND):
-            remaining = limit - len(claimed)
-            if remaining <= 0:
-                break
-            rows = list(
-                MediaAsset.objects.select_for_update(skip_locked=True, of=("self",))
-                .filter(ASSET_NEEDS_WORK)
-                .filter(lane=lane, next_attempt_at__lte=now, root_id__in=roots)
-                .filter(Q(lease_expires_at__isnull=True) | Q(lease_expires_at__lte=now))
-                .order_by("next_attempt_at", "entry_id")
-                .values(*CLAIM_FIELDS)[:remaining]
-            )
-            for row in rows:
-                token = int(row["attempt_token"]) + 1
-                updated = MediaAsset.objects.filter(
-                    entry_id=row["entry_id"], attempt_token=row["attempt_token"],
-                ).update(
-                    attempt_token=token,
-                    lease_owner=owner,
-                    lease_expires_at=expires_at,
-                    next_attempt_at=expires_at,
-                    updated_at=now,
+        rows = _by_queue_time(Lane.INTERACTIVE, roots, now, limit)
+        remaining = limit - len(rows)
+        if remaining > 0:
+            # Every root's newest, then the newest of those; the rest stay locked only until
+            # this transaction commits.
+            newest = sorted(
+                (row for root_id in roots for row in _newest(root_id, now, remaining)),
+                key=_newest_key, reverse=True,
+            )[:remaining]
+            rows += newest
+            if len(newest) < remaining:
+                rows += _by_queue_time(
+                    Lane.BACKGROUND, roots, now, remaining - len(newest),
+                    exclude={row["entry_id"] for row in newest},
                 )
-                if updated != 1:
-                    continue
-                row["attempt_token"] = token
-                claimed.append(ClaimedAsset(
-                    AssetLease(row["entry_id"], token, owner, expires_at), row,
-                ))
+        for row in rows:
+            token = int(row["attempt_token"]) + 1
+            updated = MediaAsset.objects.filter(
+                entry_id=row["entry_id"], attempt_token=row["attempt_token"],
+            ).update(
+                attempt_token=token,
+                lease_owner=owner,
+                lease_expires_at=expires_at,
+                next_attempt_at=expires_at,
+                updated_at=now,
+            )
+            if updated != 1:
+                continue
+            row["attempt_token"] = token
+            claimed.append(ClaimedAsset(
+                AssetLease(row["entry_id"], token, owner, expires_at), row,
+            ))
     return claimed
 
 

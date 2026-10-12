@@ -23,11 +23,13 @@ Nothing a child leaves behind can stop the loop: removal makes directories writa
 whatever still cannot be removed is moved to ``rejected/``. At startup, claims left in ``work/``
 are published as ``failed`` with ``interrupted``, so a job that kills the processor counts as an
 attempt instead of looping. On SIGTERM or SIGINT the loop stops claiming, kills its children
-and re-enqueues their jobs from memory. Polling sleeps at most :data:`POLL_SECONDS`; a signal or
-a child's output wakes it at once. ``AEGIS_MEDIA_PROCESSOR_CONCURRENCY`` (1 to 16, default 2)
-bounds the number of children. Each pass also restores mode 0770 on the scratch directories
-and the running jobs' directories. Without Landlock ABI 3 or newer, or without the seccomp
-filter (x86-64 only), the processor does not start.
+and re-enqueues their jobs from memory. Polling sleeps at most :data:`POLL_SECONDS` (0.1 s: a
+job queued into an idle processor starts within it, for a few cheap system calls per idle
+pass); a signal or a child's output wakes it at once, and the next pass refills a finished
+child's slot from the inbox without waiting. ``AEGIS_MEDIA_PROCESSOR_CONCURRENCY`` (1 to 16,
+default 4) bounds the number of children. Each pass also restores mode 0770 on the scratch
+directories and the running jobs' directories. Without Landlock ABI 3 or newer, or without the
+seccomp filter (x86-64 only), the processor does not start.
 """
 
 from __future__ import annotations
@@ -79,9 +81,9 @@ from .sandbox import Child, ChildLimits, Completed, scrubbed_environment
 from .source import InputRefused, SourceChanged, SourceUnavailable, open_source
 
 CONCURRENCY_ENVIRONMENT: Final = "AEGIS_MEDIA_PROCESSOR_CONCURRENCY"
-DEFAULT_CONCURRENCY: Final = 2
+DEFAULT_CONCURRENCY: Final = 4
 MAX_CONCURRENCY: Final = 16
-POLL_SECONDS: Final = 0.5
+POLL_SECONDS: Final = 0.1
 MAX_INBOX_SCAN: Final = 1024
 CHILD_NICENESS: Final = 10
 DIRECTORY_MODE: Final = 0o770
@@ -109,7 +111,7 @@ class ScratchError(RuntimeError):
 
 
 def concurrency_from_environment(environ: Mapping[str, str]) -> int:
-    """``AEGIS_MEDIA_PROCESSOR_CONCURRENCY``: decimal digits only, 1 to 16; default 2."""
+    """``AEGIS_MEDIA_PROCESSOR_CONCURRENCY``: decimal digits only, 1 to 16; default 4."""
     raw = environ.get(CONCURRENCY_ENVIRONMENT)
     if raw is None:
         return DEFAULT_CONCURRENCY

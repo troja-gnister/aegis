@@ -8,7 +8,6 @@ from pathlib import Path
 
 from aegis_media_processor.child import execute, open_failure
 from aegis_media_processor.protocol import (
-    DEFAULT_PARAMS,
     Job,
     Lane,
     Limits,
@@ -17,6 +16,7 @@ from aegis_media_processor.protocol import (
     Result,
     SourceInput,
     decode_result,
+    default_params,
     encode_result,
     media_kind_for_path,
 )
@@ -78,7 +78,8 @@ def make_job(
     assert kind is not None
     return Job(
         id=job_id or uuid.uuid4().hex, op=op, kind=kind, lane=lane,
-        input=source_input(roots, relative), params=params or DEFAULT_PARAMS[op], limits=limits,
+        input=source_input(roots, relative), params=params or default_params(op, kind),
+        limits=limits,
     )
 
 

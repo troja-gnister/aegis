@@ -5,10 +5,17 @@ One single-threaded loop, with one database connection, drives the whole pipelin
 1. **collects** results from ``done/`` (``dispatch.py`` validates them as untrusted) and
    records them (``pipeline.py``, ``publish.py``); then deletes the job directory;
 2. **expires** jobs the processor never claimed or never answered (the processor is
-   unavailable: not counted against the file) and renews the leases of jobs in flight;
-3. **fills** free processor slots. At most ``AEGIS_MEDIA_PROCESSOR_CONCURRENCY + 1`` jobs are
-   in flight, and background work may use only ``concurrency`` of them, so an interactive job
-   always finds room in the inbox (where the processor claims interactive jobs first).
+   unavailable: not counted against the file) and renews the leases of jobs in flight. A
+   queued job may wait for the longest job in flight at any time since it was dispatched,
+   plus :data:`QUEUE_GRACE_SECONDS`, so one queued behind a long job that has just finished
+   is not taken for a lost processor;
+3. **fills** free processor slots. At most ``2 * AEGIS_MEDIA_PROCESSOR_CONCURRENCY + 1`` jobs
+   are in flight, and background work may use only ``2 * concurrency`` of them: the processor
+   runs ``concurrency`` children and finds the next job already queued when one ends (so its
+   inbox is never empty while work exists), and an interactive job always finds room in the
+   inbox (where the processor claims interactive jobs first). A background claim that found
+   less work than it asked for is not repeated until a result arrives or a second passes, and
+   an empty operation queue is checked again after :data:`INTERACTIVE_POLL_SECONDS`.
    - The **interactive lane** comes first: ``media.preview`` and ``media.transcode`` jobs from
      the operation queue, claimed with ``claim_next_job``; each claim's authorization
      snapshot is re-checked before anything runs (``validate_authorization_snapshot``), then
@@ -17,14 +24,22 @@ One single-threaded loop, with one database connection, drives the whole pipelin
      unsupported or quarantined). A ready derivative completes the job at once; a job for a
      derivative already in flight joins it. Other job kinds of the media role (the foundation
      probe) run through the generic ``_execute_claim``.
-   - The **background lane**: fenced asset leases (``leasing.py``), probe first, then
-     thumbnail or poster.
+   - The **background lane**: fenced asset leases (``leasing.py``, newest files first). A
+     pristine asset gets one backfill job (probe and thumbnail or poster pair together); a
+     probed one its thumbnail or poster job (``pipeline.next_operation``).
 4. runs one bounded **discovery** batch (``discovery.py``; a pass every
    ``AEGIS_MEDIA_DISCOVERY_INTERVAL_SECONDS``, an hour by default, over the active roots it
-   re-reads every ``AEGIS_MEDIA_ROOTS_REFRESH_SECONDS``), **eviction** above the budget
-   (``eviction.py``) and one **recovery** step (``recovery.py``);
+   re-reads every ``AEGIS_MEDIA_ROOTS_REFRESH_SECONDS``; batches at least
+   :data:`DISCOVERY_PACE_SECONDS` apart, counted from the end of the previous one),
+   **eviction** above the budget (``eviction.py``) and one **recovery** step (``recovery.py``);
 5. publishes a **heartbeat** whose metrics are counts and one error code, never a name or a
-   path.
+   path. ``mediaThumbnailsReady`` and ``mediaPostersReady`` give the backfill rate between two
+   heartbeats.
+
+The loop sleeps :data:`BUSY_TICK_SECONDS` (0.05 s) between passes while jobs are in flight,
+so a result is collected and its slot refilled promptly; :data:`MAINTENANCE_TICK_SECONDS`
+(0.25 s) while only discovery or recovery runs, each paced on its own from the end of its
+previous batch; and :data:`IDLE_TICK_SECONDS` (1 s) otherwise.
 
 Interactive jobs end as ``succeeded`` (result ``{"ok": true}``; the client polls the media
 details for the URL); as ``failed`` with ``handler_failed`` and a ``failed`` derivative row
@@ -36,8 +51,9 @@ volume, the source volume, or the processor's own shutdown).
 
 **Circuit breaker.** Processor-wide failures (``pipeline.PROCESSOR_WIDE_CODES``, and a scratch
 volume that is missing, unreadable or replaced) pause all dispatching for ``30 s * 2**(n - 1)``
-(capped at an hour) after the n-th consecutive one; any result the processor produces resets
-it. The heartbeat reports the consecutive count (``mediaProcessorFailures``) and the code.
+(capped at an hour) after the n-th consecutive one; failures that arrive while dispatching is
+paused belong to the same outage and do not count again. Any result the processor produces
+resets it. The heartbeat reports the consecutive count (``mediaProcessorFailures``) and the code.
 
 The worker never opens an original and never decodes media: it builds each job from catalog
 columns (slot and raw relative path) and the processor opens the file. On SIGTERM it stops
@@ -61,7 +77,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from aegis_media_processor import protocol
 from django.conf import settings
-from django.db.models import Q
+from django.db.models import Count, Q
 from django.utils import timezone
 
 from aegis_apps.operations.enums import JobKind, JobState, SafeErrorCode, WorkerRole
@@ -83,6 +99,7 @@ from .dispatch import CollectedResult, ResultRejected, Scratch, ScratchUnavailab
 from .enums import DerivativeState, MediaErrorCode, MediaKind, StageState
 from .eviction import evict
 from .leasing import (
+    MAX_CLAIM_BATCH,
     PARKED_UNTIL,
     AssetLease,
     ClaimedAsset,
@@ -97,6 +114,7 @@ from .pipeline import (
     INTERACTIVE_RETRY_CODES,
     PROCESSOR_WIDE_CODES,
     REQUEST_OPERATIONS,
+    backfill_ready_update,
     build_job,
     derivative_identities,
     next_operation,
@@ -126,8 +144,16 @@ if TYPE_CHECKING:
 
 SCRATCH_DIR: Final = protocol.DEFAULT_SCRATCH_DIR
 DERIVATIVES_DIR: Final = "/srv/aegis/derivatives"
-BUSY_TICK_SECONDS: Final = 0.25
+BUSY_TICK_SECONDS: Final = 0.05
 IDLE_TICK_SECONDS: Final = 1.0
+# Background jobs in flight per processor child: one running, one queued behind it.
+IN_FLIGHT_PER_CHILD: Final = 2
+# After a background claim that found less than it asked for, the next one waits this long
+# unless a result arrives first (a probe's result can make its asset claimable again).
+BACKGROUND_RETRY_SECONDS: Final = 1.0
+# While busy, the operation queue is checked at most this often (results every busy tick),
+# so an interactive request starts within about 0.3 s.
+INTERACTIVE_POLL_SECONDS: Final = 0.25
 QUEUE_GRACE_SECONDS: Final = 120.0
 RESULT_GRACE_SECONDS: Final = 60.0
 ASSET_RENEW_SECONDS: Final = 60.0
@@ -135,7 +161,12 @@ ASSET_RENEW_SECONDS: Final = 60.0
 ROOTS_REFRESH_SECONDS: Final = float(ROOTS_REFRESH[1])
 METRICS_SECONDS: Final = 60.0
 EVICTION_SECONDS: Final = 60.0
-DISCOVERY_PACE_SECONDS: Final = 0.1
+# Between the end of one discovery batch, or recovery step, and the start of the next: their
+# earlier rate, whatever the loop's tick.
+DISCOVERY_PACE_SECONDS: Final = 0.25
+RECOVERY_PACE_SECONDS: Final = 0.25
+# The tick while only discovery or recovery is running (no job in flight).
+MAINTENANCE_TICK_SECONDS: Final = 0.25
 BREAKER_BASE_SECONDS: Final = 30.0
 BREAKER_MAX_SECONDS: Final = 3_600.0
 SHUTDOWN_WAIT_SECONDS: Final = 8.0
@@ -169,6 +200,9 @@ class Dispatch:
     claimed_at: float | None = None
     renew_at: float = 0.0
     lease_lost: bool = False
+    # The longest wall clock of any job in flight since this one was dispatched: a queued job
+    # may wait behind any of them, including one that has finished since.
+    longest_wall: int = 0
 
     @property
     def interactive(self) -> bool:
@@ -194,10 +228,15 @@ def media_metrics(
     )
     interactive = queued.count()
     oldest = queued.order_by("available_at").values_list("available_at", flat=True).first()
-    total = MediaAsset.objects.count()
-    parked = MediaAsset.objects.filter(ASSET_NEEDS_WORK, next_attempt_at__gte=PARKED_UNTIL).count()
-    pending = MediaAsset.objects.filter(ASSET_NEEDS_WORK, next_attempt_at__lt=PARKED_UNTIL).count()
-    current = max(total - parked, 0)
+    counts = MediaAsset.objects.aggregate(
+        total=Count("pk"),
+        parked=Count("pk", filter=ASSET_NEEDS_WORK & Q(next_attempt_at__gte=PARKED_UNTIL)),
+        pending=Count("pk", filter=ASSET_NEEDS_WORK & Q(next_attempt_at__lt=PARKED_UNTIL)),
+        thumbnails=Count("pk", filter=Q(thumbnail_state=StageState.READY)),
+        posters=Count("pk", filter=Q(poster_state=StageState.READY)),
+    )
+    pending = int(counts["pending"])
+    current = max(int(counts["total"]) - int(counts["parked"]), 0)
     complete = max(current - pending, 0)
     metrics: dict[str, int | float | str] = {
         "queueAgeSeconds": 0 if oldest is None else max(0, int((now - oldest).total_seconds())),
@@ -207,6 +246,8 @@ def media_metrics(
         "mediaInFlight": max(in_flight, 0),
         "mediaAssets": current,
         "mediaAssetsComplete": complete,
+        "mediaThumbnailsReady": int(counts["thumbnails"]),
+        "mediaPostersReady": int(counts["posters"]),
         "mediaProcessorFailures": max(processor_failures, 0),
     }
     if last_error is not None and last_error in MediaErrorCode.values:
@@ -265,8 +306,8 @@ class MediaWorker:
         self.sleep = sleep or _default_sleep
         self.monotonic = monotonic
         self.uniform = uniform
-        self.capacity = policy.processor_concurrency + 1
-        self.background_capacity = policy.processor_concurrency
+        self.background_capacity = IN_FLIGHT_PER_CHILD * policy.processor_concurrency
+        self.capacity = self.background_capacity + 1
         self.dispatches: dict[str, Dispatch] = {}
         self.discovery = Discovery(
             batch=policy.discovery_batch,
@@ -283,6 +324,9 @@ class MediaWorker:
         self._paused_until = 0.0
         self._roots_at = 0.0
         self._discovery_at = 0.0
+        self._background_at = 0.0
+        self._interactive_at = 0.0
+        self._recovery_at = 0.0
         self._eviction_at = 0.0
         self._metrics_at = 0.0
         self._heartbeat_at = 0.0
@@ -300,12 +344,18 @@ class MediaWorker:
                 self.tick()
                 if self.stop_requested():
                     break
-                self.sleep(BUSY_TICK_SECONDS if self._busy() else IDLE_TICK_SECONDS)
+                self.sleep(self.tick_seconds())
         finally:
             self.shutdown()
 
     def _busy(self) -> bool:
         return bool(self.dispatches) or self.discovery.active or self.recovery.active
+
+    def tick_seconds(self) -> float:
+        """The sleep after a pass: short while jobs are in flight, longer for maintenance."""
+        if self.dispatches:
+            return BUSY_TICK_SECONDS
+        return MAINTENANCE_TICK_SECONDS if self._busy() else IDLE_TICK_SECONDS
 
     def tick(self) -> None:
         now_m = self.monotonic()
@@ -325,8 +375,15 @@ class MediaWorker:
         self.last_error = code
 
     def _trip(self, code: str) -> None:
-        """A processor-wide failure: pause all dispatching, longer each consecutive time."""
+        """A processor-wide failure: pause all dispatching, longer each consecutive time.
+
+        Failures that arrive while dispatching is already paused are the results of jobs
+        dispatched before the pause, so the same outage: they do not lengthen it. With up to
+        twice the concurrency in flight, one outage would otherwise count many times.
+        """
         self._error(code)
+        if self.monotonic() < self._paused_until:
+            return
         self._breaker_failures += 1
         exponent = min(self._breaker_failures - 1, 30)
         pause = min(BREAKER_MAX_SECONDS, BREAKER_BASE_SECONDS * (2**exponent))
@@ -410,6 +467,8 @@ class MediaWorker:
                 # Late, forged or left by an earlier worker: nobody is waiting for it.
                 self.scratch.discard(name)
                 continue
+            # A slot is free, and a probe may have made its asset claimable again.
+            self._background_at = 0.0
             try:
                 self._conclude(dispatch)
             finally:
@@ -442,12 +501,19 @@ class MediaWorker:
     def _succeeded(self, dispatch: Dispatch, collected: CollectedResult) -> None:
         job = dispatch.job
         now = timezone.now()
+        metadata = collected.result.metadata
         if job.op == "probe":
-            metadata = collected.result.metadata
             if dispatch.asset_lease is not None and metadata is not None:
                 record_probe(dispatch.asset_lease, metadata, mtime_ns=dispatch.mtime_ns, now=now)
             return
-        identities = derivative_identities(dispatch.fingerprint, job.op, job.params)
+        if job.op == "backfill" and metadata is None:
+            # Scratch.collect refuses this already; never mark a probe ready without metadata.
+            self._failed(dispatch, MediaErrorCode.OUTPUT_INVALID)
+            return
+        # A backfill's outputs are its rendition's, under the same keys.
+        identities = derivative_identities(
+            dispatch.fingerprint, protocol.rendition_op(job.op, job.kind), job.params,
+        )
         try:
             staged = stage_outputs(self.store, [
                 (output, identity.key)
@@ -465,7 +531,13 @@ class MediaWorker:
         ]
         if dispatch.asset_lease is not None:
             fence = fenced(dispatch.asset_lease, now=now)
-            update = stage_ready_update(job.op, dispatch.kind, now=now)
+            if job.op == "backfill" and metadata is not None:
+                # The metadata, the timeline key and every stage, with the derivatives.
+                update = backfill_ready_update(
+                    metadata, dispatch.kind, mtime_ns=dispatch.mtime_ns, now=now,
+                )
+            else:
+                update = stage_ready_update(job.op, dispatch.kind, now=now)
         else:
             fence = self._interactive_fence(dispatch)
             update = None
@@ -545,16 +617,25 @@ class MediaWorker:
 
     # -- deadlines and leases -----------------------------------------------------------------
 
+    def _track(self, dispatch: Dispatch) -> None:
+        """Start tracking a job in flight, with the longest job it may queue behind."""
+        dispatch.longest_wall = max(
+            [dispatch.job.limits.wall_seconds,
+             *(d.job.limits.wall_seconds for d in self.dispatches.values())],
+        )
+        self.dispatches[dispatch.job.id] = dispatch
+
     def _expire(self, now_m: float) -> None:
         if not self.dispatches:
             return
         longest = max(d.job.limits.wall_seconds for d in self.dispatches.values())
         for job_id, dispatch in list(self.dispatches.items()):
+            dispatch.longest_wall = max(dispatch.longest_wall, longest)
             if dispatch.claimed_at is None:
                 if not self.scratch.queued(job_id):
                     dispatch.claimed_at = now_m
                     continue
-                if now_m - dispatch.dispatched_at <= longest + QUEUE_GRACE_SECONDS:
+                if now_m - dispatch.dispatched_at <= dispatch.longest_wall + QUEUE_GRACE_SECONDS:
                     continue
                 if not self.scratch.withdraw(job_id):
                     dispatch.claimed_at = now_m
@@ -614,11 +695,14 @@ class MediaWorker:
             self._can_dispatch(now_m)
             and len(self.dispatches) < self.capacity
             and claims < MAX_INTERACTIVE_CLAIMS_PER_TICK
+            and now_m >= self._interactive_at
         ):
             lease = claim_next_job(
                 WorkerRole.MEDIA.value, self.identity.worker_id, timezone.now(),
             )
             if lease is None:
+                # The queue is empty: look again after the interval, not on every busy tick.
+                self._interactive_at = now_m + INTERACTIVE_POLL_SECONDS
                 break
             claims += 1
             if self.stop_requested():
@@ -627,12 +711,21 @@ class MediaWorker:
             self._take_interactive(lease, now_m)
         background = sum(1 for d in self.dispatches.values() if not d.interactive)
         free = min(self.capacity - len(self.dispatches), self.background_capacity - background)
-        if free <= 0 or not self.roots or not self._can_dispatch(now_m):
-            return
-        for claimed in claim_assets(
-            self.owner, limit=free, root_ids=tuple(self.roots), now=timezone.now(),
+        if (
+            free <= 0 or not self.roots or not self._can_dispatch(now_m)
+            or now_m < self._background_at
         ):
-            self._start_stage(claimed, now_m)
+            return
+        limit = min(free, MAX_CLAIM_BATCH)
+        claimed = claim_assets(
+            self.owner, limit=limit, root_ids=tuple(self.roots), now=timezone.now(),
+        )
+        if len(claimed) < limit:
+            # Nothing more is claimable now: ask again after a result or a second, not on
+            # every busy tick.
+            self._background_at = now_m + BACKGROUND_RETRY_SECONDS
+        for item in claimed:
+            self._start_stage(item, now_m)
 
     def _take_interactive(self, lease: LeaseToken, now_m: float) -> None:
         from aegis_apps.operations.management.commands import run_role
@@ -673,7 +766,9 @@ class MediaWorker:
             if run_role._start_or_relinquish(lease):
                 joined.claims.append(claim)
             return
-        bump_to_interactive(request.entry_id, now=timezone.now())
+        if bump_to_interactive(request.entry_id, now=timezone.now()):
+            # Its unfinished stages now come first: claim them without waiting.
+            self._background_at = 0.0
         if not run_role._start_or_relinquish(lease):
             return
         try:
@@ -694,11 +789,11 @@ class MediaWorker:
                 jitter_seconds=self.uniform() * 5,
             )
             return
-        self.dispatches[processor_job.id] = Dispatch(
+        self._track(Dispatch(
             job=processor_job, entry_id=request.entry_id, fingerprint=request.fingerprint,
             kind=target.kind, mtime_ns=target.mtime_ns, attempts=0, dispatched_at=now_m,
             claims=[claim],
-        )
+        ))
 
     def _request_target(self, request: MediaRequestJob) -> RequestTarget | None:
         """The request's file, if it still is the asset the request was made for."""
@@ -796,12 +891,12 @@ class MediaWorker:
                 now=now, uniform=self.uniform,
             )
             return
-        self.dispatches[job.id] = Dispatch(
+        self._track(Dispatch(
             job=job, entry_id=row["entry_id"], fingerprint=row["fingerprint"],
             kind=row["kind"], mtime_ns=row["mtime_ns"], attempts=row["attempts"],
             dispatched_at=now_m, asset_lease=lease, renew_at=now_m + ASSET_RENEW_SECONDS,
             environment_failures=row["environment_failures"],
-        )
+        ))
 
     # -- background maintenance -----------------------------------------------------------
 
@@ -809,8 +904,11 @@ class MediaWorker:
         if self.discovery.due():
             self.discovery.start(tuple(self.roots))
         if self.discovery.active and now_m >= self._discovery_at:
-            self.discovery.step(now=timezone.now())
-            self._discovery_at = now_m + DISCOVERY_PACE_SECONDS
+            counts = self.discovery.step(now=timezone.now())
+            # From the end of the batch: the pace does not follow the loop's tick.
+            self._discovery_at = self.monotonic() + DISCOVERY_PACE_SECONDS
+            if counts.created or counts.reset:
+                self._background_at = 0.0
 
     def _maintain(self, now_m: float) -> None:
         if not self.store_ready:
@@ -822,8 +920,10 @@ class MediaWorker:
                 LOGGER.info("media eviction: %d derivatives removed", report.deleted)
         if self.recovery.due():
             self.recovery.start()
-        if self.recovery.active:
+        if self.recovery.active and now_m >= self._recovery_at:
             self.recovery.step(now=timezone.now())
+            # From the end of the step, like discovery: not once per busy tick.
+            self._recovery_at = self.monotonic() + RECOVERY_PACE_SECONDS
 
     def _heartbeat(self, now_m: float) -> None:
         if now_m < self._heartbeat_at:

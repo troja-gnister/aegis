@@ -15,7 +15,9 @@ _MAX_RAW_DIGITS: Final = 9
 # (environment name, default, minimum, maximum)
 Limit = tuple[str, int, int, int]
 CACHE_BUDGET_GB: Final[Limit] = ("AEGIS_DERIVATIVES_CACHE_BUDGET_GB", 20, 1, 10_000)
-PROCESSOR_CONCURRENCY: Final[Limit] = ("AEGIS_MEDIA_PROCESSOR_CONCURRENCY", 2, 1, 16)
+# Read by the worker and, with the same default and bounds, by the processor
+# (aegis_media_processor.loop.concurrency_from_environment).
+PROCESSOR_CONCURRENCY: Final[Limit] = ("AEGIS_MEDIA_PROCESSOR_CONCURRENCY", 4, 1, 16)
 DISCOVERY_BATCH: Final[Limit] = ("AEGIS_MEDIA_DISCOVERY_BATCH", 500, 50, 5_000)
 # A discovery pass reads every catalog row of every active root, so passes are an hour apart by
 # default; the worker re-reads the active roots every minute. Test stacks shorten both (the e2e
@@ -41,7 +43,8 @@ STAGE_LIMITS: Final[Mapping[str, tuple[Limit, Limit]]] = MappingProxyType({
         ("AEGIS_MEDIA_TRANSCODE_MEMORY_MB", 3_072, 256, 16_384),
     ),
 })
-# A poster is a frame extraction plus a resize, so it runs under the thumbnail limits.
+# A poster is a frame extraction plus a resize, so it runs under the thumbnail limits. A
+# backfill job (probe plus thumbnail or poster) combines two stages: pipeline.job_limits.
 _STAGE_FOR_OPERATION: Final[Mapping[str, str]] = MappingProxyType({
     "probe": "probe",
     "thumbnail": "thumbnail",

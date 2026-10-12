@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
+from datetime import datetime
 from typing import ClassVar, Final
 
 from django.db import models
@@ -58,11 +59,21 @@ _TERMINAL_STATES: Final = (StageState.UNSUPPORTED, StageState.QUARANTINED)
 
 # An asset needs worker attention while any of its stages is pending or failed (and
 # not yet quarantined). Leasing queries must use this exact predicate so the planner
-# can use the partial index media_asset_work_idx.
+# can use the partial indexes media_asset_work_idx and media_asset_backfill_idx.
 ASSET_NEEDS_WORK: Final = (
     models.Q(probe_state__in=_WORK_STATES)
     | models.Q(thumbnail_state__in=_WORK_STATES)
     | models.Q(poster_state__in=_WORK_STATES)
+)
+# A parked asset (its entry is gone or no longer a present media file) waits here, far beyond
+# any real retry time, so the claim range never reaches it. See discovery.py.
+PARKED_UNTIL: Final = datetime.fromisoformat("9999-01-01T00:00:00+00:00")
+# The background assets a newest-first claim looks at (leasing.py): those that need work and
+# are not parked. Queries must repeat this exact predicate for media_asset_backfill_idx.
+BACKFILL_CANDIDATE: Final = (
+    ASSET_NEEDS_WORK
+    & models.Q(lane=Lane.BACKGROUND)
+    & models.Q(next_attempt_at__lt=PARKED_UNTIL)
 )
 
 
@@ -171,6 +182,13 @@ class MediaAsset(models.Model):
                 fields=("lane", "next_attempt_at", "entry"),
                 condition=ASSET_NEEDS_WORK,
                 name="media_asset_work_idx",
+            ),
+            # Newest files first: per root, the background assets that need work, by
+            # modification time. Parked assets stay out, so they never lengthen the scan.
+            models.Index(
+                fields=("root", "-mtime_ns", "-entry"),
+                condition=BACKFILL_CANDIDATE,
+                name="media_asset_backfill_idx",
             ),
         ]
         constraints: ClassVar[list[models.BaseConstraint]] = [

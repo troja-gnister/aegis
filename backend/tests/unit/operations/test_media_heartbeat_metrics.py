@@ -8,7 +8,8 @@ from aegis_apps.operations.serializers import validate_heartbeat_metrics
 
 MEDIA_COUNTERS = (
     "mediaInteractiveQueued", "mediaBackgroundPending", "mediaInFlight", "mediaAssets",
-    "mediaAssetsComplete", "mediaProcessorFailures",
+    "mediaAssetsComplete", "mediaThumbnailsReady", "mediaPostersReady",
+    "mediaProcessorFailures",
 )
 
 
@@ -16,8 +17,8 @@ def test_a_full_media_heartbeat_is_accepted() -> None:
     metrics = {
         "queueAgeSeconds": 12, "scanProgress": 0.5, "mediaInteractiveQueued": 1,
         "mediaBackgroundPending": 10, "mediaInFlight": 3, "mediaAssets": 20,
-        "mediaAssetsComplete": 10, "mediaProcessorFailures": 2,
-        "mediaLastErrorCode": "decode_failed",
+        "mediaAssetsComplete": 10, "mediaThumbnailsReady": 9, "mediaPostersReady": 3,
+        "mediaProcessorFailures": 2, "mediaLastErrorCode": "decode_failed",
     }
     assert validate_heartbeat_metrics(metrics) == metrics
 

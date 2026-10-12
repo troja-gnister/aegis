@@ -523,7 +523,7 @@ if selected_engine() == "podman":
             assert (networks == ["none"]) is (name == "media-processor"), (name, networks)
             limits = {flag: value for flag, value in pairs if flag in ("--pids-limit", "--memory")}
             assert limits == (
-                {"--pids-limit": "256", "--memory": "7g"} if name == "media-processor" else {}
+                {"--pids-limit": "256", "--memory": "13g"} if name == "media-processor" else {}
             ), name
             assert not any("ip=" in network for network in networks if network != backend), name
             binds = [value for flag, value in pairwise(arguments)

@@ -64,7 +64,7 @@ def synthetic_mp4(*, padding: int = 256) -> bytes:
 
 def default_outputs(job: protocol.Job) -> list[tuple[str, bytes, int, int]]:
     outputs: list[tuple[str, bytes, int, int]] = []
-    for spec in protocol.OP_OUTPUTS[job.op]:
+    for spec in protocol.job_outputs(job.op, job.kind):
         if spec.format == "mp4":
             outputs.append((spec.name, synthetic_mp4(), 1920, 1080))
         elif spec.name == "thumbnail":
@@ -86,12 +86,12 @@ def publish_result(
 ) -> Path:
     directory = done / job.id
     directory.mkdir(mode=0o770)
-    if status == "ok" and job.op == "probe" and metadata is None:
+    if status == "ok" and job.op in protocol.METADATA_OPS and metadata is None:
         metadata = PHOTO_METADATA if job.kind == "photo" else VIDEO_METADATA
     files = (default_outputs(job) if outputs is None else list(outputs)) if status == "ok" else []
     declared: list[protocol.Output] = []
     for name, data, width, height in files:
-        spec = next(s for s in protocol.OP_OUTPUTS[job.op] if s.name == name)
+        spec = next(s for s in protocol.job_outputs(job.op, job.kind) if s.name == name)
         (directory / spec.filename).write_bytes(data)
         declared.append(protocol.Output(name, spec.format, len(data), width, height))
     if raw is None:

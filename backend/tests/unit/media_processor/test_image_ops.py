@@ -10,12 +10,14 @@ import pillow_heif
 import pytest
 from aegis_media_processor.child import execute
 from aegis_media_processor.ops import OperationError, image
+from aegis_media_processor.ops import probe as probe_ops
 from aegis_media_processor.ops.probe import camera_text, exif_captured_at
 from aegis_media_processor.protocol import (
     PREVIEW_PARAMS,
     THUMBNAIL_PARAMS,
     Metadata,
     OutputSpec,
+    Result,
     encode_result,
     output_magic_matches,
 )
@@ -414,3 +416,152 @@ def test_avif_decodes_with_bounded_threads(tmp_path: Path, roots: Path) -> None:
     assert result.status == "ok", result
     assert AvifImagePlugin.DEFAULT_MAX_THREADS == 2
     assert open_output(directory, "thumbnail.webp").size == (400, 300)
+
+
+# -- backfill: the probe and the thumbnail from one decode ---------------------------------------
+
+
+def backfill_and_separately(
+    tmp_path: Path, roots: Path, relative: bytes, monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Result, Path, Metadata, Result, Path, int]:
+    """A backfill job, then the probe and thumbnail jobs it replaces; and its Image.open count."""
+    opened = []
+    original = Image.open
+
+    def counting_open(*arguments: object, **options: object) -> object:
+        opened.append(1)
+        return original(*arguments, **options)  # type: ignore[arg-type]
+
+    with monkeypatch.context() as patched:
+        patched.setattr(Image, "open", counting_open)
+        # A job id without digits, so no coordinate spelling can appear in it by chance.
+        backfill = make_job(roots, relative, "backfill", job_id="b" * 32)
+        result, directory = run_job(tmp_path, roots, backfill)
+    metadata, _ = probe(tmp_path, roots, relative)
+    thumbnail, thumbnail_directory = run_job(
+        tmp_path, roots, make_job(roots, relative, "thumbnail"),
+    )
+    return result, directory, metadata, thumbnail, thumbnail_directory, len(opened)
+
+
+def test_a_photo_backfill_probes_and_renders_its_thumbnail_from_one_open(
+    tmp_path: Path, roots: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Large enough that the JPEG decode is drafted to a reduced scale, rotated by EXIF 6.
+    save_image(roots, b"album/IMG_0003.JPG", two_colour_image((2400, 1600)), "JPEG",
+               exif=photo_exif(orientation=6, gps=True), quality=95)
+
+    result, directory, metadata, thumbnail, thumbnail_directory, opened = (
+        backfill_and_separately(tmp_path, roots, b"album/IMG_0003.JPG", monkeypatch)
+    )
+
+    assert result.status == "ok", result
+    assert opened == 1
+    # The metadata is the probe's, read before the reduced-scale decode: full displayed size.
+    assert result.metadata == metadata
+    assert (metadata.width, metadata.height, metadata.orientation) == (1600, 2400, 6)
+    assert metadata.has_location is True
+    # The thumbnail is the thumbnail job's, byte for byte, upright and without metadata.
+    assert result.outputs == thumbnail.outputs
+    assert [(o.name, o.width, o.height) for o in result.outputs] == [("thumbnail", 267, 400)]
+    assert os.listdir(directory) == ["thumbnail.webp"]
+    data = (directory / "thumbnail.webp").read_bytes()
+    assert data == (thumbnail_directory / "thumbnail.webp").read_bytes()
+    rendered = open_output(directory, "thumbnail.webp")
+    assert not {"exif", "xmp", "icc_profile"} & set(rendered.info)
+    upright = rendered.convert("RGB")
+    assert dominant(upright.getpixel((133, 50))) == "red"  # type: ignore[arg-type]
+    assert dominant(upright.getpixel((133, 350))) == "blue"  # type: ignore[arg-type]
+    encoded = encode_result(result, make_job(roots, b"album/IMG_0003.JPG", "backfill",
+                                             job_id="b" * 32))
+    lowered = encoded.lower()
+    assert b"gps" not in lowered and b"latitude" not in lowered and b"longitude" not in lowered
+    assert not any(spelling in encoded for spelling in COORDINATE_SPELLINGS)
+
+
+@pytest.mark.parametrize("relative,image_format,options", [
+    # Pillow reads a whole PNG to find EXIF stored after its pixels: the render reuses that.
+    (b"plain.png", "PNG", {}),
+    (b"alpha.png", "PNG", {}),
+    (b"photo.webp", "WEBP", {"quality": 80}),
+    (b"photo.avif", "AVIF", {"quality": 50}),
+])
+def test_backfill_matches_the_separate_jobs_for_every_format(
+    tmp_path: Path, roots: Path, monkeypatch: pytest.MonkeyPatch, relative: bytes,
+    image_format: str, options: dict[str, object],
+) -> None:
+    mode = "RGBA" if relative.startswith(b"alpha") else "RGB"
+    save_image(roots, relative, two_colour_image((900, 600), mode), image_format,
+               exif=photo_exif(orientation=8), **options)
+
+    result, directory, metadata, thumbnail, thumbnail_directory, opened = (
+        backfill_and_separately(tmp_path, roots, relative, monkeypatch)
+    )
+
+    assert result.status == "ok", result
+    assert opened == 1
+    assert result.metadata == metadata
+    assert (metadata.width, metadata.height) == (600, 900)
+    assert result.outputs == thumbnail.outputs
+    assert (directory / "thumbnail.webp").read_bytes() == (
+        thumbnail_directory / "thumbnail.webp"
+    ).read_bytes()
+
+
+def test_a_heic_backfill_matches_the_separate_jobs(
+    tmp_path: Path, roots: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pillow_heif.register_heif_opener()
+    save_image(roots, b"phone/IMG_0004.HEIC", two_colour_image((640, 480)), "HEIF",
+               quality=50, exif=photo_exif(gps=True))
+
+    result, directory, metadata, thumbnail, thumbnail_directory, _ = backfill_and_separately(
+        tmp_path, roots, b"phone/IMG_0004.HEIC", monkeypatch,
+    )
+
+    assert result.status == "ok", result
+    assert result.metadata == metadata and metadata.has_location is True
+    assert result.outputs == thumbnail.outputs
+    assert [(o.width, o.height) for o in result.outputs] == [(400, 300)]
+    assert (directory / "thumbnail.webp").read_bytes() == (
+        thumbnail_directory / "thumbnail.webp"
+    ).read_bytes()
+
+
+def test_a_backfill_whose_pixels_fail_reports_the_failure_and_no_metadata(
+    tmp_path: Path, roots: Path,
+) -> None:
+    # The header (and so a probe) is fine; the image data is cut in half.
+    noise = Image.frombytes("RGB", (256, 256), os.urandom(256 * 256 * 3))
+    path = save_image(roots, b"truncated.jpg", noise, "JPEG", quality=95)
+    data = Path(os.fsdecode(path)).read_bytes()
+    Path(os.fsdecode(path)).write_bytes(data[: len(data) // 2])
+    write_source(roots, b"corrupt.jpg", b"this is not an image " * 100)
+
+    probed, _ = run_job(tmp_path, roots, make_job(roots, b"truncated.jpg", "probe"))
+    truncated, directory = run_job(tmp_path, roots, make_job(roots, b"truncated.jpg", "backfill"))
+    corrupt, _ = run_job(tmp_path, roots, make_job(roots, b"corrupt.jpg", "backfill"))
+
+    # The worker then runs the probe and the thumbnail as separate jobs (pipeline.py).
+    assert probed.status == "ok"
+    assert (truncated.status, truncated.safe_error_code) == ("failed", "decode_failed")
+    assert (truncated.metadata, truncated.outputs) == (None, ())
+    assert "thumbnail.webp" not in os.listdir(directory)
+    assert (corrupt.status, corrupt.safe_error_code) == ("failed", "decode_failed")
+
+
+def test_a_backfill_above_the_pixel_limit_is_unsupported(tmp_path: Path, roots: Path) -> None:
+    save_image(roots, b"big.png", Image.new("RGB", (100, 100)), "PNG")
+    job = make_job(roots, b"big.png", "backfill")
+    directory = job_directory(tmp_path, job)
+    descriptor = open_source(job.input, str(roots))
+    try:
+        image.configure(max_pixels=4_000)
+        with pytest.raises(OperationError) as refused:
+            probe_ops.backfill_photo(descriptor, str(directory), OutputSpec("thumbnail", "webp"),
+                                     THUMBNAIL_PARAMS)
+        assert (refused.value.status, refused.value.code) == ("unsupported", "too_large")
+    finally:
+        os.close(descriptor)
+        image.configure()
+    assert os.listdir(directory) == []

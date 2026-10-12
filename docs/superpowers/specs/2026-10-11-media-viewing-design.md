@@ -93,7 +93,7 @@ The background pipeline runs **probe**, then **thumbnail** (photos), or **poster
 - **interactive:** preview and transcode requests;
 - **background:** backfill.
 
-The interactive lane always goes first.
+The interactive lane always goes first. A new asset's background work is one `backfill` processor job that probes and renders its thumbnail (or poster pair) from one opened file; the worker records the metadata, the timeline key and the derivatives in one transaction. Background claims take the newest files first (by modification time, per root, through a partial index), so the top of the Photos timeline fills early. The worker keeps up to twice the processor concurrency in flight, plus one slot for interactive work.
 
 Interactive requests (a viewer preview, a video transcode) are actor-bound `Job`s through the existing operation queue. Their authorization snapshot is re-checked before execution. The database grants for `aegis_media` grow explicitly:
 - SELECT on the catalog entry columns it needs, and on `roots_root.slot_id`;
@@ -112,7 +112,7 @@ Web gets SELECT on the media tables and INSERT through the existing operation se
 | Video poster | A frame at 1 s (or the first frame), produced at thumbnail and preview sizes |
 | Transcode | H.264 High (≤1080p), AAC, MP4 with faststart. Built on demand, only when the browser cannot play the original. |
 | Budget | Thumbnails and posters are kept. Previews and transcodes are evicted least-recently-used above `AEGIS_DERIVATIVES_CACHE_BUDGET_GB` (default 20). |
-| Concurrency | Processor children, `AEGIS_MEDIA_PROCESSOR_CONCURRENCY` (default 2), at nice 10 |
+| Concurrency | Processor children, `AEGIS_MEDIA_PROCESSOR_CONCURRENCY` (default 4), at nice 10, within 4 CPUs and 13 GiB (4 × the 3 GiB transcode budget + 1 GiB) |
 
 Pillow's decompression-bomb limit is enforced, and ffmpeg runs with `-nostdin -protocol_whitelist file,pipe`.
 

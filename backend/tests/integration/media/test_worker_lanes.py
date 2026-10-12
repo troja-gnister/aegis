@@ -16,7 +16,7 @@ import pytest
 from aegis_apps.catalog.models import CatalogEntry
 from aegis_apps.media import worker as media_worker
 from aegis_apps.media.discovery import discover_batch
-from aegis_apps.media.enums import DerivativeState, MediaErrorCode, StageState
+from aegis_apps.media.enums import DerivativeState, MediaErrorCode, SortSource, StageState
 from aegis_apps.media.models import MediaAsset, MediaDerivative
 from aegis_apps.media.pipeline import derivative_identities
 from aegis_apps.media.worker import MediaWorker
@@ -80,7 +80,7 @@ def _inbox(worker: MediaWorker) -> list[protocol.Job]:
 # -- the background lane ------------------------------------------------------------------
 
 
-def test_the_background_pipeline_probes_then_builds_thumbnails_and_posters(
+def test_the_background_pipeline_backfills_each_asset_in_one_job(
     library: Library, tmp_path: Path,
 ) -> None:
     photo = library.photo()
@@ -95,19 +95,32 @@ def test_the_background_pipeline_probes_then_builds_thumbnails_and_posters(
     photo_asset = MediaAsset.objects.get(pk=photo.pk)
     video_asset = MediaAsset.objects.get(pk=video.pk)
     assert (photo_asset.probe_state, photo_asset.thumbnail_state) == (StageState.READY,) * 2
-    assert (video_asset.thumbnail_state, video_asset.poster_state) == (StageState.READY,) * 2
+    assert (video_asset.probe_state, video_asset.thumbnail_state, video_asset.poster_state) == (
+        StageState.READY,) * 3
+    # The metadata and the timeline key came with the derivatives, from the one job.
     assert photo_asset.camera_make == "Synthetic"
-    ops = [job.op for job in processor.served]
-    assert ops.count("probe") == 2
-    assert max(ops.index("probe"), len(ops) - 1 - ops[::-1].index("probe")) < min(
-        ops.index("thumbnail"), ops.index("poster"),
-    )
+    assert (photo_asset.sort_source, video_asset.sort_source) == (SortSource.CAPTURED,) * 2
+    assert photo_asset.sort_at == photo_asset.captured_at
+    assert video_asset.duration_ms == 12_345
+    assert (photo_asset.attempts, photo_asset.lease_owner) == (0, None)
+    assert sorted((job.op, job.kind) for job in processor.served) == [
+        ("backfill", "photo"), ("backfill", "video"),
+    ]
     assert {job.lane for job in processor.served} == {"background"}
     kinds = set(MediaDerivative.objects.values_list("asset_id", "kind", "state"))
     assert kinds == {
         (photo.pk, "thumbnail", "ready"), (video.pk, "thumbnail", "ready"),
         (video.pk, "poster", "ready"),
     }
+    # The keys are the thumbnail and poster jobs' keys.
+    expected = {
+        (photo.pk, item.kind): item.key for item in derivative_identities(
+            photo_asset.fingerprint, "thumbnail", protocol.THUMBNAIL_PARAMS)
+    } | {
+        (video.pk, item.kind): item.key for item in derivative_identities(
+            video_asset.fingerprint, "poster", protocol.POSTER_PARAMS)
+    }
+    assert {(row.asset_id, row.kind): row.key for row in MediaDerivative.objects.all()} == expected
     for row in MediaDerivative.objects.all():
         path = Path(worker.store.root, row.key[0:2], row.key[2:4], f"{row.key}.webp")
         assert stat.S_IMODE(path.stat().st_mode) == 0o640
@@ -115,6 +128,80 @@ def test_the_background_pipeline_probes_then_builds_thumbnails_and_posters(
     # Every handled result directory is gone.
     assert os.listdir(worker.scratch.done) == []
     assert worker.dispatches == {}
+
+
+def test_assets_already_probed_get_their_thumbnail_or_poster_job(
+    library: Library, tmp_path: Path,
+) -> None:
+    photo = library.photo()
+    video = library.video()
+    _discover(library)
+    # Probed by an earlier release: the probes are kept, only the derivatives are built.
+    MediaAsset.objects.filter(pk__in=(photo.pk, video.pk)).update(
+        probe_state=StageState.READY, camera_make="Earlier",
+    )
+    worker, processor, clock = make_worker(tmp_path)
+
+    drive(worker, processor, clock,
+          lambda: MediaAsset.objects.filter(thumbnail_state=StageState.READY).count() == 2)
+
+    assert sorted(job.op for job in processor.served) == ["poster", "thumbnail"]
+    assert set(MediaAsset.objects.values_list("camera_make", flat=True)) == {"Earlier"}
+    assert MediaAsset.objects.get(pk=video.pk).poster_state == StageState.READY
+
+
+def test_a_failed_backfill_falls_back_to_the_separate_stages(
+    library: Library, tmp_path: Path,
+) -> None:
+    entry = library.photo()
+    _discover(library)
+    worker, processor, clock = make_worker(tmp_path)
+    # The header is readable, the pixels are not: the probe works, the thumbnail never does.
+    processor.behaviour = lambda job: (
+        {} if job.op == "probe" else {"status": "failed", "code": "decode_failed"}
+    )
+
+    worker.tick()
+    processor.serve()
+    worker.tick()
+    asset = MediaAsset.objects.get(pk=entry.pk)
+    assert (asset.probe_state, asset.thumbnail_state, asset.attempts) == (
+        StageState.FAILED, StageState.PENDING, 1,
+    )
+    for _ in range(10):
+        if MediaAsset.objects.get(pk=entry.pk).thumbnail_state == StageState.QUARANTINED:
+            break
+        # Skip the retry backoff; a leased asset keeps its lease.
+        MediaAsset.objects.filter(pk=entry.pk, lease_owner__isnull=True).update(
+            next_attempt_at=timezone.now(),
+        )
+        clock.advance(media_worker.BACKGROUND_RETRY_SECONDS)
+        worker.tick()
+        processor.serve()
+        worker.tick()
+
+    asset = MediaAsset.objects.get(pk=entry.pk)
+    assert [job.op for job in processor.served] == [
+        "backfill", "probe", "thumbnail", "thumbnail", "thumbnail",
+    ]
+    # The metadata is kept and only the stage that fails is quarantined.
+    assert (asset.probe_state, asset.thumbnail_state, asset.attempts) == (
+        StageState.READY, StageState.QUARANTINED, 3,
+    )
+    assert asset.camera_make == "Synthetic"
+    assert not MediaDerivative.objects.exists()
+
+
+def test_backfill_fills_the_newest_files_first(library: Library, tmp_path: Path) -> None:
+    entries = [library.photo(mtime_ns=MTIME_NS + index * 10**9) for index in range(12)]
+    _discover(library)
+    worker, _, _ = make_worker(tmp_path, environ={"AEGIS_MEDIA_PROCESSOR_CONCURRENCY": "2"})
+
+    worker.tick()
+
+    queued = {job.input.inode for job in _inbox(worker)}
+    newest = sorted(entries, key=lambda entry: entry.mtime_ns or 0)[-4:]
+    assert queued == {entry.inode for entry in newest}
 
 
 def test_a_short_discovery_interval_finds_files_indexed_after_a_pass(
@@ -156,7 +243,7 @@ def test_jobs_name_the_file_by_slot_and_raw_relative_path(
     worker, _, _ = make_worker(tmp_path)
     worker.tick()
     (job,) = _inbox(worker)
-    assert job.op == "probe"
+    assert job.op == "backfill"
     assert job.input.slot == library.root.slot_id
     assert job.input.path == b"album/" + raw
     entry.refresh_from_db()
@@ -166,19 +253,56 @@ def test_jobs_name_the_file_by_slot_and_raw_relative_path(
     )
 
 
-def test_at_most_concurrency_plus_one_jobs_are_in_flight(
-    library: Library, tmp_path: Path,
+@pytest.mark.parametrize(("environ", "background"), [
+    ({}, 8), ({"AEGIS_MEDIA_PROCESSOR_CONCURRENCY": "1"}, 2),
+])
+def test_at_most_twice_the_concurrency_plus_one_jobs_are_in_flight(
+    library: Library, tmp_path: Path, environ: dict[str, str], background: int,
 ) -> None:
-    for _ in range(8):
+    for _ in range(12):
         library.photo()
     _discover(library)
-    worker, _, clock = make_worker(tmp_path)
+    worker, _, clock = make_worker(tmp_path, environ=environ)
     for _ in range(3):
         worker.tick()
         clock.advance(1.0)
-    # Background work uses only `concurrency` slots; the last one waits for interactive jobs.
-    assert len(_inbox(worker)) == 2
-    assert len(worker.dispatches) == 2
+    # One job running and one queued behind it per processor child (four by default); the
+    # last slot waits for interactive jobs.
+    assert worker.capacity == background + 1
+    assert len(_inbox(worker)) == background
+    assert len(worker.dispatches) == background
+
+
+def test_a_short_background_claim_is_not_repeated_on_every_busy_tick(
+    library: Library, tmp_path: Path,
+) -> None:
+    library.photo()
+    _discover(library)
+    worker, processor, clock = make_worker(tmp_path)
+    from aegis_apps.media.leasing import claim_assets
+
+    calls: list[int] = []
+
+    def counted(*args: Any, **kwargs: Any) -> Any:
+        calls.append(kwargs["limit"])
+        return claim_assets(*args, **kwargs)
+
+    with patch("aegis_apps.media.worker.claim_assets", side_effect=counted):
+        worker.tick()
+        assert len(_inbox(worker)) == 1 and calls == [8]
+        for _ in range(5):
+            clock.advance(media_worker.BUSY_TICK_SECONDS)
+            worker.tick()
+        assert calls == [8]
+        # A result frees a slot (and may make its asset claimable again): ask at once.
+        library.photo()
+        _discover(library)
+        processor.serve()
+        worker.tick()
+        assert len(calls) == 2
+        clock.advance(media_worker.BACKGROUND_RETRY_SECONDS)
+        worker.tick()
+        assert len(calls) == 3
 
 
 def test_a_rejected_result_counts_as_a_failure(library: Library, tmp_path: Path) -> None:
@@ -339,6 +463,145 @@ def test_an_unavailable_scratch_dispatches_nothing(library: Library, tmp_path: P
 # -- the interactive lane -----------------------------------------------------------------
 
 
+def test_the_operation_queue_is_checked_at_most_every_quarter_second_while_busy(
+    library: Library, tmp_path: Path,
+) -> None:
+    library.photo()
+    entry = library.photo()
+    _discover(library)
+    _ready(entry)
+    worker, _, clock = make_worker(tmp_path)
+    from aegis_apps.operations.leases import claim_next_job as claim_job
+
+    checks: list[float] = []
+
+    def counted(*args: Any, **kwargs: Any) -> Any:
+        checks.append(clock.now)
+        return claim_job(*args, **kwargs)
+
+    assert media_worker.INTERACTIVE_POLL_SECONDS == 0.25
+    assert media_worker.BUSY_TICK_SECONDS == 0.05
+    with patch("aegis_apps.media.worker.claim_next_job", side_effect=counted):
+        worker.tick()
+        assert worker.dispatches and checks == [clock.now]
+        for _ in range(4):
+            clock.advance(media_worker.BUSY_TICK_SECONDS)
+            worker.tick()
+        assert len(checks) == 1
+        # A request queued now is claimed on the first tick at the interval; the queue is
+        # drained in that tick, then left alone for another interval.
+        operation = library.request(library.requester(), entry)
+        clock.now = checks[0] + media_worker.INTERACTIVE_POLL_SECONDS
+        worker.tick()
+        assert checks[1:] == [clock.now, clock.now]
+        assert _job(operation.pk).state == JobState.RUNNING
+        clock.advance(media_worker.BUSY_TICK_SECONDS)
+        worker.tick()
+        assert len(checks) == 3
+
+
+def test_recovery_steps_are_paced_apart_from_the_busy_tick(
+    library: Library, tmp_path: Path,
+) -> None:
+    library.photo()
+    _discover(library)
+    worker, _, clock = make_worker(tmp_path)
+    steps: list[float] = []
+    worker.recovery.start()
+    with patch.object(type(worker.recovery), "step",
+                      side_effect=lambda **_: steps.append(clock.now)):
+        worker.tick()
+        assert worker.dispatches and worker.tick_seconds() == media_worker.BUSY_TICK_SECONDS
+        for _ in range(9):
+            clock.advance(media_worker.BUSY_TICK_SECONDS)
+            worker.tick()
+    # Ten busy ticks in 0.45 s, but recovery steps at most every 0.25 s (its earlier rate).
+    assert media_worker.RECOVERY_PACE_SECONDS == 0.25
+    assert len(steps) == 2
+    assert steps[1] - steps[0] >= media_worker.RECOVERY_PACE_SECONDS
+    # With nothing in flight, maintenance alone ticks at its own pace; idle, once a second.
+    worker.dispatches.clear()
+    assert worker.tick_seconds() == media_worker.MAINTENANCE_TICK_SECONDS == 0.25
+    worker.recovery.phase = "idle"
+    worker.discovery.roots = []
+    assert worker.tick_seconds() == media_worker.IDLE_TICK_SECONDS
+
+
+def test_a_job_queued_behind_a_long_job_that_just_finished_is_not_withdrawn(
+    library: Library, tmp_path: Path,
+) -> None:
+    long_video = library.video()
+    library.photo()
+    _discover(library)
+    _ready(long_video, video=True)
+    # An hour of video: the transcode's wall clock is the 7200 s cap.
+    MediaAsset.objects.filter(pk=long_video.pk).update(duration_ms=3_600_000)
+    operation = library.request(library.requester(), long_video, "transcode")
+    worker, _, clock = make_worker(tmp_path, environ={"AEGIS_MEDIA_PROCESSOR_CONCURRENCY": "1"})
+    worker.tick()
+    queued = {job.op: job for job in _inbox(worker)}
+    assert set(queued) == {"transcode", "backfill"}
+    assert queued["transcode"].limits.wall_seconds == 7200
+    # The single child runs the transcode; the backfill waits behind it in the inbox.
+    inbox = Path(worker.scratch.inbox)
+    (inbox / protocol.job_filename(queued["transcode"].id)).unlink()
+    worker.tick()
+    clock.advance(600)
+    worker.tick()
+    # The transcode finishes; the backfill has waited far longer than its own 90 s + 120 s.
+    publish_result(Path(worker.scratch.done), queued["transcode"])
+    worker.tick()
+    assert _job(operation.pk).state == JobState.SUCCEEDED
+    assert queued["backfill"].id in worker.dispatches
+    assert [job.op for job in _inbox(worker)] == ["backfill"]
+    assert (worker.processor_failures, worker._paused_until) == (0, 0.0)
+    # It still expires once even the longest job it waited behind is overdue.
+    clock.advance(7200 + media_worker.QUEUE_GRACE_SECONDS)
+    worker.tick()
+    assert _inbox(worker) == [] and worker.processor_failures == 1
+
+
+def test_a_backfill_result_without_metadata_is_never_recorded_as_probed(
+    library: Library, tmp_path: Path,
+) -> None:
+    from aegis_apps.media.dispatch import CollectedResult
+
+    entry = library.photo()
+    _discover(library)
+    worker, _, _ = make_worker(tmp_path)
+    worker.tick()
+    (job,) = _inbox(worker)
+    (Path(worker.scratch.done) / job.id).mkdir()
+    forged = CollectedResult(protocol.Result(job.id, "ok", None, None, ()), ())
+    with patch.object(worker.scratch, "collect", return_value=forged):
+        worker.tick()
+    asset = MediaAsset.objects.get(pk=entry.pk)
+    assert (asset.probe_state, asset.safe_error_code, asset.width) == (
+        StageState.FAILED, MediaErrorCode.OUTPUT_INVALID, None,
+    )
+    assert not MediaDerivative.objects.exists()
+
+
+def test_background_claims_never_exceed_the_claim_batch(
+    library: Library, tmp_path: Path,
+) -> None:
+    from aegis_apps.media.leasing import MAX_CLAIM_BATCH, claim_assets
+
+    library.photo()
+    _discover(library)
+    worker, _, _ = make_worker(tmp_path, environ={"AEGIS_MEDIA_PROCESSOR_CONCURRENCY": "16"})
+    worker.background_capacity = worker.capacity = MAX_CLAIM_BATCH + 8
+    limits: list[int] = []
+
+    def counted(*args: Any, **kwargs: Any) -> Any:
+        limits.append(kwargs["limit"])
+        return claim_assets(*args, **kwargs)
+
+    with patch("aegis_apps.media.worker.claim_assets", side_effect=counted):
+        worker.tick()
+    assert limits == [MAX_CLAIM_BATCH]
+
+
 def test_interactive_jobs_are_claimed_before_background_work(
     library: Library, tmp_path: Path,
 ) -> None:
@@ -371,7 +634,8 @@ def test_interactive_jobs_are_claimed_before_background_work(
     assert calls.index("assets") > max(i for i, call in enumerate(calls) if call == "job")
     queued = _inbox(worker)
     lanes = sorted(job.lane for job in queued)
-    assert lanes == ["background", "interactive"]
+    # Twice the concurrency for background work, plus the interactive slot.
+    assert lanes == ["background", "background", "interactive"]
     (preview,) = [job for job in queued if job.lane == "interactive"]
     assert (preview.op, preview.kind) == ("preview", "photo")
     assert _job(operation.pk).state == JobState.RUNNING
@@ -502,6 +766,7 @@ def test_a_ready_derivative_completes_a_request_without_a_processor_job(
     drive(worker, processor, clock, lambda: _job(first.pk).state == JobState.SUCCEEDED)
     served = len(processor.served)
     second = library.request(library.requester(), entry)
+    clock.advance(media_worker.INTERACTIVE_POLL_SECONDS)
     worker.tick()
     assert _job(second.pk).state == JobState.SUCCEEDED
     assert len(processor.served) == served and _inbox(worker) == []
@@ -558,11 +823,13 @@ def test_heartbeat_metrics_are_counts_and_codes_without_names(
     metrics = heartbeat.metrics
     assert set(metrics) <= {
         "queueAgeSeconds", "scanProgress", "mediaInteractiveQueued", "mediaBackgroundPending",
-        "mediaInFlight", "mediaAssets", "mediaAssetsComplete", "mediaProcessorFailures",
-        "mediaLastErrorCode",
+        "mediaInFlight", "mediaAssets", "mediaAssetsComplete", "mediaThumbnailsReady",
+        "mediaPostersReady", "mediaProcessorFailures", "mediaLastErrorCode",
     }
     assert metrics["mediaProcessorFailures"] == 0
     assert metrics["mediaAssets"] == 2
+    # Ready derivatives, for the backfill rate: the photo's thumbnail, no poster yet.
+    assert (metrics["mediaThumbnailsReady"], metrics["mediaPostersReady"]) == (1, 0)
     assert metrics["mediaLastErrorCode"] in MediaErrorCode.values
     assert 0 <= metrics["scanProgress"] <= 1
     for key, value in metrics.items():
@@ -692,7 +959,7 @@ def test_environmental_results_requeue_interactive_jobs(
 def test_processor_wide_failures_pause_dispatching_with_a_growing_backoff(
     library: Library, tmp_path: Path,
 ) -> None:
-    for _ in range(3):
+    for _ in range(6):
         library.photo()
     _discover(library)
     worker, processor, clock = make_worker(
@@ -700,15 +967,17 @@ def test_processor_wide_failures_pause_dispatching_with_a_growing_backoff(
     )
     processor.behaviour = lambda job: {"status": "failed", "code": "tool_missing"}
     worker.tick()
+    assert len(_inbox(worker)) == 2
     processor.serve()
     worker.tick()
+    # Both jobs met the same outage: it counts once.
     assert worker.processor_failures == 1
     assert worker._paused_until == clock.now + 30
     worker.tick()
     assert _inbox(worker) == []  # paused
     clock.advance(31)
     worker.tick()
-    assert len(_inbox(worker)) == 1
+    assert len(_inbox(worker)) == 2
     processor.serve()
     worker.tick()
     assert worker.processor_failures == 2
@@ -720,7 +989,7 @@ def test_processor_wide_failures_pause_dispatching_with_a_growing_backoff(
     processor.serve()
     worker.tick()
     assert worker.processor_failures == 0
-    assert MediaAsset.objects.filter(probe_state=StageState.READY).count() == 1
+    assert MediaAsset.objects.filter(probe_state=StageState.READY).count() == 2
     # Each asset that met tool_missing backed off on its own, without a counted attempt.
     assert set(MediaAsset.objects.values_list("attempts", flat=True)) == {0}
 

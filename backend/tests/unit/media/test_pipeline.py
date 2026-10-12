@@ -83,10 +83,18 @@ def test_processor_wide_and_interactive_retry_codes() -> None:
 @pytest.mark.parametrize(
     ("row", "expected"),
     [
+        # A pristine asset gets one backfill job: probe and thumbnail or poster pair together.
         ({"kind": "photo", "probe_state": "pending", "thumbnail_state": "pending",
-          "poster_state": None}, "probe"),
+          "poster_state": None}, "backfill"),
+        ({"kind": "video", "probe_state": "pending", "thumbnail_state": "pending",
+          "poster_state": "pending"}, "backfill"),
+        # After a failure the stages run one at a time.
         ({"kind": "photo", "probe_state": "failed", "thumbnail_state": "pending",
           "poster_state": None}, "probe"),
+        ({"kind": "video", "probe_state": "failed", "thumbnail_state": "pending",
+          "poster_state": "pending"}, "probe"),
+        ({"kind": "video", "probe_state": "pending", "thumbnail_state": "pending",
+          "poster_state": "failed"}, "probe"),
         ({"kind": "photo", "probe_state": "ready", "thumbnail_state": "pending",
           "poster_state": None}, "thumbnail"),
         ({"kind": "photo", "probe_state": "ready", "thumbnail_state": "failed",
@@ -117,6 +125,41 @@ def test_job_limits_follow_the_policy_and_the_protocol_bounds(op: protocol.Op) -
     assert limits.cpu_seconds >= limits.wall_seconds
     for name, (minimum, maximum) in protocol.LIMIT_BOUNDS.items():
         assert minimum <= getattr(limits, name) <= maximum
+
+
+@pytest.mark.parametrize(("kind", "rendition"), [("photo", "thumbnail"), ("video", "poster")])
+def test_a_backfill_gets_both_its_stages_limits(kind: str, rendition: str) -> None:
+    limits = job_limits("backfill", POLICY, None, kind=kind)
+    stage = POLICY.limits_for(rendition)
+    assert limits.wall_seconds == POLICY.probe.timeout_seconds + stage.timeout_seconds == 90
+    assert limits.memory_bytes == max(POLICY.probe.memory_bytes, stage.memory_bytes)
+    assert limits.memory_bytes == 1_536 << 20
+    assert limits.cpu_seconds == 2 * limits.wall_seconds
+    assert limits.output_bytes == output_bytes(rendition, None)
+    for name, (minimum, maximum) in protocol.LIMIT_BOUNDS.items():
+        assert minimum <= getattr(limits, name) <= maximum
+    with pytest.raises(ValueError):
+        job_limits("backfill", POLICY, None)
+
+
+def test_a_backfill_job_has_its_renditions_params_and_keys() -> None:
+    identity = (7, 1000, 4096, 1_700_000_000_000_000_000)
+    photo = build_job("backfill", kind=MediaKind.PHOTO, lane="background", slot="synthetic",
+                      path=b"album/photo.jpg", identity=identity, policy=POLICY)
+    video = build_job("backfill", kind=MediaKind.VIDEO, lane="background", slot="synthetic",
+                      path=b"album/clip.mp4", identity=identity, policy=POLICY)
+    assert (photo.params, video.params) == (protocol.THUMBNAIL_PARAMS, protocol.POSTER_PARAMS)
+    assert photo.limits == job_limits("backfill", POLICY, None, kind="photo")
+    assert video.limits.output_bytes == output_bytes("poster", None)
+    assert protocol.decode_job(protocol.encode_job(video)) == video
+    # The derivatives a backfill publishes have the keys its rendition's job gives them.
+    renditions: tuple[tuple[protocol.Job, protocol.Op], ...] = (
+        (photo, "thumbnail"), (video, "poster"),
+    )
+    for job, rendition in renditions:
+        assert derivative_identities(
+            FINGERPRINT, protocol.rendition_op(job.op, job.kind), job.params,
+        ) == derivative_identities(FINGERPRINT, rendition, protocol.DEFAULT_PARAMS[rendition])
 
 
 def test_transcode_budgets_scale_with_the_duration() -> None:

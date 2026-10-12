@@ -81,6 +81,57 @@ def test_a_plain_matching_result_is_accepted_with_open_descriptors(
     assert all(output.descriptor == -1 for output in collected.outputs)
 
 
+@pytest.mark.parametrize("kind", ["photo", "video"])
+def test_a_backfill_result_carries_metadata_and_its_renditions_files(
+    scratch: Scratch, kind: protocol.MediaKind,
+) -> None:
+    job = make_job("backfill", kind=kind, output_bytes=64 << 20)
+    publish_result(_done(scratch), job)
+    with scratch.collect(job) as collected:
+        assert collected.result.metadata is not None
+        assert [output.name for output in collected.outputs] == (
+            ["thumbnail"] if kind == "photo" else ["thumbnail", "poster"]
+        )
+        assert all(output.descriptor >= 0 for output in collected.outputs)
+
+
+def test_a_backfill_result_without_metadata_or_files_is_rejected(scratch: Scratch) -> None:
+    job = make_job("backfill", kind="photo")
+    data = synthetic_webp(400, 300)
+    directory = _done(scratch) / job.id
+    directory.mkdir()
+    (directory / "thumbnail.webp").write_bytes(data)
+    (directory / "result.json").write_bytes(_forged(job, outputs=[
+        {"name": "thumbnail", "format": "webp", "bytes": len(data), "width": 400, "height": 300},
+    ]))
+    assert _reason(scratch, job) == "malformed"
+    # A probe-shaped result (metadata, no thumbnail) for a backfill job.
+    probe = make_job("probe", kind="photo")
+    published = publish_result(_done(scratch), probe)
+    document = json.loads((published / "result.json").read_bytes())
+    document["id"] = job.id
+    (published / "result.json").write_bytes(json.dumps(document).encode())
+    scratch.discard(job.id)
+    published.rename(_done(scratch) / job.id)
+    assert _reason(scratch, job) == "malformed"
+
+
+def test_a_video_backfill_needs_both_poster_frames(scratch: Scratch) -> None:
+    job = make_job("backfill", kind="video", output_bytes=64 << 20)
+    complete = make_job("backfill", kind="video", output_bytes=64 << 20)
+    document = json.loads(
+        (publish_result(_done(scratch), complete) / "result.json").read_bytes(),
+    )
+    data = synthetic_webp(400, 300)
+    directory = _done(scratch) / job.id
+    directory.mkdir()
+    (directory / "thumbnail.webp").write_bytes(data)
+    (directory / "result.json").write_bytes(_forged(job, metadata=document["metadata"], outputs=[
+        {"name": "thumbnail", "format": "webp", "bytes": len(data), "width": 400, "height": 300},
+    ]))
+    assert _reason(scratch, job) == "malformed"
+
+
 def test_a_probe_result_carries_metadata_and_no_files(scratch: Scratch) -> None:
     job = make_job("probe", kind="photo")
     publish_result(_done(scratch), job)

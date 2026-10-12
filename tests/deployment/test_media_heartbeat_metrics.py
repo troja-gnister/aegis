@@ -11,7 +11,8 @@ pytestmark = [pytest.mark.integration, pytest.mark.django_db(transaction=True)]
 
 COUNTERS = (
     "mediaInteractiveQueued", "mediaBackgroundPending", "mediaInFlight", "mediaAssets",
-    "mediaAssetsComplete", "mediaProcessorFailures",
+    "mediaAssetsComplete", "mediaThumbnailsReady", "mediaPostersReady",
+    "mediaProcessorFailures",
 )
 
 
@@ -75,5 +76,6 @@ def test_a_full_media_heartbeat_is_stored(role_database: Any) -> None:
     _parity(role_database, {
         "queueAgeSeconds": 3, "scanProgress": 0.25, "mediaInteractiveQueued": 1,
         "mediaBackgroundPending": 7, "mediaInFlight": 3, "mediaAssets": 12,
-        "mediaAssetsComplete": 5, "mediaProcessorFailures": 1, "mediaLastErrorCode": "timeout",
+        "mediaAssetsComplete": 5, "mediaThumbnailsReady": 4, "mediaPostersReady": 1,
+        "mediaProcessorFailures": 1, "mediaLastErrorCode": "timeout",
     }, allowed=True)

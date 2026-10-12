@@ -18,6 +18,7 @@ from aegis_apps.media.eviction import evict, evictable_bytes
 from aegis_apps.media.leasing import AssetLease, ClaimedAsset, claim_assets, fenced
 from aegis_apps.media.models import MediaAsset, MediaDerivative
 from aegis_apps.media.pipeline import (
+    backfill_ready_update,
     derivative_identities,
     record_failure,
     record_probe,
@@ -287,7 +288,135 @@ def test_unsupported_probes_end_every_stage(library: Library) -> None:
     assert (asset.safe_error_code, asset.attempts) == ("no_video_stream", 0)
 
 
+def test_a_failed_backfill_fails_only_the_probe_and_its_third_failure_ends_every_stage(
+    library: Library,
+) -> None:
+    claimed = _claim(library, video=True)
+    now = timezone.now()
+    assert record_failure(claimed.lease, "backfill", "video", "decode_failed", attempts=0,
+                          now=now) == "failed"
+    asset = _asset(claimed.lease)
+    # The next attempt runs the probe on its own (pipeline.next_operation).
+    assert (asset.probe_state, asset.thumbnail_state, asset.poster_state) == (
+        StageState.FAILED, StageState.PENDING, StageState.PENDING,
+    )
+    assert (asset.attempts, asset.safe_error_code) == (1, "decode_failed")
+
+    # Not reachable in the pipeline (a counted failure leaves the probe failed), but bounded.
+    other = _claim(library, video=True, attempts=2, attempt_token=2)
+    assert record_failure(other.lease, "backfill", "video", "timeout",
+                          attempts=other.row["attempts"], now=now) == "quarantined"
+    assert (_asset(other.lease).probe_state, _asset(other.lease).thumbnail_state,
+            _asset(other.lease).poster_state) == (StageState.QUARANTINED,) * 3
+
+    third = _claim(library)
+    assert record_failure(third.lease, "backfill", "photo", "source_unavailable", attempts=0,
+                          now=now) == "deferred"
+    assert (_asset(third.lease).probe_state, _asset(third.lease).environment_failures) == (
+        StageState.PENDING, 1,
+    )
+
+
+def test_an_unsupported_backfill_ends_every_stage(library: Library) -> None:
+    claimed = _claim(library, video=True)
+    record_unsupported(claimed.lease, "backfill", "video", "no_video_stream",
+                       now=timezone.now())
+    asset = _asset(claimed.lease)
+    assert (asset.probe_state, asset.thumbnail_state, asset.poster_state) == (
+        StageState.UNSUPPORTED,) * 3
+    assert asset.processor_version == protocol.PROCESSOR_VERSION
+
+
 # -- publishing ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("video", [False, True])
+def test_a_backfill_records_metadata_timeline_key_and_derivatives_together(
+    library: Library, store: DerivativeStore, tmp_path: Path, video: bool,
+) -> None:
+    claimed = _claim(library, video=video)
+    fingerprint = claimed.row["fingerprint"]
+    kind = "video" if video else "photo"
+    rendition: protocol.Op = "poster" if video else "thumbnail"
+    now = timezone.now()
+    publications = _publications(store, tmp_path, fingerprint, rendition)
+    record_publications(
+        store, entry_id=claimed.lease.entry_id, fingerprint=fingerprint,
+        fence=fenced(claimed.lease, now=now), publications=publications,
+        asset_update=backfill_ready_update(
+            VIDEO_METADATA if video else PHOTO_METADATA, kind,
+            mtime_ns=claimed.row["mtime_ns"], now=now,
+        ),
+        now=now,
+    )
+    asset = _asset(claimed.lease)
+    assert asset.probe_state == asset.thumbnail_state == StageState.READY
+    assert asset.poster_state == (StageState.READY if video else None)
+    assert asset.processor_version == protocol.PROCESSOR_VERSION
+    assert asset.sort_source == SortSource.CAPTURED
+    assert asset.sort_at == asset.captured_at
+    assert (asset.width, asset.height) == ((1920, 1080) if video else (4032, 3024))
+    assert (asset.lease_owner, asset.attempts, asset.safe_error_code, asset.lane) == (
+        None, 0, None, Lane.BACKGROUND,
+    )
+    assert asset.next_attempt_at == now
+    rows = MediaDerivative.objects.filter(asset_id=claimed.lease.entry_id)
+    assert {(row.kind, row.key, row.state) for row in rows} == {
+        (item.kind, item.key, DerivativeState.READY) for item in publications
+    }
+    for row in rows:
+        assert _final(store, row.key).stat().st_size == row.bytes
+
+
+def test_a_backfill_that_loses_its_fence_records_no_metadata_and_no_derivative(
+    library: Library, store: DerivativeStore, tmp_path: Path,
+) -> None:
+    claimed = _claim(library)
+    fingerprint = claimed.row["fingerprint"]
+    publications = _publications(store, tmp_path, fingerprint, "thumbnail")
+    lost = AssetLease(claimed.lease.entry_id, claimed.lease.attempt_token + 1,
+                      claimed.lease.owner, claimed.lease.expires_at)
+    now = timezone.now()
+    with pytest.raises(FenceLost):
+        record_publications(
+            store, entry_id=lost.entry_id, fingerprint=fingerprint,
+            fence=fenced(lost, now=now), publications=publications,
+            asset_update=backfill_ready_update(PHOTO_METADATA, "photo",
+                                               mtime_ns=claimed.row["mtime_ns"], now=now),
+            now=now,
+        )
+    asset = _asset(claimed.lease)
+    assert (asset.probe_state, asset.thumbnail_state) == (StageState.PENDING,) * 2
+    assert (asset.width, asset.camera_make, asset.sort_source) == (
+        None, None, SortSource.MODIFIED,
+    )
+    assert not MediaDerivative.objects.exists()
+    assert os.listdir(_final(store, publications[0].key).parent) == []
+
+
+def test_a_backfill_whose_placement_fails_rolls_its_metadata_back(
+    library: Library, store: DerivativeStore, tmp_path: Path,
+) -> None:
+    claimed = _claim(library)
+    fingerprint = claimed.row["fingerprint"]
+    publications = _publications(store, tmp_path, fingerprint, "thumbnail")
+    now = timezone.now()
+    with (
+        patch.object(DerivativeStore, "place", side_effect=PublishFailed()),
+        pytest.raises(PublishFailed),
+    ):
+        record_publications(
+            store, entry_id=claimed.lease.entry_id, fingerprint=fingerprint,
+            fence=fenced(claimed.lease, now=now), publications=publications,
+            asset_update=backfill_ready_update(PHOTO_METADATA, "photo",
+                                               mtime_ns=claimed.row["mtime_ns"], now=now),
+            now=now,
+        )
+    asset = _asset(claimed.lease)
+    assert (asset.probe_state, asset.width, asset.captured_at) == (
+        StageState.PENDING, None, None,
+    )
+    assert not MediaDerivative.objects.exists()
 
 
 def test_publishing_places_files_then_rows_then_updates_the_asset(

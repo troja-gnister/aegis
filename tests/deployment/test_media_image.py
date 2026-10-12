@@ -63,16 +63,19 @@ while not os.path.isdir(os.path.join(scratch, "done")):
     assert processor.poll() is None and time.monotonic() < deadline, "processor did not start"
     time.sleep(0.1)
 # The media worker's default stage limits (aegis_apps.media.config): wall seconds, MiB.
+# A backfill job (probe plus thumbnail or poster) gets the probe's wall plus its rendition's.
 stage = {"probe": (30, 1024), "thumbnail": (60, 1536), "poster": (60, 1536),
-         "preview": (120, 1536), "transcode": (600, 3072)}
+         "preview": (120, 1536), "transcode": (600, 3072), "backfill": (90, 1536)}
 jobs = []
 for name, op in ((b"photo.jpg", "probe"), (b"photo.jpg", "thumbnail"), (b"photo.jpg", "preview"),
-                 (b"clip.mp4", "probe"), (b"clip.mp4", "poster"), (b"clip.mp4", "transcode")):
+                 (b"photo.jpg", "backfill"), (b"clip.mp4", "probe"), (b"clip.mp4", "poster"),
+                 (b"clip.mp4", "transcode"), (b"clip.mp4", "backfill")):
     observed = os.stat(os.path.join(slot.encode(), name))
-    job = p.Job(uuid.uuid4().hex, op, p.media_kind_for_path(name), "background",
+    kind = p.media_kind_for_path(name)
+    job = p.Job(uuid.uuid4().hex, op, kind, "background",
                 p.SourceInput("synthetic", name, observed.st_dev, observed.st_ino,
                               observed.st_size, observed.st_mtime_ns),
-                p.DEFAULT_PARAMS[op],
+                p.default_params(op, kind),
                 p.Limits(wall_seconds=stage[op][0], cpu_seconds=stage[op][0],
                          memory_bytes=stage[op][1] << 20, output_bytes=256 << 20))
     p.write_job(os.path.join(scratch, "inbox"), job)
@@ -317,6 +320,14 @@ def test_media_processor_serves_jobs_offline_in_the_image(media_images: dict[str
     assert summary["poster:video"]["files"] == ["poster.webp", "result.json", "thumbnail.webp"]
     assert summary["transcode:video"]["files"] == ["result.json", "transcode.mp4"]
     assert summary["probe:photo"]["files"] == ["result.json"]
+    # One backfill job per asset: the probe's metadata and the thumbnail or poster pair.
+    assert summary["backfill:photo"]["size"] == [1200, 800]
+    assert summary["backfill:photo"]["outputs"] == summary["thumbnail:photo"]["outputs"]
+    assert summary["backfill:photo"]["files"] == ["result.json", "thumbnail.webp"]
+    assert summary["backfill:video"]["size"] == [320, 240]
+    assert summary["backfill:video"]["codec"] == "h264"
+    assert summary["backfill:video"]["outputs"] == summary["poster:video"]["outputs"]
+    assert summary["backfill:video"]["files"] == summary["poster:video"]["files"]
 
 
 def _mounted_processor_tests(tmp_path: Path) -> Path:
@@ -357,7 +368,7 @@ def test_video_operations_pass_inside_the_media_image(
         "-m", "media_tools", "/src/media_processor/test_video_ops.py",
     ])
 
-    assert passed >= 12
+    assert passed >= 14
 
 
 def test_landlock_confines_the_child_inside_the_media_image(

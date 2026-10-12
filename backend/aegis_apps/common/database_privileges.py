@@ -516,6 +516,8 @@ BEGIN
                 'mediaInFlight',
                 'mediaAssets',
                 'mediaAssetsComplete',
+                'mediaThumbnailsReady',
+                'mediaPostersReady',
                 'mediaProcessorFailures',
                 'mediaLastErrorCode'
              )
@@ -550,7 +552,8 @@ BEGIN
                 'diskCapacityBytes', 'scanObservedEntries',
                 'scanCompletedDirectories', 'scanDegradedDirectories',
                 'mediaInteractiveQueued', 'mediaBackgroundPending', 'mediaInFlight',
-                'mediaAssets', 'mediaAssetsComplete', 'mediaProcessorFailures'
+                'mediaAssets', 'mediaAssetsComplete', 'mediaThumbnailsReady',
+                'mediaPostersReady', 'mediaProcessorFailures'
              )
                AND (
                 pg_catalog.jsonb_typeof(metric.value) <> 'number'

@@ -183,8 +183,17 @@ def assert_drained(scratch: Path) -> None:
 # -- configuration -------------------------------------------------------------------------------
 
 
+def test_defaults_four_children_and_a_tenth_of_a_second_poll() -> None:
+    from aegis_apps.media.config import PROCESSOR_CONCURRENCY
+    from aegis_media_processor import loop
+
+    assert (loop.DEFAULT_CONCURRENCY, loop.POLL_SECONDS, loop.CHILD_NICENESS) == (4, 0.1, 10)
+    # The worker reads the same setting with the same default and bounds.
+    assert PROCESSOR_CONCURRENCY == (loop.CONCURRENCY_ENVIRONMENT, 4, 1, loop.MAX_CONCURRENCY)
+
+
 @pytest.mark.parametrize("environ,expected", [
-    ({}, 2), ({"AEGIS_MEDIA_PROCESSOR_CONCURRENCY": "1"}, 1),
+    ({}, 4), ({"AEGIS_MEDIA_PROCESSOR_CONCURRENCY": "1"}, 1),
     ({"AEGIS_MEDIA_PROCESSOR_CONCURRENCY": "16"}, 16),
     ({"AEGIS_MEDIA_PROCESSOR_CONCURRENCY": "04"}, 4),
 ])
@@ -431,6 +440,31 @@ def test_jobs_are_processed_by_real_children_and_published_atomically(
     assert published(scratch, preview).outputs[0].width == 1200
     metadata = published(scratch, probe).metadata
     assert metadata is not None and (metadata.width, metadata.height) == (1200, 800)
+
+
+def test_a_backfill_job_probes_and_renders_in_one_confined_child(
+    scratch: Path, roots: Path,
+) -> None:
+    backfill = make_job(roots, b"album/photo.jpg", "backfill")
+    thumbnail = make_job(roots, b"album/photo.jpg", "thumbnail")
+    for job in (backfill, thumbnail):
+        enqueue(scratch, job)
+
+    with processor(scratch, roots, concurrency=1) as serving:
+        serving.run(until_idle=True)
+
+    assert_drained(scratch)
+    assert sorted(os.listdir(scratch / "done" / backfill.id)) == [
+        "result.json", "thumbnail.webp",
+    ]
+    result = published(scratch, backfill)
+    assert result.status == "ok", result
+    assert result.metadata is not None
+    assert (result.metadata.width, result.metadata.height) == (1200, 800)
+    assert result.outputs == published(scratch, thumbnail).outputs
+    assert (scratch / "done" / backfill.id / "thumbnail.webp").read_bytes() == (
+        scratch / "done" / thumbnail.id / "thumbnail.webp"
+    ).read_bytes()
 
 
 def test_changed_corrupt_and_invalid_jobs_are_published_as_failures(

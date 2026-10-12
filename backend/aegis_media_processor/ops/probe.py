@@ -1,10 +1,15 @@
 """Probe metadata (M5): dimensions as displayed, capture time, camera, codecs, location presence.
 
-Photos are read with Pillow (header and EXIF only; no pixels are decoded). Videos are read with
+Photos are read with Pillow (header and EXIF only; no pixels are decoded, except that Pillow
+reads a whole PNG to find EXIF stored after its image data). Videos are read with
 ``ffprobe -v error -print_format json -show_format -show_streams`` on the opened descriptor,
 and its JSON is treated as untrusted. Location data is reduced to ``has_location`` here, in the
 tool child: GPS tags and location keys are tested for presence and their values are never read
 into the result.
+
+A backfill job probes and renders in one child: :func:`backfill_photo` reads the metadata from
+the opened image and then renders the thumbnail from that same image (one open, one decode);
+:func:`backfill_video` runs ffprobe and then the poster extraction on the same descriptor.
 """
 
 from __future__ import annotations
@@ -14,19 +19,23 @@ from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
 from typing import Final, cast
 
-from PIL import ExifTags
+from PIL import ExifTags, ImageFile
 
 from ..protocol import (
     MAX_DURATION_MS,
     MAX_METADATA_DIMENSION,
     Container,
+    ImageParams,
     Limits,
     Metadata,
+    Output,
+    OutputSpec,
+    PosterParams,
     captured_at_is_valid,
 )
 from . import OperationError
-from .image import open_image
-from .video import ffprobe_document
+from .image import open_image, render_image
+from .video import ffprobe_document, make_poster
 
 _MAX_CAMERA_TEXT: Final = 64
 _EXIF_DATETIME: Final = re.compile(r"(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})", re.ASCII)
@@ -95,44 +104,62 @@ def _exif_orientation(value: object) -> int | None:
     return value if type(value) is int and 1 <= value <= 8 else None
 
 
+def photo_metadata(image: ImageFile.ImageFile) -> Metadata:
+    """The metadata of an image :func:`open_image` opened, read before it is decoded."""
+    width, height = image.size
+    try:
+        exif = image.getexif()
+    except Exception:
+        exif = None
+    transform = None if exif is None else _exif_orientation(exif.get(ExifTags.Base.Orientation))
+    # pillow-heif applies HEIF rotation itself, resets EXIF to 1 and keeps the original here.
+    informational = transform
+    if image.format == "HEIF":
+        informational = _exif_orientation(image.info.get("original_orientation")) or transform
+    if transform in (5, 6, 7, 8):
+        width, height = height, width
+    captured = make = model = None
+    has_location = False
+    if exif is not None:
+        make = camera_text(exif.get(ExifTags.Base.Make))
+        model = camera_text(exif.get(ExifTags.Base.Model))
+        try:
+            details = exif.get_ifd(ExifTags.IFD.Exif)
+            captured = exif_captured_at(
+                details.get(ExifTags.Base.DateTimeOriginal),
+                details.get(ExifTags.Base.OffsetTimeOriginal),
+            )
+        except Exception:
+            captured = None
+        try:
+            gps = exif.get_ifd(ExifTags.IFD.GPSInfo)
+            has_location = any(tag in gps for tag in _GPS_POSITION_TAGS)
+        except Exception:
+            has_location = ExifTags.IFD.GPSInfo in exif
+    return Metadata(
+        width=width, height=height, orientation=informational, captured_at=captured,
+        captured_at_source="exif" if captured else None, camera_make=make,
+        camera_model=model, duration_ms=None, video_codec=None, audio_codec=None,
+        container=None, has_location=has_location,
+    )
+
+
 def probe_photo(descriptor: int) -> Metadata:
     with open_image(descriptor) as image:
-        width, height = image.size
-        try:
-            exif = image.getexif()
-        except Exception:
-            exif = None
-        transform = None if exif is None else _exif_orientation(exif.get(ExifTags.Base.Orientation))
-        # pillow-heif applies HEIF rotation itself, resets EXIF to 1 and keeps the original here.
-        informational = transform
-        if image.format == "HEIF":
-            informational = _exif_orientation(image.info.get("original_orientation")) or transform
-        if transform in (5, 6, 7, 8):
-            width, height = height, width
-        captured = make = model = None
-        has_location = False
-        if exif is not None:
-            make = camera_text(exif.get(ExifTags.Base.Make))
-            model = camera_text(exif.get(ExifTags.Base.Model))
-            try:
-                details = exif.get_ifd(ExifTags.IFD.Exif)
-                captured = exif_captured_at(
-                    details.get(ExifTags.Base.DateTimeOriginal),
-                    details.get(ExifTags.Base.OffsetTimeOriginal),
-                )
-            except Exception:
-                captured = None
-            try:
-                gps = exif.get_ifd(ExifTags.IFD.GPSInfo)
-                has_location = any(tag in gps for tag in _GPS_POSITION_TAGS)
-            except Exception:
-                has_location = ExifTags.IFD.GPSInfo in exif
-        return Metadata(
-            width=width, height=height, orientation=informational, captured_at=captured,
-            captured_at_source="exif" if captured else None, camera_make=make,
-            camera_model=model, duration_ms=None, video_codec=None, audio_codec=None,
-            container=None, has_location=has_location,
-        )
+        return photo_metadata(image)
+
+
+def backfill_photo(
+    descriptor: int, directory: str, spec: OutputSpec, params: ImageParams,
+) -> tuple[Metadata, Output]:
+    """The probe and the thumbnail from one open of the descriptor and one decode.
+
+    The metadata is read first: rendering decodes at a reduced scale, which changes the
+    image's size, and drops the EXIF orientation it applies.
+    """
+    with open_image(descriptor) as image:
+        metadata = photo_metadata(image)
+        return metadata, render_image(image, directory, spec, params)
 
 
 # -- Videos ------------------------------------------------------------------------------------
@@ -276,3 +303,14 @@ def map_ffprobe(document: Mapping[str, object]) -> Metadata:
 
 def probe_video(descriptor: int, directory: str, limits: Limits, deadline: float) -> Metadata:
     return map_ffprobe(ffprobe_document(descriptor, directory, limits, deadline))
+
+
+def backfill_video(
+    descriptor: int, directory: str, params: PosterParams, limits: Limits, deadline: float,
+) -> tuple[Metadata, tuple[Output, ...]]:
+    """The probe, then the poster pair, on the same descriptor and under one deadline.
+
+    A file without a video stream is ``unsupported`` before any frame is extracted.
+    """
+    metadata = probe_video(descriptor, directory, limits, deadline)
+    return metadata, make_poster(descriptor, directory, params, limits, deadline)

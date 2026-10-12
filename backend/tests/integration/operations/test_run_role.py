@@ -838,7 +838,8 @@ def test_continuous_media_role_runs_the_pipeline_against_a_processor_in_scratch(
     assert passes <= 200
     asset = MediaAsset.objects.get(pk=photo.pk)
     assert (asset.probe_state, asset.thumbnail_state) == (StageState.READY, StageState.READY)
-    assert [job.op for job in processor.served] == ["probe", "thumbnail"]
+    # One backfill job probes the photo and builds its thumbnail.
+    assert [job.op for job in processor.served] == ["backfill"]
     (row,) = MediaDerivative.objects.filter(asset_id=photo.pk)
     assert (derivatives / row.key[0:2] / row.key[2:4] / f"{row.key}.webp").is_file()
     assert sorted(p.name for p in (scratch / "done").iterdir()) == []

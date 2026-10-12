@@ -8,7 +8,8 @@ never resolves a root path, and Landlock would refuse it anyway.
 It reads ``<job dir>/job.json`` (the loop's file; readable, not writable, for the child) and
 validates it again, checks that the descriptor is still the fingerprinted file, then decodes it
 in this process (Pillow and pillow-heif) or through its own sandboxed ffmpeg and ffprobe, which
-inherit the ruleset. Outputs and temporary files go only into ``<job dir>/out/``. The result
+inherit the ruleset. A ``backfill`` job probes and renders in this one child, from the one
+descriptor. Outputs and temporary files go only into ``<job dir>/out/``. The result
 document is the only thing written to stdout; exit status 0 means one was written. After
 decoding, the descriptor's size and mtime are checked again, so a file edited during decoding
 reports ``changed``.
@@ -38,6 +39,7 @@ from .protocol import (
     TranscodeParams,
     decode_job,
     encode_result,
+    job_outputs,
     read_regular_file,
 )
 from .sandbox import output_limit_error
@@ -70,15 +72,29 @@ def _operate(job: Job, descriptor: int, directory: str, deadline: float) -> Resu
     from .ops import image, probe, video
 
     image.configure()
+    outputs: tuple[Output, ...]
     if job.op == "probe":
         metadata = (
             probe.probe_photo(descriptor) if job.kind == "photo"
             else probe.probe_video(descriptor, directory, job.limits, deadline)
         )
         return Result(id=job.id, status="ok", safe_error_code=None, metadata=metadata, outputs=())
+    if job.op == "backfill":
+        if job.kind == "photo":
+            (spec,) = job_outputs(job.op, job.kind)
+            metadata, rendered = probe.backfill_photo(
+                descriptor, directory, spec, cast(ImageParams, job.params),
+            )
+            outputs = (rendered,)
+        else:
+            metadata, outputs = probe.backfill_video(
+                descriptor, directory, cast(PosterParams, job.params), job.limits, deadline,
+            )
+        return Result(id=job.id, status="ok", safe_error_code=None, metadata=metadata,
+                      outputs=outputs)
     if job.op in ("thumbnail", "preview"):
         (spec,) = OP_OUTPUTS[job.op]
-        outputs: tuple[Output, ...] = (
+        outputs = (
             image.render_photo(descriptor, directory, spec, cast(ImageParams, job.params)),
         )
     elif job.op == "poster":

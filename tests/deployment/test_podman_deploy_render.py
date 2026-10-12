@@ -721,8 +721,8 @@ def test_the_media_processor_is_offline_credential_free_read_only_and_bounded() 
     assert processor.value("Container", "RunInit") == "true"
     assert processor.value("Container", "Unmask") == "/sys/devices/virtual/powercap"
     assert processor.value("Container", "PidsLimit") == "256"
-    assert processor.value("Container", "Memory") == "7g"
-    assert processor.value("Service", "CPUQuota") == "200%"
+    assert processor.value("Container", "Memory") == "13g"
+    assert processor.value("Service", "CPUQuota") == "400%"
     assert processor.value("Container", "HealthCmd") is None
     assert processor.value("Container", "Notify") is None
 

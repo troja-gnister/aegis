@@ -68,13 +68,13 @@ def make_job(
     output_bytes: int = 8 << 20,
     lane: protocol.Lane = "background",
 ) -> protocol.Job:
-    media_kind = kind or ("photo" if op in ("thumbnail", "preview") else "video")
+    media_kind = kind or ("photo" if op in ("thumbnail", "preview", "backfill") else "video")
     if path is None:
         path = b"album/photo.jpg" if media_kind == "photo" else b"album/clip.mp4"
     return protocol.check_job(protocol.Job(
         id=secrets.token_hex(16), op=op, kind=media_kind, lane=lane,
         input=protocol.SourceInput("synthetic", path, 7, 1000, 4096, 1_700_000_000_000_000_000),
-        params=protocol.DEFAULT_PARAMS[op],
+        params=protocol.default_params(op, media_kind),
         limits=protocol.Limits(
             wall_seconds=60, cpu_seconds=120, memory_bytes=1 << 30, output_bytes=output_bytes,
         ),
@@ -84,7 +84,7 @@ def make_job(
 def default_outputs(job: protocol.Job) -> list[tuple[str, bytes, int, int]]:
     """``(name, data, width, height)`` for every output the job's operation writes."""
     outputs: list[tuple[str, bytes, int, int]] = []
-    for spec in protocol.OP_OUTPUTS[job.op]:
+    for spec in protocol.job_outputs(job.op, job.kind):
         if spec.format == "mp4":
             outputs.append((spec.name, synthetic_mp4(), 1920, 1080))
         elif spec.name == "thumbnail":
@@ -107,14 +107,14 @@ def publish_result(
     """Write ``done/<id>/`` as the processor would (or with a forged ``raw`` result)."""
     directory = Path(done) / job.id
     directory.mkdir(mode=0o770)
-    if status == "ok" and job.op == "probe" and metadata is None:
+    if status == "ok" and job.op in protocol.METADATA_OPS and metadata is None:
         metadata = PHOTO_METADATA if job.kind == "photo" else VIDEO_METADATA
     files = (list(default_outputs(job)) if outputs is None else list(outputs)) if (
         status == "ok"
     ) else []
     declared: list[protocol.Output] = []
     for name, data, width, height in files:
-        spec = next(s for s in protocol.OP_OUTPUTS[job.op] if s.name == name)
+        spec = next(s for s in protocol.job_outputs(job.op, job.kind) if s.name == name)
         (directory / spec.filename).write_bytes(data)
         declared.append(protocol.Output(name, spec.format, len(data), width, height))
     if raw is None:

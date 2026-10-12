@@ -404,6 +404,14 @@ def test_media_indexes_exist_with_the_planned_shapes() -> None:
     assert "'failed'" in work
     for finished in ("'ready'", "'unsupported'", "'quarantined'"):
         assert finished not in work
+    # Newest files first, per root: background assets that need work and are not parked.
+    backfill = definitions["media_asset_backfill_idx"]
+    assert "USING btree (root_id, mtime_ns DESC, entry_id DESC) WHERE" in backfill
+    for term in ("probe_state", "thumbnail_state", "poster_state", "'pending'", "'failed'",
+                 "lane", "'background'", "next_attempt_at", "9999-01-01"):
+        assert term in backfill
+    for finished in ("'ready'", "'unsupported'", "'quarantined'", "'interactive'"):
+        assert finished not in backfill
     assert definitions["media_derivative_identity_idx"].endswith(
         "USING btree (asset_id, kind, fingerprint)"
     )
@@ -415,6 +423,16 @@ def test_media_indexes_exist_with_the_planned_shapes() -> None:
     assert "media_asset_fingerprint_uniq" not in definitions
     for redundant in ("USING btree (root_id)", "USING btree (asset_id)"):
         assert not any(definition.endswith(redundant) for definition in definitions.values())
+
+
+def test_the_asset_table_is_vacuumed_in_proportion_to_its_churn() -> None:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT reloptions FROM pg_catalog.pg_class WHERE oid = 'media_mediaasset'::regclass"
+        )
+        (options,) = cursor.fetchone()
+
+    assert options == ["autovacuum_vacuum_scale_factor=0.02"]
 
 
 def test_asset_composite_root_foreign_key_is_installed() -> None:

@@ -27,7 +27,7 @@ def test_media_policy_defaults() -> None:
 
     assert policy == MediaPolicy(
         cache_budget_gb=20,
-        processor_concurrency=2,
+        processor_concurrency=4,
         discovery_batch=500,
         discovery_interval_seconds=3_600,
         roots_refresh_seconds=60,

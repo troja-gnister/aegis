@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
 
 import pytest
+from aegis_apps.catalog.models import CatalogEntry
+from aegis_apps.media import leasing
 from aegis_apps.media.discovery import discover_batch, reset_asset
 from aegis_apps.media.enums import Lane, StageState
 from aegis_apps.media.leasing import (
@@ -21,9 +24,12 @@ from aegis_apps.media.leasing import (
     renew_asset_lease,
 )
 from aegis_apps.media.models import MediaAsset
+from aegis_apps.roots.models import Root
+from django.db import connection, transaction
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
-from .worker_support import Library, make_library
+from .worker_support import MTIME_NS, Library, make_library
 
 pytestmark = [pytest.mark.integration, pytest.mark.django_db]
 
@@ -65,15 +71,122 @@ def test_the_interactive_lane_is_claimed_first(library: Library) -> None:
     assert [item.lease.entry_id for item in claimed] == [background[2]]
 
 
-def test_within_a_lane_the_oldest_queue_time_comes_first(library: Library) -> None:
+def test_interactive_assets_are_claimed_by_queue_time(library: Library) -> None:
     ids = _assets(library, 3)
     now = timezone.now()
-    for offset, entry_id in zip((30, 10, 20), ids, strict=True):
+    for offset, mtime, entry_id in zip((30, 10, 20), (1, 3, 2), ids, strict=True):
         MediaAsset.objects.filter(pk=entry_id).update(
-            next_attempt_at=now - timedelta(seconds=offset),
+            lane=Lane.INTERACTIVE, next_attempt_at=now - timedelta(seconds=offset),
+            mtime_ns=MTIME_NS + mtime,
         )
     claimed = claim_assets(uuid.uuid4(), limit=3, root_ids=[library.root.pk], now=now)
     assert [item.lease.entry_id for item in claimed] == [ids[0], ids[2], ids[1]]
+
+
+def test_background_assets_are_claimed_newest_file_first(library: Library) -> None:
+    ids = _assets(library, 4)
+    now = timezone.now()
+    # Queue time no longer decides: the newest modification time does, then the entry.
+    for offset, mtime, entry_id in zip((30, 10, 20, 40), (1, 3, 2, 3), ids, strict=True):
+        MediaAsset.objects.filter(pk=entry_id).update(
+            next_attempt_at=now - timedelta(seconds=offset), mtime_ns=MTIME_NS + mtime,
+        )
+    claimed = claim_assets(uuid.uuid4(), limit=4, root_ids=[library.root.pk], now=now)
+    newest = sorted(ids[1::2], reverse=True)
+    assert [item.lease.entry_id for item in claimed] == [*newest, ids[2], ids[0]]
+    # A backing-off or leased newer asset is skipped, not waited for.
+    later = now + timedelta(hours=1)
+    MediaAsset.objects.filter(pk__in=ids).update(
+        lease_owner=None, lease_expires_at=None, next_attempt_at=now,
+    )
+    MediaAsset.objects.filter(pk=newest[0]).update(next_attempt_at=later)
+    (first,) = claim_assets(uuid.uuid4(), limit=1, root_ids=[library.root.pk], now=now)
+    assert first.lease.entry_id == newest[1]
+
+
+def test_a_newest_window_with_nothing_eligible_falls_back_to_queue_time(
+    library: Library, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(leasing, "NEWEST_WINDOW", 2)
+    ids = _assets(library, 5)
+    now = timezone.now()
+    for index, entry_id in enumerate(ids):
+        MediaAsset.objects.filter(pk=entry_id).update(
+            mtime_ns=MTIME_NS + index, next_attempt_at=now - timedelta(seconds=index),
+        )
+    # The two newest are backing off: the window holds nothing claimable.
+    MediaAsset.objects.filter(pk__in=ids[3:]).update(next_attempt_at=now + timedelta(minutes=5))
+    claimed = claim_assets(uuid.uuid4(), limit=2, root_ids=[library.root.pk], now=now)
+    # The oldest queue time first, as before newest-first ordering.
+    assert [item.lease.entry_id for item in claimed] == [ids[2], ids[1]]
+    # Window rows and fallback rows together, without claiming one twice.
+    MediaAsset.objects.filter(pk__in=ids).update(
+        lease_owner=None, lease_expires_at=None, next_attempt_at=now,
+    )
+    claimed = claim_assets(uuid.uuid4(), limit=5, root_ids=[library.root.pk], now=now)
+    assert sorted(item.lease.entry_id for item in claimed) == sorted(ids)
+    assert [item.lease.entry_id for item in claimed[:2]] == [ids[4], ids[3]]
+
+
+def test_newest_files_come_first_across_roots(
+    library: Library, entry_factory: Callable[..., CatalogEntry],
+) -> None:
+    (first,) = _assets(library, 1)
+    MediaAsset.objects.filter(pk=first).update(mtime_ns=MTIME_NS + 5)
+    other_root = Root.objects.create(
+        slot_id=f"synthetic-{uuid.uuid4().hex}", display_name="Second synthetic root",
+        mode=Root.Mode.READ_ONLY, active=True,
+    )
+    CatalogEntry.objects.create(
+        root=other_root, raw_name=b"", display_name="", name_key=b"", kind="directory",
+    )
+    others = [
+        entry_factory(root=other_root, raw=f"other-{index}.jpg".encode(), size=4096,
+                      mtime_ns=MTIME_NS + offset, device=7, inode=5000 + index).pk
+        for index, offset in enumerate((9, 1))
+    ]
+    discover_batch(other_root.pk, None, limit=500, now=timezone.now())
+    roots = [library.root.pk, other_root.pk, other_root.pk]
+
+    claimed = claim_assets(uuid.uuid4(), limit=3, root_ids=roots, now=timezone.now())
+
+    assert [item.lease.entry_id for item in claimed] == [others[0], first, others[1]]
+
+
+def test_the_newest_window_reads_the_backfill_index(library: Library) -> None:
+    _assets(library, 3)
+    with CaptureQueriesContext(connection) as captured:
+        claim_assets(uuid.uuid4(), limit=2, root_ids=[library.root.pk], now=timezone.now())
+    (statement,) = [
+        query["sql"] for query in captured
+        if f"LIMIT {leasing.NEWEST_WINDOW}" in query["sql"]
+    ]
+    assert 'ORDER BY U0."mtime_ns" DESC, 1 DESC LIMIT 256' in statement
+    # On a near-empty table every index costs the same, so the planner's pick is arbitrary.
+    # Hide the other secondary indexes in a rolled-back transaction: the only alternative
+    # left is a disabled seq scan, so the plan proves the partial index's keys and predicate
+    # match the window's SQL.
+    with transaction.atomic(), connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT indexrelid::regclass::text FROM pg_index"
+            " WHERE indrelid = 'media_mediaasset'::regclass AND NOT indisprimary"
+            " AND NOT indisunique"
+            " AND indexrelid <> 'media_asset_backfill_idx'::regclass",
+        )
+        for (index_name,) in cursor.fetchall():
+            cursor.execute(f"DROP INDEX {connection.ops.quote_name(index_name)}")
+        cursor.execute("SET LOCAL enable_seqscan = off")
+        cursor.execute("EXPLAIN (FORMAT JSON) " + statement)
+        document = cursor.fetchone()[0]
+        transaction.set_rollback(True)
+    nodes, pending = [], [document[0]["Plan"]]
+    while pending:
+        node = pending.pop()
+        nodes.append(node)
+        pending.extend(node.get("Plans", []))
+    window = [node for node in nodes if node.get("Index Name") == "media_asset_backfill_idx"]
+    assert window and all("root_id" in node.get("Index Cond", "") for node in window), nodes
+    assert not any(node["Node Type"] == "Seq Scan" for node in nodes), nodes
 
 
 def test_finished_future_parked_and_foreign_assets_are_not_claimed(library: Library) -> None:

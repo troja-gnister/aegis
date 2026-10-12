@@ -218,10 +218,66 @@ def test_transcode_fits_both_orientations_within_the_long_and_short_edges(
     assert sizes == [(160, 120), (120, 160)]
 
 
+def test_a_video_backfill_probes_and_extracts_the_poster_pair_in_one_job(
+    tmp_path: Path, roots: Path,
+) -> None:
+    make_clip(roots, b"clips/wide.mp4", size="1280x720", duration="2")
+    backfill = make_job(roots, b"clips/wide.mp4", "backfill", limits=LIMITS, job_id="b" * 32)
+
+    result, directory = run_job(tmp_path, roots, backfill)
+    probed, _ = run_job(tmp_path, roots, make_job(roots, b"clips/wide.mp4", "probe",
+                                                  limits=LIMITS))
+    poster, poster_directory = run_job(tmp_path, roots, make_job(roots, b"clips/wide.mp4",
+                                                                 "poster", limits=LIMITS))
+
+    assert result.status == "ok", result
+    assert result.metadata is not None and result.metadata == probed.metadata
+    assert (result.metadata.width, result.metadata.height) == (1280, 720)
+    assert result.metadata.has_location is True
+    assert [(o.name, o.width, o.height) for o in result.outputs] == [
+        ("thumbnail", 400, 225), ("poster", 1280, 720),
+    ]
+    assert [(o.name, o.width, o.height) for o in result.outputs] == [
+        (o.name, o.width, o.height) for o in poster.outputs
+    ]
+    assert sorted(os.listdir(directory)) == ["poster.webp", "thumbnail.webp"]
+    for output in result.outputs:
+        data = (directory / output.filename).read_bytes()
+        assert len(data) == output.bytes and output_magic_matches("webp", data[:12])
+        assert LOCATION.encode() not in data
+    encoded = encode_result(result, backfill)
+    assert b"12.58" not in encoded and b"098.13" not in encoded
+    assert b"iso6709" not in encoded.lower()
+    assert decode_result(encoded, backfill) == result
+    assert sorted(os.listdir(poster_directory)) == ["poster.webp", "thumbnail.webp"]
+
+
+def test_a_video_backfill_without_a_video_stream_is_unsupported_before_any_frame(
+    tmp_path: Path, roots: Path,
+) -> None:
+    path = os.fsdecode(source_path(roots, b"clips/voice.mp4"))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    ffmpeg("-f", "lavfi", "-i", "sine=frequency=440:duration=1", "-c:a", "aac", "-f", "mp4", path)
+    make_clip(roots, b"clips/short.mp4", duration="0.4", audio=False, location=False)
+
+    voice, directory = run_job(tmp_path, roots, make_job(roots, b"clips/voice.mp4", "backfill",
+                                                         limits=LIMITS))
+    short, short_directory = run_job(tmp_path, roots, make_job(roots, b"clips/short.mp4",
+                                                               "backfill", limits=LIMITS))
+
+    assert (voice.status, voice.safe_error_code) == ("unsupported", "no_video_stream")
+    assert (voice.metadata, voice.outputs) == (None, ())
+    assert os.listdir(directory) == []
+    # A clip shorter than the poster time still gets its first frame, as from a poster job.
+    assert short.status == "ok", short
+    assert [(o.width, o.height) for o in short.outputs] == [(320, 240), (320, 240)]
+    assert "frame.png" not in os.listdir(short_directory)
+
+
 def test_a_corrupt_video_fails(tmp_path: Path, roots: Path) -> None:
     write_source(roots, b"clips/corrupt.mp4", b"\x00\x00\x00\x18ftypisom" + b"garbage" * 300)
 
-    for op in ("probe", "poster", "transcode"):
+    for op in ("probe", "poster", "transcode", "backfill"):
         result, _ = run_job(tmp_path, roots, make_job(roots, b"clips/corrupt.mp4", op,
                                                       limits=LIMITS))
         assert result.status == "failed", (op, result)
@@ -285,7 +341,7 @@ def test_a_dash_manifest_cannot_pull_in_another_file(tmp_path: Path, roots: Path
     )
     assert whitelisted.returncode != 0
 
-    for op in ("probe", "poster", "transcode"):
+    for op in ("probe", "poster", "transcode", "backfill"):
         result, directory = run_job(tmp_path, roots, make_job(roots, b"clips/manifest.mp4", op,
                                                               limits=LIMITS))
         assert result.status == "failed", (op, result)
@@ -315,7 +371,7 @@ def test_confined_children_decode_video_through_the_fd_protocol(
     make_clip(roots, b"clips/clip.mp4")
     scratch = tmp_path / "scratch"
     scratch.mkdir()
-    operations: tuple[Op, ...] = ("probe", "poster", "transcode")
+    operations: tuple[Op, ...] = ("probe", "poster", "transcode", "backfill")
     jobs = [make_job(roots, b"clips/clip.mp4", op, limits=LIMITS) for op in operations]
 
     with Processor(str(scratch), str(roots), 2) as processor:

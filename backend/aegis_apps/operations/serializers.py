@@ -37,6 +37,9 @@ _METRIC_KEYS = (
     "mediaInFlight",
     "mediaAssets",
     "mediaAssetsComplete",
+    # Ready thumbnails and posters: two heartbeats apart, they give the backfill rate.
+    "mediaThumbnailsReady",
+    "mediaPostersReady",
     "mediaProcessorFailures",
     "mediaLastErrorCode",
 )

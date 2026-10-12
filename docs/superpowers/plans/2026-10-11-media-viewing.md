@@ -139,7 +139,7 @@ These live under `/media/v1/` (gateway location `/media/`, which does not force 
 
 **Configuration:**
 - `AEGIS_DERIVATIVES_CACHE_BUDGET_GB` (default 20, range 1–10000);
-- `AEGIS_MEDIA_PROCESSOR_CONCURRENCY` (default 2, range 1–16);
+- `AEGIS_MEDIA_PROCESSOR_CONCURRENCY` (default 4, range 1–16; 2 before the backfill performance fix);
 - `AEGIS_MEDIA_DISCOVERY_BATCH` (default 500);
 - the probe, thumbnail, preview and transcode timeouts and memory limits, as bounded integers;
 - fail-closed parsing, following `operations/config.py`.
@@ -218,7 +218,7 @@ These live under `/media/v1/` (gateway location `/media/`, which does not force 
 - **Leasing:** fenced leases on assets, on the same pattern as the indexer's leases. The interactive lane comes first, and its jobs come from the operation queue (`media.preview` and `media.transcode`, with the authorization snapshot re-checked).
 - **Dispatch:**
   - writes job files atomically (`O_EXCL` and rename) into `scratch/inbox`;
-  - keeps at most the processor concurrency plus one in flight;
+  - keeps at most twice the processor concurrency plus one in flight (the concurrency plus one before the backfill performance fix);
   - polls `done/`;
   - validates the result against the protocol;
   - checks each output's bytes, image magic (RIFF/WEBP, MP4 `ftyp`) and dimension bounds.

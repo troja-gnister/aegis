@@ -1,24 +1,33 @@
 """The media pipeline's decisions: which job to run, with what limits, and what a result means.
 
 Stages (M3): **probe**, then **thumbnail** (photos) or **poster** (videos: one job writes both
-the thumbnail-size frame, the video's ``thumbnail``, and the preview-size ``poster``).
-Interactive requests run **preview** (photos, 2048 px) and **transcode** (videos, MP4).
+the thumbnail-size frame, the video's ``thumbnail``, and the preview-size ``poster``). An asset
+whose stages are all ``pending`` gets one **backfill** job instead: the processor probes it and
+renders its thumbnail (or poster pair) in one child, from one open (for a photo, one decode),
+and the worker records the metadata, the timeline key and the derivatives in one transaction.
+The derivatives have the keys the thumbnail or poster operation gives them. A backfill whose
+result counts as a failure leaves the probe ``failed``, so the next attempt runs the separate
+stages again: a file whose header is fine but whose pixels are not still gets its metadata,
+and the stage that fails is the one quarantined. Assets already probed get the thumbnail or
+poster job. Interactive requests run **preview** (photos, 2048 px) and **transcode** (videos,
+MP4).
 
 Results, for a stage held under a fenced lease (``leasing.py``):
 
-- ``ok``: a probe records the metadata (``sorting.py`` decides the timeline key) and re-queues
-  the asset at the tail for its next stage; a thumbnail or poster is published
-  (``publish.py``). ``attempts`` returns to 0.
-- ``unsupported``: the stage, and for a probe every later stage, becomes ``unsupported``.
+- ``ok``: a probe records the metadata (``sorting.py`` decides the timeline key) and leaves the
+  asset claimable at once for its next stage; a thumbnail or poster is published
+  (``publish.py``), and a backfill does both at once. ``attempts`` returns to 0.
+- ``unsupported``: the stage, and for a probe or a backfill every later stage, becomes
+  ``unsupported``.
 - ``changed``: the entry is re-discovered at once (``discovery.rediscover_entry``). A new
   fingerprint resets the asset; a gone entry parks it; an identical fingerprint is a failure
   (``source_changed``) so a source the processor can never match cannot loop (Task 3 review,
   I3).
 - ``failed`` / ``timeout``, and results the worker rejects (``output_invalid``): one more
-  consecutive failure. Below :data:`QUARANTINE_AFTER` the stage is ``failed`` and retried at
-  ``now + backoff`` (exponential, with jitter); at 3 the stage (for a probe, every stage) is
-  ``quarantined`` and is never retried for this fingerprint. ``interrupted`` (the processor
-  died with the job) counts too.
+  consecutive failure. Below :data:`QUARANTINE_AFTER` the stage (for a backfill, the probe) is
+  ``failed`` and retried at ``now + backoff`` (exponential, with jitter); at 3 the stage (for a
+  probe or a backfill, every stage) is ``quarantined`` and is never retried for this
+  fingerprint. ``interrupted`` (the processor died with the job) counts too.
 - Environmental failures (:data:`ENVIRONMENT_CODES`: the source volume, a missing tool, the
   sandbox, publishing or the processor itself) are not the file's fault: they never count
   toward quarantine. Each one increments the asset's own ``environment_failures``, and the
@@ -88,7 +97,7 @@ PROCESSOR_WIDE_CODES: Final = frozenset({
 INTERACTIVE_RETRY_CODES: Final = ENVIRONMENT_CODES | frozenset({
     MediaErrorCode.INTERRUPTED.value,
 })
-STAGE_OPERATIONS: Final = frozenset({"probe", "thumbnail", "poster"})
+STAGE_OPERATIONS: Final = frozenset({"probe", "thumbnail", "poster", "backfill"})
 REQUEST_OPERATIONS: Final[Mapping[str, protocol.Op]] = {
     "preview": "preview", "transcode": "transcode",
 }
@@ -112,7 +121,18 @@ _TERMINAL: Final = (StageState.UNSUPPORTED, StageState.QUARANTINED)
 
 
 def next_operation(row: Mapping[str, Any]) -> protocol.Op | None:
-    """The stage a leased asset needs next, or ``None`` when nothing is left."""
+    """The stage a leased asset needs next, or ``None`` when nothing is left.
+
+    A pristine asset (every stage ``pending``) gets one ``backfill`` job; once anything has
+    failed, or the probe is done, the stages run one at a time.
+    """
+    pristine = (
+        row["probe_state"] == StageState.PENDING
+        and row["thumbnail_state"] == StageState.PENDING
+        and (row["kind"] != MediaKind.VIDEO or row["poster_state"] == StageState.PENDING)
+    )
+    if pristine:
+        return "backfill"
     if row["probe_state"] in _WORK_STATES:
         return "probe"
     if row["probe_state"] != StageState.READY:
@@ -136,19 +156,42 @@ def output_bytes(op: str, duration_ms: int | None) -> int:
     return min(TRANSCODE_MAX_BYTES, max(TRANSCODE_MIN_BYTES, seconds * TRANSCODE_BYTES_PER_SECOND))
 
 
-def job_limits(op: str, policy: MediaPolicy, duration_ms: int | None) -> protocol.Limits:
-    stage = policy.limits_for(op)
-    wall = stage.timeout_seconds
-    if op == "transcode":
-        wall = protocol.transcode_wall_seconds(duration_ms, stage.timeout_seconds)
+def protocol_kind(kind: str) -> protocol.MediaKind:
+    return "photo" if kind == MediaKind.PHOTO else "video"
+
+
+def job_limits(
+    op: str, policy: MediaPolicy, duration_ms: int | None, *, kind: str | None = None,
+) -> protocol.Limits:
+    """A job's limits from the policy; a backfill (``kind`` required) gets both its stages'.
+
+    A backfill's wall clock is the probe's plus its rendition's, its memory the larger of the
+    two, and its output bound and CPU factor its rendition's, so a file that fits each stage
+    alone fits the combined job.
+    """
+    if op == "backfill":
+        if kind not in MediaKind.values:
+            raise protocol.ProtocolError  # a backfill job needs the asset's kind
+        rendition = protocol.BACKFILL_RENDITIONS[protocol_kind(str(kind))]
+        probe, stage = policy.limits_for("probe"), policy.limits_for(rendition)
+        wall = probe.timeout_seconds + stage.timeout_seconds
+        memory = max(probe.memory_bytes, stage.memory_bytes)
+        written = output_bytes(rendition, duration_ms)
+        factor = _CPU_FACTOR[rendition]
+    else:
+        stage = policy.limits_for(op)
+        wall = stage.timeout_seconds
+        if op == "transcode":
+            wall = protocol.transcode_wall_seconds(duration_ms, stage.timeout_seconds)
+        memory, written, factor = stage.memory_bytes, output_bytes(op, duration_ms), _CPU_FACTOR[op]
     wall_minimum, wall_maximum = protocol.LIMIT_BOUNDS["wall_seconds"]
     wall = min(max(wall, wall_minimum), wall_maximum)
     cpu_maximum = protocol.LIMIT_BOUNDS["cpu_seconds"][1]
     return protocol.Limits(
         wall_seconds=wall,
-        cpu_seconds=min(cpu_maximum, wall * _CPU_FACTOR[op]),
-        memory_bytes=stage.memory_bytes,
-        output_bytes=output_bytes(op, duration_ms),
+        cpu_seconds=min(cpu_maximum, wall * factor),
+        memory_bytes=memory,
+        output_bytes=written,
     )
 
 
@@ -174,7 +217,11 @@ class DerivativeIdentity:
 def derivative_identities(
     fingerprint: str, op: protocol.Op, params: protocol.Params,
 ) -> tuple[DerivativeIdentity, ...]:
-    """The key of every derivative an operation writes for one source fingerprint."""
+    """The key of every derivative an operation writes for one source fingerprint.
+
+    For a backfill job, pass its rendition (``protocol.rendition_op``): its outputs are that
+    operation's, under the same keys.
+    """
     digest = params_digest(derivative_parameters(op, params))
     return tuple(
         DerivativeIdentity(
@@ -200,16 +247,17 @@ def build_job(
 ) -> protocol.Job:
     """A validated processor job (raises ``ProtocolError``); its id is never reused."""
     device, inode, size, mtime_ns = identity
+    media_kind = protocol_kind(kind)
     job = protocol.Job(
         id=secrets.token_hex(16),
         op=op,
-        kind="photo" if kind == MediaKind.PHOTO else "video",
+        kind=media_kind,
         lane="interactive" if lane == Lane.INTERACTIVE else "background",
         input=protocol.SourceInput(
             slot=slot, path=path, device=device, inode=inode, size=size, mtime_ns=mtime_ns,
         ),
-        params=protocol.DEFAULT_PARAMS[op],
-        limits=job_limits(op, policy, duration_ms),
+        params=protocol.default_params(op, media_kind),
+        limits=job_limits(op, policy, duration_ms, kind=media_kind),
     )
     return protocol.check_job(job)
 
@@ -283,15 +331,18 @@ def is_counted(code: str) -> bool:
 
 
 def _stage_columns(op: str, kind: str, *, all_stages: bool) -> tuple[str, ...]:
-    if op == "probe" and not all_stages:
+    """The stages a result changes: its own, or with ``all_stages`` every one it ends.
+
+    A backfill's own stage is the probe (a counted failure falls back to the separate
+    stages); it ends every stage, like a probe.
+    """
+    probing = op in protocol.METADATA_OPS
+    if probing and not all_stages:
         return ("probe_state",)
-    if op == "probe":
-        columns: tuple[str, ...] = ("probe_state", "thumbnail_state")
-    elif op == "thumbnail":
-        columns = ("thumbnail_state",)
-    else:
-        columns = ("thumbnail_state",)
-    if kind == MediaKind.VIDEO and op in ("probe", "poster"):
+    columns: tuple[str, ...] = ("probe_state", "thumbnail_state") if probing else (
+        "thumbnail_state",
+    )
+    if kind == MediaKind.VIDEO and op in ("probe", "poster", "backfill"):
         columns += ("poster_state",)
     return columns
 
@@ -361,13 +412,28 @@ def stage_ready_update(op: str, kind: str, *, now: datetime) -> dict[str, Any]:
     return values
 
 
+def backfill_ready_update(
+    metadata: protocol.Metadata, kind: str, *, mtime_ns: Any, now: datetime,
+) -> dict[str, Any]:
+    """The asset columns a published backfill sets: the probe's and its rendition's at once.
+
+    ``publish.record_publications`` writes them in the transaction that records the
+    derivatives, so the metadata, the timeline key and every stage become ready together.
+    """
+    rendition = protocol.BACKFILL_RENDITIONS[protocol_kind(kind)]
+    values = metadata_columns(metadata, mtime_ns=mtime_ns)
+    values.update(stage_ready_update(rendition, kind, now=now))
+    values.update(probe_state=StageState.READY, processor_version=protocol.PROCESSOR_VERSION)
+    return values
+
+
 def record_unsupported(
     lease: AssetLease, op: str, kind: str, code: str, *, now: datetime,
 ) -> bool:
     values: dict[str, Any] = dict.fromkeys(
         _stage_columns(op, kind, all_stages=True), StageState.UNSUPPORTED,
     )
-    if op == "probe":
+    if op in protocol.METADATA_OPS:
         values["processor_version"] = protocol.PROCESSOR_VERSION
     return MediaAsset.objects.filter(fenced(lease, now=now)).update(
         **values,

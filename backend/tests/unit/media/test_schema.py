@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from aegis_apps.common.database_privileges import MANAGED_TABLE_COLUMNS
 from aegis_apps.media.enums import (
     CapturedAtSource,
@@ -11,7 +13,13 @@ from aegis_apps.media.enums import (
     SortSource,
     StageState,
 )
-from aegis_apps.media.models import ASSET_NEEDS_WORK, MediaAsset, MediaDerivative
+from aegis_apps.media.models import (
+    ASSET_NEEDS_WORK,
+    BACKFILL_CANDIDATE,
+    PARKED_UNTIL,
+    MediaAsset,
+    MediaDerivative,
+)
 from django.db import models
 from django.db.migrations.loader import MigrationLoader
 
@@ -69,6 +77,14 @@ def test_timeline_and_leasing_indexes_have_the_planned_keys() -> None:
     )
     assert work.condition == literal_work_predicate
     assert literal_work_predicate == ASSET_NEEDS_WORK
+    backfill = _index(MediaAsset, "media_asset_backfill_idx")
+    assert backfill.fields == ["root", "-mtime_ns", "-entry"]
+    assert backfill.condition == (
+        literal_work_predicate
+        & models.Q(lane="background")
+        & models.Q(next_attempt_at__lt=PARKED_UNTIL)
+    ) == BACKFILL_CANDIDATE
+    assert datetime(9999, 1, 1, tzinfo=UTC) == PARKED_UNTIL
     lru = _index(MediaDerivative, "media_derivative_lru_idx")
     assert lru.fields == ["last_access_at", "id"]
     assert tuple(lru.include) == ("bytes",)

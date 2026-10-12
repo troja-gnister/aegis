@@ -18,7 +18,8 @@ processor can rename, chmod or replace anything there.
 
   - opens ``done/<id>`` with ``O_DIRECTORY|O_NOFOLLOW|O_NONBLOCK`` (a symlink, FIFO or file is
     refused without blocking) and lists at most a few names: exactly ``result.json`` plus the
-    outputs ``protocol.OP_OUTPUTS`` derives from the dispatched operation;
+    outputs ``protocol.job_outputs`` derives from the dispatched operation and kind (a
+    backfill's are its rendition's, and its ``ok`` result must carry metadata, like a probe's);
   - reads ``result.json`` from a descriptor (regular file, one link, at most
     ``MAX_RESULT_BYTES``) and decodes it with ``protocol.decode_result`` against the
     dispatched job, then checks the id, the output names and the metadata again here;
@@ -437,11 +438,11 @@ class Scratch:
                 raise ResultRejected("malformed") from None
             if result.id != job.id:
                 raise ResultRejected("job_mismatch")
-            specs = protocol.OP_OUTPUTS[job.op] if result.status == "ok" else ()
+            specs = protocol.job_outputs(job.op, job.kind) if result.status == "ok" else ()
             if tuple(output.name for output in result.outputs) != tuple(
                 spec.name for spec in specs
             ) or (result.metadata is not None) != (
-                result.status == "ok" and job.op == "probe"
+                result.status == "ok" and job.op in protocol.METADATA_OPS
             ):
                 raise ResultRejected("op_mismatch")
             if names != {protocol.RESULT_FILE, *(spec.filename for spec in specs)}:

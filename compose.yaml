@@ -208,12 +208,15 @@ services:
   # database setting. It shares nothing with the media worker but the scratch volume, and
   # `aegisctl mounts render` binds the roots into it read-only, as into the other readers.
   # Its bounds follow the processor's own limits: AEGIS_MEDIA_PROCESSOR_CONCURRENCY (default
-  # 2) children at a time, each under its stage's RLIMIT_AS, the largest being
-  # AEGIS_MEDIA_TRANSCODE_MEMORY_MB (default 3072). Memory is the concurrency times that
-  # budget plus 1 GiB for the loop, the job children and /tmp; two CPUs, while the children
-  # also run at nice 10; 256 tasks for the children's and tools' threads. Raise these
-  # together with the concurrency or the stage budgets. Docker refuses `cpus: 2` on a host
-  # with fewer than two CPUs; lower it there.
+  # 4) children at a time, each under its stage's RLIMIT_AS, the largest being
+  # AEGIS_MEDIA_TRANSCODE_MEMORY_MB (default 3072; background jobs stay within 1536). Memory
+  # is the concurrency times that budget plus 1 GiB for the loop, the job children and /tmp:
+  # sized for each child's budget (each ffmpeg or ffprobe a child starts gets the same
+  # address-space limit), and a cap, not a reservation, since resident memory stays far below
+  # those address-space limits. Four CPUs, while the children also run at nice 10; 256 tasks
+  # for the children's and tools' threads.
+  # Raise these together with the concurrency or the stage budgets. Docker refuses `cpus: 4`
+  # on a host with fewer than four CPUs; lower it there.
   media-processor:
     image: aegis-media
     build:
@@ -232,8 +235,8 @@ services:
     # The loop is a subreaper of its own; the init reaps whatever escapes it at PID 1.
     init: true
     pids_limit: 256
-    mem_limit: 7g
-    cpus: 2
+    mem_limit: 13g
+    cpus: 4
     volumes:
       - media-scratch:/srv/aegis/scratch
     restart: unless-stopped

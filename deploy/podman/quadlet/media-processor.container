@@ -32,10 +32,10 @@ SecurityLabelType=@@READER_TYPE@@
 # creator's level, so the containers exchange files on shared volumes, while every other
 # container's own level keeps it out.
 SecurityLabelLevel=@@LABEL_LEVEL@@
-# compose.yaml's bounds, documented there: tasks and memory for two children at their
+# compose.yaml's bounds, documented there: tasks and memory for four children at their
 # largest stage budget.
 PidsLimit=256
-Memory=7g
+Memory=13g
 
 [Service]
 # Like compose's unless-stopped: retry without limit, backing off from 5s to Docker's 1min cap
@@ -44,9 +44,9 @@ Restart=on-failure
 RestartSec=5
 RestartSteps=8
 RestartMaxDelaySec=60
-# compose.yaml's two CPUs. Quadlet has no CPU key and the units never pass raw Podman
+# compose.yaml's four CPUs. Quadlet has no CPU key and the units never pass raw Podman
 # arguments, so systemd bounds the unit's cgroup, which holds the container's.
-CPUQuota=200%
+CPUQuota=400%
 
 [Install]
 WantedBy=default.target

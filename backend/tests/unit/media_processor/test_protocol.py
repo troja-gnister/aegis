@@ -50,9 +50,10 @@ VIDEO = SourceInput("synthetic", b"clips/\xffraw name.MOV", 2049, 78, 99, -5)
 
 
 def job(op: str = "thumbnail", **changes: Any) -> Job:
-    source = PHOTO if op in ("thumbnail", "preview", "probe") else VIDEO
-    kind = "photo" if source is PHOTO else "video"
-    params = DEFAULT_PARAMS[op]  # type: ignore[index]
+    source = PHOTO if op in ("thumbnail", "preview", "probe", "backfill") else VIDEO
+    kind = changes.get("kind", "photo" if source is PHOTO else "video")
+    source = PHOTO if kind == "photo" else VIDEO
+    params = protocol.default_params(op, kind)  # type: ignore[arg-type]
     base = Job(JOB_ID, op, kind, "background", source, params, LIMITS)  # type: ignore[arg-type]
     return replace(base, **changes)
 
@@ -85,7 +86,9 @@ THUMBNAIL = Output("thumbnail", "webp", 2048, 300, 400)
 # -- jobs ----------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("op", ["probe", "thumbnail", "preview", "poster", "transcode"])
+@pytest.mark.parametrize("op", [
+    "probe", "thumbnail", "preview", "poster", "transcode", "backfill",
+])
 def test_jobs_round_trip_for_every_operation(op: str) -> None:
     value = job(op, kind="video", input=VIDEO) if op == "probe" else job(op)
 
@@ -128,6 +131,45 @@ def test_output_names_and_formats_are_fixed_per_operation() -> None:
     }
     assert OP_OUTPUTS["transcode"][0].content_type == "video/mp4"
     assert OP_OUTPUTS["poster"][1].content_type == "image/webp"
+
+
+def test_a_backfill_job_has_its_renditions_params_and_outputs() -> None:
+    assert protocol.BACKFILL_RENDITIONS == {"photo": "thumbnail", "video": "poster"}
+    assert {"probe", "backfill"} == protocol.METADATA_OPS
+    assert protocol.rendition_op("backfill", "photo") == "thumbnail"
+    assert protocol.rendition_op("backfill", "video") == "poster"
+    assert protocol.rendition_op("preview", "photo") == "preview"
+    assert protocol.job_outputs("backfill", "photo") == OP_OUTPUTS["thumbnail"]
+    assert protocol.job_outputs("backfill", "video") == OP_OUTPUTS["poster"]
+    assert protocol.default_params("backfill", "photo") == THUMBNAIL_PARAMS
+    assert protocol.default_params("backfill", "video") == POSTER_PARAMS
+    assert "backfill" not in OP_OUTPUTS and "backfill" not in DEFAULT_PARAMS
+    for kind in ("photo", "video"):
+        value = job("backfill", kind=kind)
+        assert value.kind == kind and decode_job(encode_job(value)) == value
+        assert document(value)["params"] == params_document(
+            protocol.default_params("backfill", kind),
+        )
+
+
+def test_backfill_params_must_be_those_of_its_kind() -> None:
+    for value in (
+        job("backfill", kind="photo", params=POSTER_PARAMS),
+        job("backfill", kind="video", params=THUMBNAIL_PARAMS),
+        job("backfill", kind="photo", params=protocol.PROBE_PARAMS),
+        job("backfill", kind="photo", params=ImageParams(max_edge=4097, quality=75)),
+    ):
+        with pytest.raises(ProtocolError):
+            encode_job(value)
+    photo, video = document(job("backfill", kind="photo")), document(job("backfill", kind="video"))
+    for parsed, params in ((photo, video["params"]), (video, photo["params"]),
+                           (photo, {}), (video, {})):
+        with pytest.raises(ProtocolError):
+            decode_job(raw(parsed | {"params": params}))
+    with pytest.raises(ProtocolError):
+        decode_job(raw(photo | {"kind": "video"}))
+    with pytest.raises(ProtocolError):
+        decode_job(raw(photo | {"kind": "audio"}))
 
 
 def test_extension_allowlists_match_the_media_app() -> None:
@@ -485,6 +527,59 @@ def test_transcode_bounds_follow_the_long_and_short_edges() -> None:
     for width, height in ((1920, 1920), (2160, 1080), (1080, 2160)):
         with pytest.raises(ProtocolError):
             encode_result(ok(Output("transcode", "mp4", 100, width, height)), transcode_job)
+
+
+POSTER_PAIR = (
+    Output("thumbnail", "webp", 10, 400, 225), Output("poster", "webp", 20, 2048, 1152),
+)
+VIDEO_METADATA = metadata(
+    orientation=None, captured_at_source="container", duration_ms=12_345, video_codec="h264",
+    audio_codec="aac", container="mp4", camera_make=None, camera_model=None,
+)
+
+
+def test_backfill_results_carry_the_metadata_and_their_renditions_outputs() -> None:
+    photo, video = job("backfill", kind="photo"), job("backfill", kind="video")
+    photo_result = ok(THUMBNAIL, meta=metadata())
+    video_result = ok(*POSTER_PAIR, meta=VIDEO_METADATA)
+
+    assert decode_result(encode_result(photo_result, photo), photo) == photo_result
+    assert decode_result(encode_result(video_result, video), video) == video_result
+    assert protocol.output_edge_bounds(photo) == {"thumbnail": (400, 400)}
+    assert protocol.output_edge_bounds(video) == {
+        "thumbnail": (400, 400), "poster": (2048, 2048),
+    }
+    for status, code in (("unsupported", "no_video_stream"), ("failed", "decode_failed"),
+                         ("changed", "source_changed"), ("timeout", "timeout")):
+        failure = Result(JOB_ID, status, code, None, ())  # type: ignore[arg-type]
+        assert decode_result(encode_result(failure, video), video) == failure
+
+
+@pytest.mark.parametrize("name,result,kind", [
+    ("photo without metadata", ok(THUMBNAIL), "photo"),
+    ("photo without its thumbnail", ok(meta=metadata()), "photo"),
+    ("photo with a poster pair", ok(*POSTER_PAIR, meta=metadata()), "photo"),
+    ("photo with a preview", ok(Output("preview", "webp", 10, 2048, 1536), meta=metadata()),
+     "photo"),
+    ("photo thumbnail above its edge", ok(Output("thumbnail", "webp", 10, 401, 300),
+                                          meta=metadata()), "photo"),
+    ("photo with video metadata", ok(THUMBNAIL, meta=VIDEO_METADATA), "photo"),
+    ("video without metadata", ok(*POSTER_PAIR), "video"),
+    ("video with one frame", ok(POSTER_PAIR[0], meta=VIDEO_METADATA), "video"),
+    ("video frames reversed", ok(*POSTER_PAIR[::-1], meta=VIDEO_METADATA), "video"),
+    ("video with EXIF metadata", ok(*POSTER_PAIR, meta=metadata()), "video"),
+    ("failure with metadata", Result(JOB_ID, "failed", "decode_failed", metadata(), ()),
+     "photo"),
+], ids=lambda value: value if isinstance(value, str) else "")
+def test_hostile_backfill_results_are_refused(name: str, result: Result, kind: str) -> None:
+    bound = job("backfill", kind=kind)
+
+    with pytest.raises(ProtocolError):
+        encode_result(result, bound)
+    unbound = encode_result(result) if result.status == "ok" else None
+    if unbound is not None:
+        with pytest.raises(ProtocolError):
+            decode_result(unbound, bound)
 
 
 def test_probe_results_require_metadata_and_no_outputs() -> None:
