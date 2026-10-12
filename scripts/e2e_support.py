@@ -1,11 +1,15 @@
 """Private generated inputs and bounded diagnostics for disposable browser tests."""
 from __future__ import annotations
 
+import base64
+import binascii
 import contextlib
+import functools
 import hashlib
 import http.cookiejar
 import json
 import os
+import re
 import secrets
 import stat
 import subprocess
@@ -21,6 +25,7 @@ from aegisctl.container_engine import (
     compose_command,
     compose_environment,
     container_command,
+    local_environment,
     selected_engine,
 )
 from aegisctl.container_launch import controlled_container_argv
@@ -61,6 +66,78 @@ DIRECTORY_MTIME_NS = 1_600_000_000_000_000_000
 BULK_FILES = 590
 LARGE_FILE_BYTES = 1_500_000
 INDEX_WAIT_SECONDS = 240
+# Decodable synthetic media, generated at e2e time and never committed. The photos come from
+# the locked Pillow and pillow-heif while the sources are created; the clips come from the
+# aegis-media image the harness builds, after the build and before any mount or service.
+# Distinctive coordinates: the browser journeys prove they never surface (spec M5).
+GPS_LATITUDE = (12.0, 34.0, 56.789)
+GPS_LONGITUDE = (98.0, 7.0, 54.321)
+VIDEO_FIXTURES = ("clip.mp4", "clip-hevc.mov")
+DIGEST_FIXTURE = "roots/alice/photo.JPG"
+MEDIA_IMAGE = "aegis-media"
+MEDIA_FIXTURE_LABEL = "aegis.test.media-fixtures"
+# Real clips are tens of KB; staying far below 1 MB keeps them out of the Phase 2A size filter.
+MAX_VIDEO_BYTES = 256 << 10
+MAX_VIDEO_OUTPUT_BYTES = 1 << 20
+VIDEO_TIMEOUT_SECONDS = 300
+MEDIA_WAIT_SECONDS = 180
+# Every generated fixture (by display name) and the thumbnail states its real processing settles
+# in; frontend/e2e/phase2c.spec.ts expects the same. The truncated JPEG's header decodes, so its
+# probe succeeds and its thumbnail fails (and stays failed while it is retried, then quarantined).
+MEDIA_SETTLED: dict[str, tuple[str, ...]] = {
+    "photo.JPG": ("ready",),
+    "phone.heic": ("ready",),
+    "cover.png": ("ready",),
+    "beach.jpg": ("ready",),
+    "clip.mp4": ("ready",),
+    "clip-hevc.mov": ("ready",),
+    "corrupt.jpg": ("failed", "quarantined"),
+}
+_THUMBNAIL_STATES = ("pending", "ready", "failed", "unsupported", "quarantined")
+_IMAGE_ID = re.compile(r"(?:sha256:)?[0-9a-f]{64}")
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+# Runs in the media image with no network, no mount and a read-only root, as the fixed
+# unprivileged user 10001:10001 (whatever UID the e2e build gave the image's files; it writes
+# only its private 1777 tmpfs): ffmpeg's lavfi sources encode two 2 s clips into /tmp, and the
+# clips leave only as one JSON document on stdout, which nothing else writes to. Single-threaded
+# encoders keep the task count within the container's bound on any host.
+_VIDEO_SCRIPT = """\
+import base64
+import json
+import os
+import subprocess
+import sys
+import tempfile
+
+PICTURE = "testsrc2=size=160x120:rate=15:duration=2"
+TONE = "sine=frequency=440:sample_rate=48000:duration=2"
+CLIPS = {
+    "clip.mp4": [
+        "-c:v", "libx264", "-preset", "veryfast", "-profile:v", "high", "-threads", "1",
+        "-metadata", "creation_time=2024-06-15T09:30:00Z", "-movflags", "+faststart",
+        "-f", "mp4",
+    ],
+    "clip-hevc.mov": [
+        "-c:v", "libx265", "-tag:v", "hvc1",
+        "-x265-params", "log-level=error:pools=1:frame-threads=1",
+        "-metadata", "creation_time=2023-11-20T18:00:00Z", "-f", "mov",
+    ],
+}
+directory = tempfile.mkdtemp(dir="/tmp")
+document = {}
+for name, options in CLIPS.items():
+    target = os.path.join(directory, name)
+    subprocess.run(
+        ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+         "-filter_threads", "1", "-f", "lavfi", "-i", PICTURE, "-f", "lavfi", "-i", TONE,
+         "-map", "0:v", "-map", "1:a", "-pix_fmt", "yuv420p",
+         "-c:a", "aac", "-b:a", "48k", "-ac", "1", "-shortest", *options, target],
+        check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, timeout=120,
+    )
+    with open(target, "rb") as handle:
+        document[name] = base64.b64encode(handle.read()).decode("ascii")
+sys.stdout.write(json.dumps(document, sort_keys=True))
+"""
 _monotonic = time.monotonic
 _sleep = time.sleep
 
@@ -208,6 +285,10 @@ def _fixture_directory(ledger: dict[str, Any], path: Path, target: Path) -> None
     _record(ledger, path, target)
 
 
+def _fixed_directory_mtime(target: Path) -> None:
+    os.utime(target, ns=(DIRECTORY_MTIME_NS, DIRECTORY_MTIME_NS), follow_symlinks=False)
+
+
 def _fixture_file(
     ledger: dict[str, Any], path: Path, target: Path, content: bytes,
     mtime_ns: int = TIED_MTIME_NS,
@@ -226,9 +307,82 @@ def _fixture_file(
     _record(ledger, path, target)
 
 
+def _exif(*, captured: str, orientation: int | None = None, gps: bool = False) -> bytes:
+    from PIL import ExifTags, Image
+
+    exif = Image.Exif()
+    exif[ExifTags.Base.Make] = "Synthetic Camera Co."
+    exif[ExifTags.Base.Model] = "Model 7"
+    if orientation is not None:
+        exif[ExifTags.Base.Orientation] = orientation
+    # A wall-clock time without an offset: shown exactly as recorded.
+    exif.get_ifd(ExifTags.IFD.Exif)[ExifTags.Base.DateTimeOriginal] = captured
+    if gps:
+        location = exif.get_ifd(ExifTags.IFD.GPSInfo)
+        location[ExifTags.GPS.GPSLatitudeRef] = "N"
+        location[ExifTags.GPS.GPSLatitude] = GPS_LATITUDE
+        location[ExifTags.GPS.GPSLongitudeRef] = "E"
+        location[ExifTags.GPS.GPSLongitude] = GPS_LONGITUDE
+    return exif.tobytes()
+
+
+@functools.cache
+def _photo_fixtures() -> dict[str, bytes]:
+    """Small decodable synthetic photos, keyed by their path below Alice's root.
+
+    Encoded once per process: Pillow's JPEG and PNG output is reproducible, but an x265 HEIF
+    encoding need not be bit-identical across encoder runs, and repeated preparations in one
+    process (the harness tests) must produce identical manifests.
+    """
+    import io
+    import random
+
+    import pillow_heif
+    from PIL import Image
+
+    def two_tone(size: tuple[int, int], left: tuple[int, int, int],
+                 right: tuple[int, int, int]) -> Image.Image:
+        image = Image.new("RGB", size, right)
+        image.paste(left, (0, 0, size[0] // 2, size[1]))
+        return image
+
+    def encoded(image: Image.Image, kind: str, **options: Any) -> bytes:
+        buffer = io.BytesIO()
+        image.save(buffer, format=kind, **options)
+        return buffer.getvalue()
+
+    pillow_heif.register_heif_opener()
+    noise = Image.frombytes("RGB", (64, 64), random.Random(4096).randbytes(64 * 64 * 3))
+    complete = encoded(noise, "JPEG", quality=90)
+    return {
+        # Stored landscape, displayed portrait: EXIF orientation 6, a capture time and GPS.
+        "photo.JPG": encoded(
+            two_tone((160, 120), (230, 20, 20), (20, 20, 230)), "JPEG", quality=85,
+            exif=_exif(captured="2024:05:01 10:20:30", orientation=6, gps=True),
+        ),
+        "phone.heic": encoded(
+            two_tone((128, 96), (20, 160, 60), (240, 200, 40)), "HEIF", quality=50,
+            exif=_exif(captured="2023:12:24 18:30:00"),
+        ),
+        # The header decodes, the scan data stops halfway: its thumbnail fails.
+        "corrupt.jpg": complete[: len(complete) // 2],
+        # No EXIF at all: sorted and labeled by its modification time.
+        "albums/cover.png": encoded(two_tone((96, 64), (250, 250, 250), (40, 40, 40)), "PNG"),
+        "albums/2024/summer/beach.jpg": encoded(
+            two_tone((128, 96), (250, 220, 150), (40, 140, 220)), "JPEG", quality=85,
+            exif=_exif(captured="2024:07:14 12:00:00"),
+        ),
+    }
+
+
 def _create_sources(ledger: dict[str, Any], path: Path) -> None:
-    """Deterministic owned originals: >600 entries, nesting, ties, links and type hints."""
+    """Deterministic owned originals: >600 entries, nesting, ties, links and type hints.
+
+    The photos are real, decodable images; the clips are added after the image build
+    (:func:`media_fixtures`), before any mount preflight or service start.
+    """
     alice, bob = path / "roots/alice", path / "roots/bob"
+    photos = _photo_fixtures()
     sibling = path / "roots/alice-sibling"
     _fixture_directory(ledger, path, sibling)
     _fixture_file(ledger, path, sibling / "sibling-secret.txt", b"Never followed\n")
@@ -249,8 +403,9 @@ def _create_sources(ledger: dict[str, Any], path: Path) -> None:
         ("tie.txt", b"Lower-case tie\n"),
         ("README", b"No extension\n"),
         ("data.unknown", b"Literal unknown extension\n"),
-        ("photo.JPG", b"Synthetic image bytes\n"),
-        ("clip.mp4", b"Synthetic video bytes\n"),
+        ("photo.JPG", photos["photo.JPG"]),
+        ("phone.heic", photos["phone.heic"]),
+        ("corrupt.jpg", photos["corrupt.jpg"]),
         ("notes.md", b"# Synthetic notes\n"),
         ("résumé.pdf", b"Synthetic document bytes\n"),
     ):
@@ -269,8 +424,8 @@ def _create_sources(ledger: dict[str, Any], path: Path) -> None:
                   _utc_ns(2026, 3, 9, 3, 30))
     for directory in ("albums", "albums/2024", "albums/2024/summer", "empty-folder"):
         _fixture_directory(ledger, path, alice / directory)
-    _fixture_file(ledger, path, alice / "albums/cover.png", b"Synthetic cover\n")
-    _fixture_file(ledger, path, alice / "albums/2024/summer/beach.jpg", b"Synthetic beach\n")
+    for name in ("albums/cover.png", "albums/2024/summer/beach.jpg"):
+        _fixture_file(ledger, path, alice / name, photos[name])
     _fixture_file(ledger, path, alice / "albums/2024/summer/deep.txt", b"Nested fixture\n")
     link = alice / "link-outside"
     link.symlink_to("../alice-sibling/sibling-secret.txt")
@@ -283,8 +438,7 @@ def _create_sources(ledger: dict[str, Any], path: Path) -> None:
         key=lambda name: name.count("/"), reverse=True,
     )
     for name in directories:
-        os.utime(path / name, ns=(DIRECTORY_MTIME_NS, DIRECTORY_MTIME_NS),
-                 follow_symlinks=False)
+        _fixed_directory_mtime(path / name)
     # Owner-unreadable, so the indexer records a real permission failure.
     descriptor = os.open(locked, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
@@ -375,22 +529,46 @@ def source_snapshot(path: Path) -> dict[str, Any]:
     return entries
 
 
-def _write_source_manifest(ledger: dict[str, Any], path: Path) -> None:
-    target = path / SOURCE_MANIFEST
-    raw = json.dumps(
+def _source_manifest_bytes(path: Path) -> bytes:
+    return json.dumps(
         {"version": 1, "entries": source_snapshot(path)},
         sort_keys=True, separators=(",", ":"),
     ).encode("ascii") + b"\n"
+
+
+def _write_all(descriptor: int, raw: bytes) -> None:
+    view = memoryview(raw)
+    while view:
+        view = view[os.write(descriptor, view):]
+    os.fsync(descriptor)
+
+
+def _write_source_manifest(ledger: dict[str, Any], path: Path) -> None:
+    target = path / SOURCE_MANIFEST
+    raw = _source_manifest_bytes(path)
     descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
         os.fchmod(descriptor, 0o600)
-        view = memoryview(raw)
-        while view:
-            view = view[os.write(descriptor, view):]
-        os.fsync(descriptor)
+        _write_all(descriptor, raw)
     finally:
         os.close(descriptor)
     _record(ledger, path, target)
+
+
+def _rewrite_source_manifest(ledger: dict[str, Any], path: Path) -> None:
+    """Re-record the manifest in place (the recorded file) once the last source exists."""
+    target = path / SOURCE_MANIFEST
+    raw = _source_manifest_bytes(path)
+    descriptor = os.open(target, os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        opened = os.fstat(descriptor)
+        recorded = ledger["entries"].get(SOURCE_MANIFEST)
+        if not isinstance(recorded, list) or [opened.st_dev, opened.st_ino] != recorded[:2]:
+            raise ValueError("synthetic E2E source manifest is invalid")
+        os.ftruncate(descriptor, 0)
+        _write_all(descriptor, raw)
+    finally:
+        os.close(descriptor)
 
 
 def _load_source_manifest(path: Path, ledger: dict[str, Any]) -> tuple[dict[str, Any], bytes]:
@@ -430,6 +608,16 @@ def verify_sources(path: Path) -> dict[str, Any]:
         "sealed": sum(1 for value in recorded.values() if value.get("listed") is False),
         "manifest_sha256": hashlib.sha256(raw).hexdigest(),
     }
+
+
+def fixture_digest(path: Path) -> str:
+    """The recorded SHA-256 of the photo whose download the browser journeys compare."""
+    recorded, _ = _load_source_manifest(path, _load_ledger(path))
+    entry = recorded.get(DIGEST_FIXTURE)
+    digest = entry.get("sha256") if isinstance(entry, dict) else None
+    if not isinstance(digest, str) or _SHA256.fullmatch(digest) is None:
+        raise ValueError("synthetic E2E source manifest is invalid")
+    return digest
 
 
 def prepare(path: Path) -> None:
@@ -519,6 +707,12 @@ def _resource_rules(operation: str, token: str) -> tuple[ProjectResourceRule, ..
             ("com.docker.compose.oneoff", "True"),
             provenance,
         )),)
+    if operation == "media-fixtures":
+        # The one-off clip generator (media_fixtures), recorded only if --rm left it behind.
+        return (ProjectResourceRule("container", (
+            (MEDIA_FIXTURE_LABEL, "True"),
+            provenance,
+        )),)
     if operation != "up":
         raise ValueError("unknown E2E resource transition")
     services = (
@@ -571,6 +765,113 @@ def resources_cleanup(path: Path) -> None:
     cleanup_project_inventory(_stored_resources(ledger))
     ledger["resources"] = []
     _write_ledger(path, ledger)
+
+
+def _media_image_id() -> str:
+    """The exact local image the harness just built, so the run never resolves a tag later."""
+    try:
+        inspected = subprocess.run(
+            container_command("image", "inspect", "--format", "{{.Id}}", MEDIA_IMAGE),
+            check=False, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            timeout=30, env=local_environment(os.environ),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError("synthetic E2E media image is unavailable") from exc
+    identifier = inspected.stdout.strip()
+    if inspected.returncode or _IMAGE_ID.fullmatch(identifier) is None:
+        raise ValueError("synthetic E2E media image is unavailable")
+    return identifier
+
+
+def _video_fixture_command(path: Path, image: str) -> list[str]:
+    token = path.name
+    command: list[str] = controlled_container_argv(
+        container_command(
+            # No --rm: an engine-side automatic removal could race the exact-identity record.
+            # The container is recorded once it has stopped (or been abandoned) and removed by
+            # its immutable ID (media_fixtures).
+            "run", "--pull", "never",
+            "--name", f"{PROJECT}-media-fixtures-{token.removeprefix(f'{PROJECT}.')}",
+            # Project and provenance labels: resources-record admits it by these.
+            "--label", f"com.docker.compose.project={PROJECT}",
+            "--label", f"aegis.test.resource-token={token}",
+            "--label", f"{MEDIA_FIXTURE_LABEL}=True",
+            "--network", "none", "--read-only", "--user", "10001:10001",
+            "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+            "--memory", "1g", "--cpus", "1", "--pids-limit", "256",
+            "--tmpfs", "/tmp:size=64m,mode=1777,noexec,nosuid,nodev",
+            "--entrypoint", "python",
+            image, "-I", "-c", _VIDEO_SCRIPT,
+        ),
+        environment=os.environ, working_directory=REPOSITORY,
+    )
+    return command
+
+
+def _decoded_videos(raw: bytes) -> dict[str, bytes]:
+    if not raw or len(raw) > MAX_VIDEO_OUTPUT_BYTES:
+        raise ValueError("synthetic E2E media fixture output is invalid")
+    try:
+        document = json.loads(raw)
+        if not isinstance(document, dict) or sorted(document) != sorted(VIDEO_FIXTURES):
+            raise ValueError
+        videos = {
+            name: base64.b64decode(document[name], validate=True) for name in VIDEO_FIXTURES
+        }
+    except (ValueError, TypeError, binascii.Error) as exc:
+        raise ValueError("synthetic E2E media fixture output is invalid") from exc
+    for content in videos.values():
+        # Both are ISO base media files, whose first box is the file type box.
+        if not 1024 <= len(content) <= MAX_VIDEO_BYTES or content[4:8] != b"ftyp":
+            raise ValueError("synthetic E2E media fixture output is invalid")
+    return videos
+
+
+def media_fixtures(path: Path) -> None:
+    """Add the decodable clips, generated by the just-built media image, to Alice's root.
+
+    One container with no network, no mount, a read-only root and bounded memory, tasks and CPU
+    encodes them and prints them on stdout; only this process writes the source tree. Whatever
+    happens (exit, failure, timeout of the client), the container is then recorded and removed
+    by its immutable ID, so nothing can auto-remove it between the record and the removal. It
+    runs after the build and before anything reads the sources (mount preflight, labels,
+    services), so the source manifest is re-recorded here, once, in place.
+    """
+    ledger = _load_ledger(path)
+    verify_sources(path)
+    alice = path / "roots/alice"
+    if (
+        ledger["resources"]
+        or any(name in ledger["entries"] for name in GENERATED_NAMES[1:])
+        or any(_relative(path, alice / name) in ledger["entries"] for name in VIDEO_FIXTURES)
+    ):
+        raise ValueError("synthetic E2E media fixtures are out of order")
+    image = _media_image_id()
+    try:
+        generated = subprocess.run(
+            _video_fixture_command(path, image), check=False, stdin=subprocess.DEVNULL,
+            capture_output=True, timeout=VIDEO_TIMEOUT_SECONDS,
+            env=local_environment(os.environ),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError("synthetic E2E media fixture generation failed") from exc
+    finally:
+        resources_record(path, "media-fixtures")
+        # Exact removal of what was recorded (a still-running container is forced to stop);
+        # cleanup_project_inventory then proves the project has no resource left.
+        resources_cleanup(path)
+    if generated.returncode:
+        raise ValueError("synthetic E2E media fixture generation failed")
+    videos = _decoded_videos(generated.stdout)
+    ledger = _load_ledger(path)
+    _validate_ledger(path, ledger)
+    for name in VIDEO_FIXTURES:
+        _fixture_file(ledger, path, alice / name, videos[name])
+    _fixed_directory_mtime(alice)
+    _write_ledger(path, ledger)
+    _rewrite_source_manifest(ledger, path)
+    _validate_ledger(path, ledger)
+    verify_sources(path)
 
 
 def _targets(path: Path, ledger: dict[str, Any], names: list[str]) -> list[Path]:
@@ -804,8 +1105,8 @@ def _csrf(opener: urllib.request.OpenerDirector, base: str) -> str:
     return token
 
 
-def _index_states(base: str, username: str, password: str) -> list[dict[str, Any]]:
-    """Every authorized root's real status; one reused session per synthetic user."""
+def _session(base: str, username: str, password: str) -> urllib.request.OpenerDirector:
+    """One reused, signed-in session per synthetic user (closed by _close_index_sessions)."""
     opener = _INDEX_SESSIONS.get(username)
     if opener is None:
         opener = urllib.request.build_opener(
@@ -817,17 +1118,30 @@ def _index_states(base: str, username: str, password: str) -> list[dict[str, Any
         if status != 200:
             raise ValueError("synthetic E2E index status request failed")
         _INDEX_SESSIONS[username] = opener
+    return opener
+
+
+def _root_ids(opener: urllib.request.OpenerDirector, base: str) -> list[str]:
     status, payload = _api(opener, base, "GET", "/api/v1/roots")
     roots = payload.get("roots") if isinstance(payload, dict) else None
     if status != 200 or not isinstance(roots, list):
         raise ValueError("synthetic E2E index status request failed")
-    statuses = []
+    identifiers = []
     for root in roots:
         identifier = root.get("id") if isinstance(root, dict) else None
         if not isinstance(identifier, str) or len(identifier) != 36 or not all(
             character in "0123456789abcdef-" for character in identifier
         ):
             raise ValueError("synthetic E2E index status request failed")
+        identifiers.append(identifier)
+    return identifiers
+
+
+def _index_states(base: str, username: str, password: str) -> list[dict[str, Any]]:
+    """Every authorized root's real status; one reused session per synthetic user."""
+    opener = _session(base, username, password)
+    statuses = []
+    for identifier in _root_ids(opener, base):
         status, value = _api(opener, base, "GET", f"/api/v1/roots/{identifier}/index-status")
         if status != 200 or not isinstance(value, dict):
             raise ValueError("synthetic E2E index status request failed")
@@ -870,15 +1184,20 @@ def _close_index_sessions(base: str) -> None:
             _api(opener, base, "POST", "/api/v1/auth/logout", token=_csrf(opener, base))
 
 
-def index_wait(path: Path) -> None:
-    """Bounded wait for the real indexer, observed only through the status API."""
-    path = checked_directory(str(path))
-    recorded, _ = _load_source_manifest(path, _load_ledger(path))
+def _public_base() -> str:
     base = os.environ.get("AEGIS_PUBLIC_URL", "")
     if not base.startswith("http://127.0.0.1:") or not base.removeprefix(
         "http://127.0.0.1:",
     ).isdecimal():
         raise ValueError("synthetic E2E index status request failed")
+    return base
+
+
+def index_wait(path: Path) -> None:
+    """Bounded wait for the real indexer, observed only through the status API."""
+    path = checked_directory(str(path))
+    recorded, _ = _load_source_manifest(path, _load_ledger(path))
+    base = _public_base()
     deadline = _monotonic() + INDEX_WAIT_SECONDS
     try:
         for username, variable in (("alice", "E2E_ALICE_PASSWORD"), ("bob", "E2E_BOB_PASSWORD")):
@@ -905,6 +1224,59 @@ def index_wait(path: Path) -> None:
         _close_index_sessions(base)
 
 
+def _media_states(base: str, password: str) -> dict[str, str]:
+    """Thumbnail state per display name on Alice's one root, from her real timeline."""
+    opener = _session(base, "alice", password)
+    identifiers = _root_ids(opener, base)
+    if len(identifiers) != 1:
+        raise ValueError("synthetic E2E media status request failed")
+    status, page = _api(
+        opener, base, "GET", f"/api/v1/roots/{identifiers[0]}/timeline?limit=120",
+    )
+    items = page.get("items") if isinstance(page, dict) else None
+    if status != 200 or not isinstance(items, list):
+        raise ValueError("synthetic E2E media status request failed")
+    states: dict[str, str] = {}
+    for item in items:
+        name = item.get("displayName") if isinstance(item, dict) else None
+        media = item.get("media") if isinstance(item, dict) else None
+        state = media.get("thumbnail") if isinstance(media, dict) else None
+        if isinstance(name, str) and state in _THUMBNAIL_STATES:
+            states[name] = state
+    return states
+
+
+def _media_summary(states: dict[str, str]) -> str:
+    """Counts per fixed state vocabulary over the expected fixtures; never names."""
+    observed = [states.get(name, "missing") for name in MEDIA_SETTLED]
+    return ",".join(
+        f"{state}:{observed.count(state)}"
+        for state in (*_THUMBNAIL_STATES, "missing") if state in observed
+    )
+
+
+def media_wait(path: Path) -> None:
+    """Bounded wait for the media backfill of every generated fixture, through the real API."""
+    checked_directory(str(path))
+    base = _public_base()
+    password = os.environ.get("E2E_ALICE_PASSWORD", "")
+    if not password:
+        raise ValueError("synthetic E2E media status request failed")
+    deadline = _monotonic() + MEDIA_WAIT_SECONDS
+    try:
+        while True:
+            states = _media_states(base, password)
+            if all(states.get(name) in settled for name, settled in MEDIA_SETTLED.items()):
+                return
+            if _monotonic() >= deadline:
+                print(f"AEGIS_E2E media-wait states={_media_summary(states)}",
+                      file=sys.stderr, flush=True)
+                raise ValueError("synthetic E2E media did not settle")
+            _sleep(2)
+    finally:
+        _close_index_sessions(base)
+
+
 def controlled_compose(arguments: list[str]) -> int:
     environment = compose_environment(os.environ)
     command = controlled_container_argv(
@@ -916,17 +1288,19 @@ def controlled_compose(arguments: list[str]) -> int:
 
 DIRECTORY_ACTIONS = {
     "prepare": prepare,
+    "media-fixtures": media_fixtures,
     "record-generated": record_generated,
     "prepare-sources": prepare_sources,
     "prepare-runtime": prepare_runtime,
     "resources-check": resources_check,
     "resources-cleanup": resources_cleanup,
     "index-wait": index_wait,
+    "media-wait": media_wait,
     "cleanup": cleanup,
 }
 ACTIONS = (
     "controlled-compose", "check-compose", "sanitize-logs", "resources-record",
-    "sources-verify", *DIRECTORY_ACTIONS,
+    "sources-verify", "fixture-digest", *DIRECTORY_ACTIONS,
 )
 # The exact constant refusals raised by this harness and aegisctl.container_resources.
 # Any other message, even of these types, is never published.
@@ -960,6 +1334,12 @@ _PUBLIC_REFUSALS: dict[type[BaseException], frozenset[str]] = {
         "synthetic E2E resource ledger is invalid",
         "synthetic E2E index did not settle",
         "synthetic E2E index status request failed",
+        "synthetic E2E media did not settle",
+        "synthetic E2E media fixture generation failed",
+        "synthetic E2E media fixture output is invalid",
+        "synthetic E2E media fixtures are out of order",
+        "synthetic E2E media image is unavailable",
+        "synthetic E2E media status request failed",
         "synthetic E2E runtime preparation failed",
         "synthetic E2E secret has unsafe mode",
         "synthetic E2E source fixture changed",
@@ -1038,13 +1418,18 @@ def main(arguments: list[str]) -> int:
                     "entries", "files", "directories", "symlinks", "sealed", "manifest_sha256",
                 )
             ), flush=True)
+        elif action == "fixture-digest":
+            # Not secret: the browser runner compares a downloaded original with it.
+            print(fixture_digest(checked_directory(arguments[1])), flush=True)
         elif action in DIRECTORY_ACTIONS:
             DIRECTORY_ACTIONS[action](checked_directory(arguments[1]))
         else:
             raise ValueError("unknown E2E support action")
     except Exception as error:
         if os.environ.get("GITHUB_ACTIONS") == "true":
-            print(refusal_annotation(action, error), flush=True)
+            # The harness captures fixture-digest's stdout; its refusal must stay visible.
+            stream = sys.stderr if action == "fixture-digest" else sys.stdout
+            print(refusal_annotation(action, error), file=stream, flush=True)
         raise
     return 0
 

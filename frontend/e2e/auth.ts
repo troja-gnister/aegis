@@ -54,3 +54,37 @@ export async function submitAdminLogin(page: Page, username: string, password: s
     await page.waitForTimeout(LOGIN_RATE_WAIT_MS);
   }
 }
+
+/** A CSRF token for API calls made with the browser context's own cookie jar. */
+export async function csrfToken(page: Page): Promise<string> {
+  const response = await page.request.get("/api/v1/auth/csrf");
+  expect(response.status()).toBe(200);
+  const {csrfToken: token} = await response.json() as {csrfToken: string};
+  return token;
+}
+
+/** Ends the browser context's session through the API, out of band of the page (as another tab would). */
+export async function apiSignOut(page: Page) {
+  const response = await page.request.post("/api/v1/auth/logout", {
+    headers: {"X-CSRFToken": await csrfToken(page)},
+  });
+  expect(response.status()).toBe(204);
+}
+
+/**
+ * Signs in through the API into the browser context's cookie jar, out of band of the page.
+ * Waits out only the gateway rate limit.
+ */
+export async function apiSignIn(page: Page, username: string, password: string) {
+  for (let attempt = 1; ; attempt += 1) {
+    const response = await page.request.post("/api/v1/auth/login", {
+      headers: {"X-CSRFToken": await csrfToken(page)},
+      data: {username, password},
+    });
+    if (response.status() !== 503 || attempt === LOGIN_ATTEMPTS) {
+      expect(response.status(), "Credential endpoint status").toBe(200);
+      return;
+    }
+    await page.waitForTimeout(LOGIN_RATE_WAIT_MS);
+  }
+}

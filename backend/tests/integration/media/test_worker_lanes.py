@@ -117,6 +117,36 @@ def test_the_background_pipeline_probes_then_builds_thumbnails_and_posters(
     assert worker.dispatches == {}
 
 
+def test_a_short_discovery_interval_finds_files_indexed_after_a_pass(
+    library: Library, tmp_path: Path,
+) -> None:
+    # A test stack starts the worker before the indexer has catalogued its library: with the
+    # production hour between passes, files indexed after the first pass would wait that long.
+    worker, _, clock = make_worker(tmp_path, environ={
+        "AEGIS_MEDIA_DISCOVERY_INTERVAL_SECONDS": "5",
+        "AEGIS_MEDIA_ROOTS_REFRESH_SECONDS": "5",
+    })
+
+    def finish_pass() -> None:
+        worker.tick()
+        for _ in range(20):
+            if not worker.discovery.active:
+                return
+            clock.advance(0.5)
+            worker.tick()
+        raise AssertionError("the discovery pass did not finish")
+
+    finish_pass()
+    assert worker.discovery.next_pass_at == pytest.approx(clock() + 5.0)
+    entry = library.photo()
+    clock.advance(4.0)
+    worker.tick()
+    assert not MediaAsset.objects.filter(pk=entry.pk).exists()
+    clock.advance(1.0)
+    finish_pass()
+    assert MediaAsset.objects.filter(pk=entry.pk).exists()
+
+
 def test_jobs_name_the_file_by_slot_and_raw_relative_path(
     library: Library, tmp_path: Path,
 ) -> None:

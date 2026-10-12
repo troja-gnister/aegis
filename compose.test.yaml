@@ -43,6 +43,11 @@ services:
     restart: "no"
     labels:
       aegis.test.resource-token: "${AEGIS_TEST_RESOURCE_TOKEN:?AEGIS_TEST_RESOURCE_TOKEN is required}"
+    # scripts/test-e2e.sh shortens both so a fresh synthetic library gets its thumbnails during
+    # the run; unset (benchmarks, verification), they are the production defaults.
+    environment:
+      AEGIS_MEDIA_DISCOVERY_INTERVAL_SECONDS: "${AEGIS_MEDIA_DISCOVERY_INTERVAL_SECONDS:-3600}"
+      AEGIS_MEDIA_ROOTS_REFRESH_SECONDS: "${AEGIS_MEDIA_ROOTS_REFRESH_SECONDS:-60}"
   media-processor:
     restart: "no"
     labels:

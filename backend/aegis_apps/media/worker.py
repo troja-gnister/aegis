@@ -19,7 +19,9 @@ One single-threaded loop, with one database connection, drives the whole pipelin
      probe) run through the generic ``_execute_claim``.
    - The **background lane**: fenced asset leases (``leasing.py``), probe first, then
      thumbnail or poster.
-4. runs one bounded **discovery** batch (``discovery.py``), **eviction** above the budget
+4. runs one bounded **discovery** batch (``discovery.py``; a pass every
+   ``AEGIS_MEDIA_DISCOVERY_INTERVAL_SECONDS``, an hour by default, over the active roots it
+   re-reads every ``AEGIS_MEDIA_ROOTS_REFRESH_SECONDS``), **eviction** above the budget
    (``eviction.py``) and one **recovery** step (``recovery.py``);
 5. publishes a **heartbeat** whose metrics are counts and one error code, never a name or a
    path.
@@ -75,7 +77,7 @@ from aegis_apps.operations.leases import (
 from aegis_apps.operations.models import UNCONFIGURED_MANIFEST_IDENTITY, Job
 from aegis_apps.operations.services import validate_authorization_snapshot
 
-from .config import MediaPolicy
+from .config import ROOTS_REFRESH, MediaPolicy
 from .discovery import Discovery, active_roots, catalog_file, is_parked, rediscover_entry
 from .dispatch import CollectedResult, ResultRejected, Scratch, ScratchUnavailable
 from .enums import DerivativeState, MediaErrorCode, MediaKind, StageState
@@ -129,7 +131,8 @@ IDLE_TICK_SECONDS: Final = 1.0
 QUEUE_GRACE_SECONDS: Final = 120.0
 RESULT_GRACE_SECONDS: Final = 60.0
 ASSET_RENEW_SECONDS: Final = 60.0
-ROOTS_REFRESH_SECONDS: Final = 60.0
+# The default of AEGIS_MEDIA_ROOTS_REFRESH_SECONDS; the worker uses its policy's value.
+ROOTS_REFRESH_SECONDS: Final = float(ROOTS_REFRESH[1])
 METRICS_SECONDS: Final = 60.0
 EVICTION_SECONDS: Final = 60.0
 DISCOVERY_PACE_SECONDS: Final = 0.1
@@ -265,7 +268,11 @@ class MediaWorker:
         self.capacity = policy.processor_concurrency + 1
         self.background_capacity = policy.processor_concurrency
         self.dispatches: dict[str, Dispatch] = {}
-        self.discovery = Discovery(batch=policy.discovery_batch, clock=monotonic)
+        self.discovery = Discovery(
+            batch=policy.discovery_batch,
+            interval_seconds=float(policy.discovery_interval_seconds),
+            clock=monotonic,
+        )
         self.recovery = RecoverySweep(store, clock=monotonic)
         self.roots: dict[uuid.UUID, str] = {}
         self.last_error: str | None = None
@@ -385,7 +392,7 @@ class MediaWorker:
         if identity != self.identity.manifest_identity:
             raise RuntimeError("media manifest changed")
         self.roots = active_roots(manifest)
-        self._roots_at = now_m + ROOTS_REFRESH_SECONDS
+        self._roots_at = now_m + float(self.policy.roots_refresh_seconds)
 
     # -- results ------------------------------------------------------------------------------
 

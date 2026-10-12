@@ -8,10 +8,10 @@ phase=config
 annotate_phase() {
     local name=$1
     case "$name" in
-        config|verify-diagnostics|prepare|resources-check|prepare-sources|build|\
-        mounts-preflight|mounts-render|record-generated|prepare-runtime|check-compose|\
-        up|resources-record|bootstrap-admin|seed|index-wait|playwright|resources-cleanup|\
-        sources-verify|cleanup) ;;
+        config|verify-diagnostics|prepare|resources-check|build|media-fixtures|\
+        prepare-sources|mounts-preflight|mounts-render|record-generated|prepare-runtime|\
+        check-compose|up|resources-record|bootstrap-admin|seed|index-wait|media-wait|\
+        fixture-digest|playwright|resources-cleanup|sources-verify|cleanup) ;;
         *) name=unknown ;;
     esac
     if [[ "${GITHUB_ACTIONS-}" == true ]]; then
@@ -123,6 +123,11 @@ export AEGIS_DB_NAME=aegis
 export AEGIS_DB_HOST=postgres
 export AEGIS_DB_PORT=5432
 export DJANGO_SETTINGS_MODULE=aegis.settings.test
+# Short media passes for the synthetic library (compose.test.yaml): the worker starts before
+# the seed and the first scan, so with the production hour between discovery passes the
+# fixture's thumbnails would never appear during a run. Other stacks keep the defaults.
+export AEGIS_MEDIA_DISCOVERY_INTERVAL_SECONDS=5
+export AEGIS_MEDIA_ROOTS_REFRESH_SECONDS=5
 unset COMPOSE_FILE COMPOSE_PROFILES AEGIS_MOUNT_MANIFEST AEGIS_MOUNT_MANIFEST_SHA256
 
 compose_options=(--env-file /dev/null \
@@ -182,10 +187,15 @@ trap 'exit 143' TERM
 uv run python scripts/e2e_support.py prepare "$work_dir"
 phase=resources-check
 uv run python scripts/e2e_support.py resources-check "$work_dir"
-phase=prepare-sources
-uv run python scripts/e2e_support.py prepare-sources "$work_dir"
 phase=build
 "${compose_base[@]}" build
+# The decodable clips come from the media image just built: one recorded --rm container with
+# no network, no mount and a read-only root prints them, and only the harness writes them into
+# the sources, whose manifest is final before anything reads them.
+phase=media-fixtures
+uv run python scripts/e2e_support.py media-fixtures "$work_dir"
+phase=prepare-sources
+uv run python scripts/e2e_support.py prepare-sources "$work_dir"
 phase=mounts-preflight
 uv run aegisctl mounts preflight --config "$work_dir/mounts.toml" --manifest "$work_dir/mounts.manifest.json"
 phase=mounts-render
@@ -242,9 +252,19 @@ phase=index-wait
 E2E_ALICE_PASSWORD="$E2E_ALICE_PASSWORD" E2E_BOB_PASSWORD="$E2E_BOB_PASSWORD" \
     uv run python scripts/e2e_support.py index-wait "$work_dir"
 
+# Then, bounded too, for the media backfill of every generated fixture (thumbnails ready, the
+# corrupt photo failed), so a stuck processor fails this phase instead of every browser journey.
+phase=media-wait
+E2E_ALICE_PASSWORD="$E2E_ALICE_PASSWORD" \
+    uv run python scripts/e2e_support.py media-wait "$work_dir"
+
+# The download journey compares the original's bytes with the recorded source digest.
+phase=fixture-digest
+E2E_PHOTO_SHA256=$(uv run python scripts/e2e_support.py fixture-digest "$work_dir")
+
 # Credentials exist only in the browser runner process, never in command
 # arguments, browser storage, traces, reports, or production configuration.
-export E2E_ALICE_PASSWORD E2E_BOB_PASSWORD E2E_ADMIN_PASSWORD
+export E2E_ALICE_PASSWORD E2E_BOB_PASSWORD E2E_ADMIN_PASSWORD E2E_PHOTO_SHA256
 export E2E_BASE_URL="$AEGIS_PUBLIC_URL"
 phase=playwright
 npm --prefix frontend run test:e2e -- "${playwright_args[@]}"

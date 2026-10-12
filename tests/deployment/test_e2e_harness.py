@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 import re
@@ -7,6 +9,7 @@ import runpy
 import stat
 import subprocess
 import tempfile
+from collections.abc import Callable
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -85,6 +88,290 @@ def test_prepared_roots_are_gateway_readable_regardless_of_process_umask(
             SUPPORT["cleanup"](path)
     finally:
         os.umask(previous_umask)
+
+
+def test_prepared_photos_are_real_images_carrying_the_metadata_the_journeys_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pillow_heif
+    from PIL import ExifTags, Image
+
+    monkeypatch.setenv("AEGIS_CONTAINER_ENGINE", "docker")
+    path = private_e2e_directory()
+    try:
+        SUPPORT["prepare"](path)
+        alice = path / "roots/alice"
+        with Image.open(alice / "photo.JPG") as photo:
+            photo.load()
+            exif = photo.getexif()
+            assert (photo.format, photo.size) == ("JPEG", (160, 120))
+            assert exif[ExifTags.Base.Orientation] == 6
+            assert exif.get_ifd(ExifTags.IFD.Exif)[ExifTags.Base.DateTimeOriginal] == (
+                "2024:05:01 10:20:30"
+            )
+            location = exif.get_ifd(ExifTags.IFD.GPSInfo)
+            assert [float(value) for value in location[ExifTags.GPS.GPSLatitude]] == (
+                pytest.approx(list(SUPPORT["GPS_LATITUDE"]))
+            )
+        pillow_heif.register_heif_opener()
+        for name, kind, size in (
+            ("phone.heic", "HEIF", (128, 96)),
+            ("albums/cover.png", "PNG", (96, 64)),
+            ("albums/2024/summer/beach.jpg", "JPEG", (128, 96)),
+        ):
+            with Image.open(alice / name) as image:
+                image.load()
+                assert (image.format, image.size) == (kind, size)
+        with Image.open(alice / "corrupt.jpg") as corrupt:
+            # The header decodes; the scan data stops halfway.
+            assert corrupt.size == (64, 64)
+            with pytest.raises(OSError):
+                corrupt.load()
+        for name in ("photo.JPG", "phone.heic", "corrupt.jpg", "albums/cover.png"):
+            assert (alice / name).stat().st_size < 64 * 1024
+        # The clips come later, from the built media image (media-fixtures).
+        assert not any((alice / name).exists() for name in SUPPORT["VIDEO_FIXTURES"])
+    finally:
+        SUPPORT["cleanup"](path)
+
+
+MEDIA_IMAGE_ID = "sha256:" + "a" * 64
+
+
+def _clip(brand: bytes) -> bytes:
+    return b"\x00\x00\x00\x18ftyp" + brand + b"\x00" * 2048
+
+
+def _clip_output(clips: dict[str, bytes]) -> bytes:
+    return json.dumps({
+        name: base64.b64encode(content).decode("ascii") for name, content in clips.items()
+    }).encode("ascii")
+
+
+def _media_runner(
+    commands: list[list[str]], output: bytes, returncode: int = 0, *, timeout: bool = False,
+) -> Callable[..., subprocess.CompletedProcess[Any]]:
+    def run(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        del kwargs
+        commands.append(list(arguments))
+        if arguments[1:3] == ["image", "inspect"]:
+            return subprocess.CompletedProcess(arguments, 0, MEDIA_IMAGE_ID + "\n", "")
+        if timeout:
+            raise subprocess.TimeoutExpired(arguments, 300)
+        return subprocess.CompletedProcess(arguments, returncode, output, b"")
+    return run
+
+
+def _generator(path: Path) -> ProjectResource:
+    """The stopped clip generator as the engine reports it: labeled by run and purpose."""
+    identity = "media-fixture-container"
+    return ProjectResource("container", identity, identity, json.dumps(
+        {"Id": identity, "Name": identity, "Labels": {
+            "com.docker.compose.project": SUPPORT["PROJECT"],
+            "aegis.test.media-fixtures": "True",
+            "aegis.test.resource-token": path.name,
+        }}, sort_keys=True, separators=(",", ":"),
+    ))
+
+
+def _with_inventory(
+    monkeypatch: pytest.MonkeyPatch, resources: tuple[ProjectResource, ...] = (),
+) -> list[ProjectInventory]:
+    """The engine's project inventory, and every exact removal the harness asks for."""
+    removed: list[ProjectInventory] = []
+    support_globals = SUPPORT["resources_record"].__globals__
+    monkeypatch.setitem(
+        support_globals, "capture_project_inventory",
+        lambda project: ProjectInventory(project, resources),
+    )
+    monkeypatch.setitem(support_globals, "cleanup_project_inventory", removed.append)
+    return removed
+
+
+def test_media_fixtures_add_the_clips_from_a_mountless_offline_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AEGIS_CONTAINER_ENGINE", "docker")
+    path = private_e2e_directory()
+    clips = {"clip.mp4": _clip(b"isom"), "clip-hevc.mov": _clip(b"qt  ")}
+    commands: list[list[str]] = []
+    try:
+        SUPPORT["prepare"](path)
+        generator = _generator(path)
+        removed = _with_inventory(monkeypatch, (generator,))
+        monkeypatch.setattr(subprocess, "run", _media_runner(commands, _clip_output(clips)))
+
+        SUPPORT["media_fixtures"](path)
+
+        assert commands[0] == ["docker", "image", "inspect", "--format", "{{.Id}}", "aegis-media"]
+        (run,) = [command for command in commands if command[1] == "run"]
+        image = run.index(MEDIA_IMAGE_ID)
+        options = run[2:image]
+        assert run[image + 1:image + 3] == ["-I", "-c"]
+        assert "--read-only" in options
+        # Never auto-removed: it is recorded, then removed by its immutable ID.
+        assert "--rm" not in options
+        assert removed == [ProjectInventory(SUPPORT["PROJECT"], (generator,))]
+        for name, value in (("--network", "none"), ("--pull", "never"), ("--cap-drop", "ALL"),
+                            ("--entrypoint", "python"), ("--user", "10001:10001")):
+            assert options[options.index(name) + 1] == value
+        assert options[options.index("--tmpfs") + 1].startswith("/tmp:")
+        # No bind, volume, port, environment or extra privilege: only stdout comes back.
+        assert not {
+            "-v", "--volume", "--mount", "-p", "--publish", "-e", "--env", "--env-file",
+            "--cap-add", "--privileged", "--group-add",
+        } & set(options)
+        assert [options[index + 1] for index, option in enumerate(options)
+                if option == "--label"] == [
+            "com.docker.compose.project=aegis-phase1-e2e",
+            f"aegis.test.resource-token={path.name}",
+            "aegis.test.media-fixtures=True",
+        ]
+        alice = path / "roots/alice"
+        ledger = SUPPORT["_load_ledger"](path)
+        for name, content in clips.items():
+            assert (alice / name).read_bytes() == content
+            assert f"roots/alice/{name}" in ledger["entries"]
+        assert ledger["resources"] == []
+        assert alice.stat().st_mtime_ns == SUPPORT["DIRECTORY_MTIME_NS"]
+        # The manifest was re-recorded in place, so the sources verify with the clips.
+        summary = SUPPORT["verify_sources"](path)
+        recorded, _ = SUPPORT["_load_source_manifest"](path, ledger)
+        assert recorded["roots/alice/clip.mp4"]["sha256"] == hashlib.sha256(
+            clips["clip.mp4"],
+        ).hexdigest()
+        assert summary["files"] == sum(1 for value in recorded.values()
+                                       if value["kind"] == "file")
+        assert SUPPORT["fixture_digest"](path) == hashlib.sha256(
+            (alice / "photo.JPG").read_bytes(),
+        ).hexdigest()
+    finally:
+        SUPPORT["cleanup"](path)
+
+
+@pytest.mark.parametrize("failure", ("rendered", "returncode", "output", "magic", "large",
+                                     "timeout"))
+def test_media_fixtures_refuse_late_runs_failures_and_invalid_clips_and_remove_the_container(
+    monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    monkeypatch.setenv("AEGIS_CONTAINER_ENGINE", "docker")
+    path = private_e2e_directory()
+    clips = {"clip.mp4": _clip(b"isom"), "clip-hevc.mov": _clip(b"qt  ")}
+    output = _clip_output(clips)
+    if failure == "output":
+        output = _clip_output({"clip.mp4": clips["clip.mp4"]})
+    elif failure == "magic":
+        output = _clip_output({**clips, "clip.mp4": b"\x00" * 4096})
+    elif failure == "large":
+        # Above the bound, so a clip can never reach Phase 2A's 1 MB size filter.
+        output = _clip_output({**clips, "clip.mp4": _clip(b"isom") + b"\x00" * (256 << 10)})
+    commands: list[list[str]] = []
+    messages = {
+        "rendered": "out of order", "returncode": "generation failed",
+        "output": "output is invalid", "magic": "output is invalid", "large": "output is invalid",
+        "timeout": "generation failed",
+    }
+    try:
+        SUPPORT["prepare"](path)
+        if failure == "rendered":
+            complete_runtime_inputs(path)
+        generator = _generator(path)
+        removed = _with_inventory(monkeypatch, (generator,))
+        monkeypatch.setattr(subprocess, "run", _media_runner(
+            commands, output, 1 if failure == "returncode" else 0, timeout=failure == "timeout",
+        ))
+        with pytest.raises(ValueError, match=messages[failure]):
+            SUPPORT["media_fixtures"](path)
+        if failure == "rendered":
+            assert commands == [] and removed == []
+        else:
+            # Whatever happened to the run, its container is removed by exact identity.
+            assert removed == [ProjectInventory(SUPPORT["PROJECT"], (generator,))]
+        alice = path / "roots/alice"
+        assert not any((alice / name).exists() for name in clips)
+        assert SUPPORT["_load_ledger"](path)["resources"] == []
+        SUPPORT["verify_sources"](path)
+    finally:
+        SUPPORT["cleanup"](path)
+
+
+def test_media_wait_is_bounded_counts_states_and_publishes_only_fixed_refusals(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = private_e2e_directory()
+    clock = iter(range(0, 10_000, 30))
+    support = SUPPORT["media_wait"].__globals__
+    monkeypatch.setitem(support, "_monotonic", lambda: next(clock))
+    monkeypatch.setitem(support, "_sleep", lambda seconds: None)
+    states = dict.fromkeys(SUPPORT["MEDIA_SETTLED"], "ready") | {
+        "clip-hevc.mov": "pending", "corrupt.jpg": "pending",
+    }
+    del states["phone.heic"]
+    monkeypatch.setitem(support, "_media_states", lambda base, password: states)
+    monkeypatch.setenv("E2E_ALICE_PASSWORD", "private-sentinel")
+    monkeypatch.setenv("AEGIS_PUBLIC_URL", "http://127.0.0.1:18080")
+    try:
+        with pytest.raises(ValueError, match="did not settle") as raised:
+            SUPPORT["media_wait"](path)
+        # Counts per fixed state only: never a name, a value or a credential.
+        assert capsys.readouterr().err == (
+            "AEGIS_E2E media-wait states=pending:2,ready:4,missing:1\n"
+        )
+        assert SUPPORT["refusal_annotation"]("media-wait", raised.value) == (
+            "::error title=e2e-support media-wait::"
+            "ValueError: synthetic E2E media did not settle"
+        )
+    finally:
+        path.rmdir()
+
+
+def test_media_wait_returns_once_every_fixture_settled(monkeypatch: pytest.MonkeyPatch) -> None:
+    path = private_e2e_directory()
+    settled = dict.fromkeys(SUPPORT["MEDIA_SETTLED"], "ready") | {"corrupt.jpg": "quarantined"}
+    reports = iter([{}, settled | {"corrupt.jpg": "pending"}, settled])
+    observed: list[str] = []
+    support = SUPPORT["media_wait"].__globals__
+    monkeypatch.setitem(support, "_sleep", lambda seconds: None)
+
+    def report(base: str, password: str) -> dict[str, str]:
+        observed.append(base)
+        return next(reports)
+
+    monkeypatch.setitem(support, "_media_states", report)
+    monkeypatch.setenv("E2E_ALICE_PASSWORD", "a")
+    monkeypatch.setenv("AEGIS_PUBLIC_URL", "http://127.0.0.1:18080")
+    try:
+        SUPPORT["media_wait"](path)
+        assert observed == ["http://127.0.0.1:18080"] * 3
+    finally:
+        path.rmdir()
+
+
+def test_media_states_read_alice_timeline_thumbnail_states_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = "0" * 8 + "-0000-0000-0000-" + "0" * 12
+    routes: list[str] = []
+
+    def api(opener: object, base: str, method: str, route: str, *args: Any) -> tuple[int, Any]:
+        del opener, base, args
+        routes.append(f"{method} {route}")
+        if route == "/api/v1/roots":
+            return 200, {"roots": [{"id": root}]}
+        return 200, {"items": [
+            {"displayName": "photo.JPG", "media": {"thumbnail": "ready"}},
+            {"displayName": "corrupt.jpg", "media": {"thumbnail": "failed"}},
+            {"displayName": "notes.md", "media": None},
+            {"displayName": "odd.jpg", "media": {"thumbnail": "<script>"}},
+        ]}
+
+    support = SUPPORT["media_wait"].__globals__
+    monkeypatch.setitem(support, "_session", lambda base, username, password: object())
+    monkeypatch.setitem(support, "_api", api)
+    assert SUPPORT["_media_states"]("http://127.0.0.1:18080", "a") == {
+        "photo.JPG": "ready", "corrupt.jpg": "failed",
+    }
+    assert routes == ["GET /api/v1/roots", f"GET /api/v1/roots/{root}/timeline?limit=120"]
 
 
 @pytest.mark.parametrize("directory", ("/", "/tmp", "/Users", "/srv/aegis"))
@@ -512,6 +799,58 @@ def test_e2e_reads_host_credentials_before_subordinate_ownership_preparation() -
     )
 
 
+def test_e2e_media_fixtures_follow_the_build_and_precede_every_source_reader() -> None:
+    script = (Path(__file__).resolve().parents[2] / "scripts/test-e2e.sh").read_text()
+
+    build = script.index('"${compose_base[@]}" build')
+    fixtures = script.index("e2e_support.py media-fixtures ")
+    assert script.index("e2e_support.py prepare ") < build < fixtures
+    for reader in ("e2e_support.py prepare-sources ", "aegisctl mounts preflight ",
+                   "aegisctl mounts render ", "controlled_compose up "):
+        assert fixtures < script.index(reader), reader
+    digest = script.index("E2E_PHOTO_SHA256=$(uv run python scripts/e2e_support.py fixture-digest ")
+    media_wait = script.index("e2e_support.py media-wait ")
+    assert script.index("e2e_support.py index-wait ") < media_wait < digest
+    assert digest < script.index("run test:e2e")
+    assert "export E2E_ALICE_PASSWORD E2E_BOB_PASSWORD E2E_ADMIN_PASSWORD E2E_PHOTO_SHA256" in (
+        script
+    )
+
+
+def test_only_the_e2e_harness_shortens_media_passes_within_their_bounds() -> None:
+    from aegis_apps.media.config import DISCOVERY_INTERVAL, ROOTS_REFRESH, MediaPolicy
+
+    environment = _compose_file("compose.test.yaml")["services"]["media"]["environment"]
+    script = (Path(__file__).resolve().parents[2] / "scripts/test-e2e.sh").read_text()
+    exported = {}
+    for name, default, _minimum, _maximum in (DISCOVERY_INTERVAL, ROOTS_REFRESH):
+        # Unset (benchmarks, verification), the overlay passes the production default.
+        assert environment[name] == f"${{{name}:-{default}}}"
+        match = re.search(rf"^export {name}=([0-9]+)$", script, re.MULTILINE)
+        assert match is not None, name
+        exported[name] = match.group(1)
+    policy = MediaPolicy.from_environ(exported)
+    assert (policy.discovery_interval_seconds, policy.roots_refresh_seconds) == (5, 5)
+    production = _compose_file("compose.yaml")["services"]["media"]["environment"]
+    assert not {name for name, *_ in (DISCOVERY_INTERVAL, ROOTS_REFRESH)} & set(production)
+
+
+def test_e2e_media_fixtures_are_generated_and_never_committed() -> None:
+    from aegis_apps.media.formats import MEDIA_EXTENSIONS
+
+    # Every extension the media allowlist (spec M4) recognizes.
+    suffixes = frozenset(f".{extension}" for extension in MEDIA_EXTENSIONS)
+    assert {".jpg", ".heic", ".mp4", ".mov"} <= suffixes
+    repository = Path(__file__).resolve().parents[2]
+    listed = subprocess.run(
+        ["git", "ls-files", "-z"], cwd=repository, check=True, capture_output=True, timeout=30,
+    ).stdout.split(b"\0")
+    tracked = [os.fsdecode(name) for name in listed if name]
+    assert tracked, "no tracked files found"
+    committed = [name for name in tracked if Path(name).suffix.lower() in suffixes]
+    assert committed == [], "media fixtures are generated at e2e time, never committed"
+
+
 class _ComposeLoader(yaml.SafeLoader):
     """Resource-free Compose YAML reader: merge tags only change override semantics."""
 
@@ -732,6 +1071,23 @@ def test_e2e_public_refusals_are_exactly_the_constant_raised_messages() -> None:
                 raised[node.exc.func.id].add(argument.value)
     public = SUPPORT["_PUBLIC_REFUSALS"]
     assert {kind.__name__: set(messages) for kind, messages in public.items()} == raised
+
+
+SKIP_CALL = re.compile(r"\.\s*(?:skip|fixme)\s*\(")
+
+
+def test_e2e_specs_never_skip_or_defer_a_journey() -> None:
+    specs = sorted((Path(__file__).resolve().parents[2] / "frontend/e2e").glob("*.spec.ts"))
+    assert specs, "no e2e specs found"
+    offenders = []
+    for spec in specs:
+        text = spec.read_text(encoding="utf-8")
+        for call in SKIP_CALL.finditer(text):
+            offenders.append(f"{spec.name}:{text.count(chr(10), 0, call.start()) + 1}")
+    assert offenders == [], (
+        "E2E journeys never skip themselves: a browser that lacks a capability takes an "
+        "explicit, asserted branch instead (HANDOFF: do not replace failures with skips)."
+    )
 
 
 @pytest.mark.parametrize("argument", ["--headed", "--repeat-each=100", "--grep=x", "../x.ts:1"])

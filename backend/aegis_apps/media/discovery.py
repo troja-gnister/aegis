@@ -30,7 +30,8 @@ PostgreSQL's usual brief ``KEY SHARE`` locks on the entry and the root, as any i
 
 A pass walks every active root (catalog phase, then the asset phase that parks), one bounded
 batch per call, and the next pass starts :data:`DISCOVERY_INTERVAL_SECONDS` (an hour) after it
-ends. ``DiscoveryCounts.created`` counts the rows offered to ``ON CONFLICT DO NOTHING``; a
+ends; the worker passes ``AEGIS_MEDIA_DISCOVERY_INTERVAL_SECONDS`` (that hour by default).
+``DiscoveryCounts.created`` counts the rows offered to ``ON CONFLICT DO NOTHING``; a
 concurrent insert by another worker is counted by both.
 :func:`rediscover_entry` re-checks one entry at once, for the processor's ``changed`` result.
 """
@@ -53,6 +54,7 @@ from aegis_apps.catalog.models import CatalogEntry
 from aegis_apps.roots.manifest import MountManifest
 from aegis_apps.roots.models import Root
 
+from .config import DISCOVERY_INTERVAL
 from .enums import DerivativeState, Lane, MediaKind, SortSource, StageState
 from .formats import MEDIA_EXTENSIONS, media_kind
 from .keys import fingerprint
@@ -60,8 +62,9 @@ from .leasing import PARKED_UNTIL
 from .models import MediaAsset, MediaDerivative
 from .sorting import modified_sort_at
 
-# A full pass reads every catalog row of every active root, so passes are an hour apart.
-DISCOVERY_INTERVAL_SECONDS: Final = 3_600.0
+# A full pass reads every catalog row of every active root, so passes are an hour apart
+# (the default of AEGIS_MEDIA_DISCOVERY_INTERVAL_SECONDS, defined once in config.py).
+DISCOVERY_INTERVAL_SECONDS: Final = float(DISCOVERY_INTERVAL[1])
 # Only these catalog columns are ever selected or filtered on (the media role's grant).
 _CATALOG_FIELDS: Final = (
     "id", "root_id", "kind", "type_hint", "source_state", "size", "mtime_ns", "device", "inode",

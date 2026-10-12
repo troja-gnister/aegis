@@ -14,6 +14,8 @@ export default defineConfig({
   retries: 0,
   workers: 1,
   reporter: [[fileURLToPath(new URL("./e2e/safe-reporter.ts", import.meta.url))]],
+  // Absolute, like the reporter, so configurations that spread this one still resolve it.
+  globalTeardown: fileURLToPath(new URL("./e2e/playback-record.ts", import.meta.url)),
   use: {
     baseURL,
     browserName: "chromium",

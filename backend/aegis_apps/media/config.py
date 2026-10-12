@@ -17,6 +17,11 @@ Limit = tuple[str, int, int, int]
 CACHE_BUDGET_GB: Final[Limit] = ("AEGIS_DERIVATIVES_CACHE_BUDGET_GB", 20, 1, 10_000)
 PROCESSOR_CONCURRENCY: Final[Limit] = ("AEGIS_MEDIA_PROCESSOR_CONCURRENCY", 2, 1, 16)
 DISCOVERY_BATCH: Final[Limit] = ("AEGIS_MEDIA_DISCOVERY_BATCH", 500, 50, 5_000)
+# A discovery pass reads every catalog row of every active root, so passes are an hour apart by
+# default; the worker re-reads the active roots every minute. Test stacks shorten both (the e2e
+# harness, through compose.test.yaml) so a fresh synthetic library is found within seconds.
+DISCOVERY_INTERVAL: Final[Limit] = ("AEGIS_MEDIA_DISCOVERY_INTERVAL_SECONDS", 3_600, 5, 86_400)
+ROOTS_REFRESH: Final[Limit] = ("AEGIS_MEDIA_ROOTS_REFRESH_SECONDS", 60, 5, 3_600)
 STAGE_LIMITS: Final[Mapping[str, tuple[Limit, Limit]]] = MappingProxyType({
     "probe": (
         ("AEGIS_MEDIA_PROBE_TIMEOUT_SECONDS", 30, 1, 600),
@@ -77,6 +82,8 @@ class MediaPolicy:
     cache_budget_gb: int
     processor_concurrency: int
     discovery_batch: int
+    discovery_interval_seconds: int
+    roots_refresh_seconds: int
     probe: StageLimits
     thumbnail: StageLimits
     preview: StageLimits
@@ -107,6 +114,8 @@ class MediaPolicy:
             cache_budget_gb=_bounded_integer(environ, CACHE_BUDGET_GB),
             processor_concurrency=_bounded_integer(environ, PROCESSOR_CONCURRENCY),
             discovery_batch=_bounded_integer(environ, DISCOVERY_BATCH),
+            discovery_interval_seconds=_bounded_integer(environ, DISCOVERY_INTERVAL),
+            roots_refresh_seconds=_bounded_integer(environ, ROOTS_REFRESH),
             probe=stages["probe"],
             thumbnail=stages["thumbnail"],
             preview=stages["preview"],

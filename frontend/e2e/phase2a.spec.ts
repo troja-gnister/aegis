@@ -1,5 +1,6 @@
 import {expect, type Locator, type Page} from "@playwright/test";
-import {requiredSecret, signIn, submitAdminLogin} from "./auth";
+import {requiredSecret, signIn} from "./auth";
+import {setRootGrant} from "./grants";
 import {test} from "./safe-test";
 
 // Real-stack journeys over the harness-owned synthetic source fixture. Every
@@ -99,37 +100,6 @@ async function scrollFiles(page: Page, position: "top" | "middle" | "bottom") {
   }, position);
 }
 
-/**
- * Changes Bob's group grant through the real Django admin form as the
- * synthetic superuser, in a separate browser context (its own cookie jar).
- */
-async function setBobGrant(page: Page, rootId: string, permissions: "0" | "1") {
-  const browser = page.context().browser();
-  if (!browser) throw new Error("Browser is unavailable");
-  const context = await browser.newContext({baseURL: process.env.E2E_BASE_URL ?? "http://127.0.0.1:18080"});
-  try {
-    const admin = await context.newPage();
-    const signedIn = await submitAdminLogin(
-      admin, "phase1-admin", requiredSecret("E2E_ADMIN_PASSWORD"), "/admin/roots/rootgrant/",
-    );
-    expect(signedIn.status()).toBe(302);
-    await expect(admin).toHaveURL(/\/admin\/roots\/rootgrant\/$/);
-    // Grants list their root by opaque ID; the group grant is the only one on Bob's root.
-    const rows = admin.locator("#result_list tbody tr").filter({hasText: rootId});
-    await expect(rows).toHaveCount(1);
-    await rows.locator('a[href$="/change/"]').first().click();
-    await expect(admin).toHaveURL(/\/admin\/roots\/rootgrant\/[0-9a-f-]{36}\/change\/$/);
-    await admin.locator("#id_permissions").fill(permissions);
-    const saved = admin.waitForResponse((response) => response.request().method() === "POST"
-      && /^\/admin\/roots\/rootgrant\/[0-9a-f-]{36}\/change\/$/.test(new URL(response.url()).pathname));
-    await admin.getByRole("button", {name: "Save", exact: true}).click();
-    expect((await saved).status()).toBe(302);
-    await expect(admin).toHaveURL(/\/admin\/roots\/rootgrant\/$/);
-  } finally {
-    await context.close();
-  }
-}
-
 test("Alice browses indexed files while Bob remains isolated", async ({page}) => {
   await signIn(page, "alice", requiredSecret("E2E_ALICE_PASSWORD"));
   await page.getByRole("link", {name: /Alice files/}).click();
@@ -156,7 +126,7 @@ test("real cursor paging beyond five windows and nested navigation restore", asy
   await expect(files(page).getByText("alice-only.txt", {exact: true})).toBeVisible();
   await expect(previous).toBeDisabled();
 
-  // 608 root entries are seven real 100-entry pages; the window keeps five.
+  // 611 root entries are seven real 100-entry pages; the window keeps five.
   for (let loaded = 2; loaded <= 7; loaded += 1) {
     const next = entriesResponse(page, (url) => url.searchParams.has("cursor"));
     await more.click();
@@ -234,7 +204,7 @@ test.describe("filters in a DST-observing browser time zone", () => {
       await dialog.getByLabel(".jpg", {exact: true}).check();
       await dialog.getByLabel(".pdf", {exact: true}).check();
     });
-    await expectOnlyRows(page, ["photo.JPG", "résumé.pdf"]);
+    await expectOnlyRows(page, ["corrupt.jpg", "photo.JPG", "résumé.pdf"]);
 
     await filterBy(page, async (dialog) => {
       await dialog.getByLabel("Minimum size", {exact: true}).fill("1");
@@ -455,7 +425,7 @@ test("late responses after logout, account switch and grant revocation stay priv
 
   // Revoking Bob's grant closes the open private view on its next request.
   try {
-    await setBobGrant(page, bobRoot, "0");
+    await setRootGrant(page, bobRoot, "0");
     await fileRow(page, "bob-only.txt").click();
     await expect(page.getByRole("heading", {name: "Sign in"})).toBeVisible();
     await expect(page.getByText(/bob-only\.txt|Bob files/)).toHaveCount(0);
@@ -463,6 +433,6 @@ test("late responses after logout, account switch and grant revocation stay priv
     await expect(page.getByRole("heading", {name: "No roots assigned"})).toBeVisible();
     await expect(page.getByText("Bob files")).toHaveCount(0);
   } finally {
-    await setBobGrant(page, bobRoot, "1");
+    await setRootGrant(page, bobRoot, "1");
   }
 });

@@ -54,7 +54,10 @@ def test_owned_source_fixture_is_large_nested_tied_and_recorded_before_mounting(
     bulk = [value["mtime_ns"] for key, value in entries.items() if "/bulk-" in key]
     assert len(bulk) >= 500 and len(set(bulk)) == 1
     names = {key.rsplit("/", 1)[-1] for key in alice}
-    assert {"README", "data.unknown", "photo.JPG", "clip.mp4", "large.bin"} <= names
+    assert {"README", "data.unknown", "photo.JPG", "phone.heic", "corrupt.jpg",
+            "large.bin"} <= names
+    # The clips are added after the image build (media-fixtures), never by prepare.
+    assert not names & set(SUPPORT["VIDEO_FIXTURES"])
     # The symlink names an unmounted synthetic sibling and is recorded, never followed.
     link = entries["roots/alice/link-outside"]
     assert link == {"kind": "symlink", "target": "../alice-sibling/sibling-secret.txt"}
@@ -308,7 +311,19 @@ def test_harness_waits_for_real_indexing_before_browsers_with_env_only_credentia
     assert "synthetic" not in calls[wait]
 
 
-@pytest.mark.parametrize("fail_at", ["index-wait", "run test:e2e", "up --build --wait"])
+def test_harness_waits_for_the_media_backfill_after_indexing_with_env_only_credentials(
+    tmp_path: Path,
+) -> None:
+    result, calls = _fake_harness(tmp_path, "")
+    assert result.returncode == 0
+    wait = _position(calls, "e2e_support.py media-wait ")
+    assert _position(calls, "e2e_support.py index-wait ") < wait < _position(calls, "run test:e2e")
+    assert calls[wait].endswith("|env")
+    assert "synthetic" not in calls[wait]
+
+
+@pytest.mark.parametrize("fail_at", ["index-wait", "media-wait", "run test:e2e",
+                                     "up --build --wait"])
 def test_failed_run_stops_workers_then_verifies_sources_before_fixture_cleanup(
     tmp_path: Path, fail_at: str,
 ) -> None:

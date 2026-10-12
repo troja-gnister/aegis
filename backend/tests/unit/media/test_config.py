@@ -9,6 +9,8 @@ BOUNDS = {
     "AEGIS_DERIVATIVES_CACHE_BUDGET_GB": (1, 10_000),
     "AEGIS_MEDIA_PROCESSOR_CONCURRENCY": (1, 16),
     "AEGIS_MEDIA_DISCOVERY_BATCH": (50, 5_000),
+    "AEGIS_MEDIA_DISCOVERY_INTERVAL_SECONDS": (5, 86_400),
+    "AEGIS_MEDIA_ROOTS_REFRESH_SECONDS": (5, 3_600),
     "AEGIS_MEDIA_PROBE_TIMEOUT_SECONDS": (1, 600),
     "AEGIS_MEDIA_PROBE_MEMORY_MB": (64, 4_096),
     "AEGIS_MEDIA_THUMBNAIL_TIMEOUT_SECONDS": (1, 900),
@@ -27,6 +29,8 @@ def test_media_policy_defaults() -> None:
         cache_budget_gb=20,
         processor_concurrency=2,
         discovery_batch=500,
+        discovery_interval_seconds=3_600,
+        roots_refresh_seconds=60,
         probe=StageLimits(timeout_seconds=30, memory_mb=1_024),
         thumbnail=StageLimits(timeout_seconds=60, memory_mb=1_536),
         preview=StageLimits(timeout_seconds=120, memory_mb=1_536),
@@ -36,6 +40,17 @@ def test_media_policy_defaults() -> None:
     assert policy.probe.memory_bytes == 1_024 * (1 << 20)
     # Posters run under the thumbnail limits: 1536 MiB of address space for ffmpeg and Pillow.
     assert policy.limits_for("poster").memory_bytes == 1_536 * (1 << 20)
+
+
+def test_default_intervals_are_the_discovery_and_worker_defaults() -> None:
+    from aegis_apps.media import worker
+    from aegis_apps.media.discovery import DISCOVERY_INTERVAL_SECONDS
+
+    policy = MediaPolicy.from_environ({})
+
+    # One definition (config.py); the module constants are views of it, unchanged in value.
+    assert policy.discovery_interval_seconds == DISCOVERY_INTERVAL_SECONDS == 3_600
+    assert policy.roots_refresh_seconds == worker.ROOTS_REFRESH_SECONDS == 60
 
 
 def test_media_policy_is_loaded_into_settings() -> None:
@@ -79,6 +94,8 @@ def test_media_policy_reads_explicit_values() -> None:
             "AEGIS_DERIVATIVES_CACHE_BUDGET_GB": "250",
             "AEGIS_MEDIA_PROCESSOR_CONCURRENCY": "4",
             "AEGIS_MEDIA_DISCOVERY_BATCH": "1000",
+            "AEGIS_MEDIA_DISCOVERY_INTERVAL_SECONDS": "5",
+            "AEGIS_MEDIA_ROOTS_REFRESH_SECONDS": "5",
             "AEGIS_MEDIA_TRANSCODE_TIMEOUT_SECONDS": "3600",
             "AEGIS_MEDIA_TRANSCODE_MEMORY_MB": "4096",
         }
@@ -87,6 +104,7 @@ def test_media_policy_reads_explicit_values() -> None:
     assert policy.cache_budget_gb == 250
     assert policy.processor_concurrency == 4
     assert policy.discovery_batch == 1000
+    assert (policy.discovery_interval_seconds, policy.roots_refresh_seconds) == (5, 5)
     assert policy.transcode == StageLimits(timeout_seconds=3600, memory_mb=4096)
 
 
