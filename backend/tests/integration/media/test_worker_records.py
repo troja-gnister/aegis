@@ -60,11 +60,15 @@ def store(tmp_path: Path) -> DerivativeStore:
     return DerivativeStore(str(root))
 
 
-def _claim(library: Library, *, video: bool = False, probed: bool = False) -> ClaimedAsset:
+def _claim(
+    library: Library, *, video: bool = False, probed: bool = False, **columns: Any,
+) -> ClaimedAsset:
     entry = library.video() if video else library.photo()
     discover_batch(library.root.pk, None, limit=500, now=timezone.now())
     if probed:
-        MediaAsset.objects.filter(pk=entry.pk).update(probe_state=StageState.READY)
+        columns["probe_state"] = StageState.READY
+    if columns:
+        MediaAsset.objects.filter(pk=entry.pk).update(**columns)
     claimed = claim_assets(uuid.uuid4(), limit=32, root_ids=[library.root.pk],
                            now=timezone.now())
     return next(item for item in claimed if item.lease.entry_id == entry.pk)
@@ -186,9 +190,17 @@ def test_failures_back_off_then_quarantine_at_three(library: Library) -> None:
 
 
 def test_a_poster_quarantine_ends_both_video_frames(library: Library) -> None:
-    claimed = _claim(library, video=True, probed=True)
-    record_failure(claimed.lease, "poster", "video", "decode_failed", attempts=2,
-                   now=timezone.now())
+    # Two counted poster failures already, each under its own claim: the third claim
+    # carries attempts == 2 and an attempt_token of at least 3.
+    claimed = _claim(
+        library, video=True, probed=True, attempts=2, attempt_token=2,
+        thumbnail_state=StageState.FAILED, poster_state=StageState.FAILED,
+        safe_error_code="decode_failed",
+    )
+    assert (claimed.row["attempts"], claimed.lease.attempt_token) == (2, 3)
+    outcome = record_failure(claimed.lease, "poster", "video", "decode_failed",
+                             attempts=claimed.row["attempts"], now=timezone.now())
+    assert outcome == "quarantined"
     asset = _asset(claimed.lease)
     assert (asset.probe_state, asset.thumbnail_state, asset.poster_state) == (
         StageState.READY, StageState.QUARANTINED, StageState.QUARANTINED,

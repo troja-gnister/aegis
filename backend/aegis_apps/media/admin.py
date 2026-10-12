@@ -58,6 +58,7 @@ class MediaAssetAdmin(ReadOnlyMediaAdmin):
         "lane",
         "attempts",
         "attempt_token",
+        "environment_failures",
         "next_attempt_at",
         "lease_owner",
         "lease_expires_at",

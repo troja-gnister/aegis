@@ -75,7 +75,11 @@ def _optional_regex(field: str, pattern: str) -> models.Q:
 
 
 def _dimensions_valid() -> models.Q:
+    # Both or neither. The IS NOT NULL terms matter: without them a NULL in one column
+    # makes the second branch NULL rather than false, and a CHECK accepts NULL.
     return models.Q(width__isnull=True, height__isnull=True) | models.Q(
+        width__isnull=False,
+        height__isnull=False,
         width__gte=1,
         width__lte=MAX_MEDIA_DIMENSION,
         height__gte=1,

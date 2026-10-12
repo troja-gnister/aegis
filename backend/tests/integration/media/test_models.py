@@ -337,6 +337,8 @@ def test_valid_derivatives_are_accepted(
         {"state": "pending"},
         {"state": "failed", "bytes": None},
         {"state": "failed", "bytes": None, "width": None},
+        {"state": "stale", "width": None},
+        {"state": "stale", "height": None},
     ],
 )
 def test_database_rejects_invalid_derivative_shapes(
