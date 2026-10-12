@@ -155,7 +155,7 @@ def _remove_image(tag: str) -> None:
         return
     labels = (info.get("Config") or {}).get("Labels") or {}
     assert labels.get(OWNER_LABEL) == tag, "refusing to remove an image this run did not build"
-    run_container([*CONTAINER_COMMAND, "image", "rm", tag], check=True, capture_output=True,
+    run_container([*CONTAINER_COMMAND, "image", "rm", "--no-prune", tag], check=True, capture_output=True,
                   timeout=120)
 
 

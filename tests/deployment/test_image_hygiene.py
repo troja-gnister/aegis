@@ -432,3 +432,25 @@ def test_the_root_dockerignore_is_the_only_ignore_file() -> None:
     assert DOCKERIGNORE.is_file()
     assert not (REPOSITORY / ".containerignore").exists()
     assert sorted((REPOSITORY / "docker").glob("*ignore")) == []
+
+
+# `image rm` without --no-prune also removes dangling parent images, which may predate the run
+# (build cache from earlier runs). Cleanup removes exact recorded identities only.
+# A recording fake that forwards its arguments (`*arguments`) is checked where it is used.
+IMAGE_REMOVAL = re.compile(r'"image",\s*"rm",(?!\s*(?:"--no-prune"|\*))|"rmi"')
+
+
+def test_test_and_harness_image_removals_never_prune_parents() -> None:
+    offenders = []
+    for directory in ("tests", "scripts"):
+        for path in sorted((REPOSITORY / directory).rglob("*.py")):
+            if path.name == Path(__file__).name:
+                continue
+            text = path.read_text(encoding="utf-8")
+            for match in IMAGE_REMOVAL.finditer(text):
+                line = text.count("\n", 0, match.start()) + 1
+                offenders.append(f"{path.relative_to(REPOSITORY)}:{line}")
+    assert offenders == [], (
+        "image removals in tests and harnesses must pass --no-prune, so they never remove "
+        f"dangling parent images that predate the run: {offenders}"
+    )

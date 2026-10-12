@@ -283,7 +283,9 @@ class FakeEngine:
             return 0, "".join(f"sha256:{identity}\n" for identity in listed), ""
         assert action == "rm", action
         self.removals.append(["image", "rm", *arguments])
-        (reference,) = arguments
+        # Removal must never prune dangling parents that predate the run.
+        assert arguments[:1] == ["--no-prune"], arguments
+        (reference,) = arguments[1:]
         identity = self.resolve_image(reference)
         if identity is None:
             return 1, "", "image not known"
@@ -945,7 +947,7 @@ def test_image_is_pinned_by_built_id_and_removed_exactly(harness: Harness) -> No
     assert pinned == built, "tests must receive the immutable built ID, not a tag"
     with pytest.raises(StopIteration):
         next(generator)
-    removal = ["image", "rm", built]
+    removal = ["image", "rm", "--no-prune", built]
     assert harness.fake.removals == [removal]
     assert built not in harness.fake.images and harness.fake.resolve_image(pinned) is None
     later = harness.fake.calls[harness.fake.calls.index(removal) + 1:]
@@ -988,7 +990,7 @@ def test_interrupted_build_records_identity_and_removes_it_exactly(harness: Harn
     with pytest.raises(KeyboardInterrupt):
         next(generator)
     (built,) = harness.fake.built
-    assert harness.fake.removals == [["image", "rm", built]]
+    assert harness.fake.removals == [["image", "rm", "--no-prune", built]]
     assert built not in harness.fake.images
 
 
@@ -998,7 +1000,7 @@ def test_image_declaring_a_volume_is_refused_before_any_container(harness: Harne
     with pytest.raises(AssertionError, match="anonymous volumes"):
         next(generator)
     (built,) = harness.fake.built
-    assert harness.fake.removals == [["image", "rm", built]]
+    assert harness.fake.removals == [["image", "rm", "--no-prune", built]]
     assert harness.fake.launches == []
 
 

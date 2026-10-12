@@ -230,7 +230,7 @@ def _remove_owned_image(identity: str, tag: str) -> None:
             raise ContainerEngineError("test image identity was never recorded; tag retained")
         return
     _require_owned_image(identity, tag)
-    if runtime._engine("image", "rm", identity).returncode:
+    if runtime._engine("image", "rm", "--no-prune", identity).returncode:
         raise ContainerEngineError("exact owned test image removal failed")
     if identity in runtime._listed_images("--all") or runtime._listed_images(
         "--filter", f"reference={tag}",

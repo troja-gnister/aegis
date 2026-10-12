@@ -177,7 +177,7 @@ def _remove_owned_image(identity: str, tag: str) -> None:
             raise ContainerEngineError("test image identity was never recorded; tag retained")
         return
     _require_owned_image(identity, tag)
-    if _engine("image", "rm", identity).returncode:
+    if _engine("image", "rm", "--no-prune", identity).returncode:
         raise ContainerEngineError("exact owned test image removal failed")
     if identity in _listed_images("--all") or _listed_images("--filter", f"reference={tag}"):
         raise ContainerEngineError("owned test image absence is unproved")

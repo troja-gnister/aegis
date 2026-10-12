@@ -435,7 +435,7 @@ print('Installed wheel shared initialization: periodic and manual runtime login 
         if inspected.returncode == 0:
             info = json.loads(inspected.stdout)[0]
             assert info["Config"]["Labels"].get("aegis.verify.owner") == image_tag
-            run_container([*CONTAINER_COMMAND, "image", "rm", image_tag],
+            run_container([*CONTAINER_COMMAND, "image", "rm", "--no-prune", image_tag],
                            check=True, capture_output=True, timeout=30)
 
 
