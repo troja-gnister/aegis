@@ -243,6 +243,20 @@ def test_animated_gif_uses_its_first_frame(tmp_path: Path, roots: Path) -> None:
     assert dominant(rendered.getpixel((20, 20))) == "red"  # type: ignore[arg-type]
 
 
+def test_a_multi_picture_jpeg_opens_through_the_jpeg_decoder(tmp_path: Path, roots: Path) -> None:
+    frames = [Image.new("RGB", (40, 40), colour) for colour in ((230, 20, 20), (20, 230, 20))]
+    path = save_image(roots, b"stereo.jpg", frames[0], "MPO", save_all=True,
+                      append_images=frames[1:])
+    with Image.open(os.fsdecode(path)) as written:
+        assert written.format == "MPO"
+
+    result, directory = run_job(tmp_path, roots, make_job(roots, b"stereo.jpg", "thumbnail"))
+
+    assert result.status == "ok", result
+    rendered = open_output(directory, "thumbnail.webp").convert("RGB")
+    assert dominant(rendered.getpixel((20, 20))) == "red"  # type: ignore[arg-type]
+
+
 def test_palette_and_sixteen_bit_images_render(tmp_path: Path, roots: Path) -> None:
     save_image(roots, b"palette.png", Image.new("RGB", (50, 50), (10, 200, 10)).convert("P"),
                "PNG")

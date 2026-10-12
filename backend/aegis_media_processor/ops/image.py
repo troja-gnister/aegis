@@ -34,7 +34,10 @@ from ..protocol import (
 )
 from . import OperationError
 
-ALLOWED_FORMATS: Final = ("JPEG", "MPO", "PNG", "WEBP", "GIF", "HEIF", "AVIF", "BMP", "TIFF")
+# Pillow's open-format names. MPO has no opener of its own: the JPEG opener reads it and
+# returns an image whose format is "MPO", so it is allowed through "JPEG" (naming "MPO" here
+# would make ``Image.open`` raise KeyError for every non-JPEG file).
+ALLOWED_FORMATS: Final = ("JPEG", "PNG", "WEBP", "GIF", "HEIF", "AVIF", "BMP", "TIFF")
 _DRAFT_FORMATS: Final = frozenset({"JPEG", "MPO"})
 _SIXTEEN_BIT_MODES: Final = frozenset({"I", "I;16", "I;16L", "I;16B", "I;16N"})
 _MAX_ICC_BYTES: Final = 1 << 20
