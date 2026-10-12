@@ -1,5 +1,5 @@
 import {formatExactCount} from "./format";
-import type {EntryKind, FileFilters, SourceState} from "./types";
+import type {BrowseScope, EntryKind, FileFilters, SourceState} from "./types";
 
 export type FilterField = keyof Omit<FileFilters, "v">;
 export type SizeUnit = "B" | "KB" | "MB" | "GB" | "TB";
@@ -25,6 +25,11 @@ export const KIND_OPTIONS: readonly {value: EntryKind; label: string}[] = [
   {value: "file", label: "File"},
   {value: "symlink", label: "Symbolic link"},
   {value: "special", label: "Special entry"},
+];
+
+export const SCOPE_OPTIONS: readonly {value: BrowseScope; label: string}[] = [
+  {value: "directory", label: "This folder"},
+  {value: "root", label: "All folders"},
 ];
 
 export const AVAILABILITY_OPTIONS: readonly {value: SourceState; label: string}[] = [
@@ -79,6 +84,11 @@ export function removeFilter(
 
 export function activeFilterFields(filters: FileFilters): FilterField[] {
   return FILTER_FIELDS.filter((field) => filters[field] !== undefined);
+}
+
+/** The scope a route lists: a chosen root-wide scope applies only while filters are set. */
+export function listingScope(filters: FileFilters, scope: BrowseScope | undefined): BrowseScope {
+  return scope === "root" && activeFilterFields(filters).length > 0 ? "root" : "directory";
 }
 
 export function emptyFilterDraft(): FilterDraft {

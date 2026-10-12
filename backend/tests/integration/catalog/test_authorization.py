@@ -385,15 +385,22 @@ def test_disconnected_logical_directory_is_not_a_current_anchor(browse_fixture: 
     assert browse_fixture.details(directory.pk)["sourceState"] == "inaccessible"
 
 
-@pytest.mark.parametrize("changed", ["namespace", "root_epoch", "filters", "limit"])
+@pytest.mark.parametrize(
+    "changed",
+    ["namespace", "root_epoch", "filters", "limit", "to_root", "to_directory"],
+)
 def test_current_context_is_bound_to_cursor(browse_fixture: Any, changed: str) -> None:
     from aegis_apps.catalog.cursors import CursorRestartRequired
     from aegis_apps.catalog.filters import parse_filters
 
     browse_fixture.seed_ties(4)
-    page = browse_fixture.page(limit=1)
-    options: dict[str, Any] = {"limit": 1, "cursor": page["nextCursor"]}
-    if changed == "namespace":
+    issued = "root" if changed == "to_directory" else "directory"
+    page = browse_fixture.page(limit=1, scope=issued)
+    options: dict[str, Any] = {"limit": 1, "cursor": page["nextCursor"], "scope": issued}
+    if changed in ("to_root", "to_directory"):
+        # The same anchor, filters and order: only the scope differs.
+        options["scope"] = "directory" if issued == "root" else "root"
+    elif changed == "namespace":
         browse_fixture.namespace = "b" * 40
     elif changed == "root_epoch":
         Root.objects.filter(pk=browse_fixture.root.pk).update(authorization_epoch=1)

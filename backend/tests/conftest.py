@@ -205,13 +205,14 @@ class BrowseFixture:
 
         return entry_details(self.user, entry_id, self.namespace)
 
-    def seed_ties(self, count: int) -> None:
+    def seed_ties(self, count: int, parent: CatalogEntry | None = None) -> None:
+        parent = parent or self.anchor
         entries = []
         for index in range(count):
             name = source_name(f"{index:04d}.txt".encode())
             entries.append(CatalogEntry(
-                root=self.root, source_parent=self.anchor, logical_parent=self.anchor,
-                source_parent_revision=self.anchor.source_revision,
+                root=self.root, source_parent=parent, logical_parent=parent,
+                source_parent_revision=parent.source_revision,
                 raw_name=name.raw, display_name=name.display, name_key=name.order_key,
                 type_hint=name.type_hint, size=None if index % 5 == 0 else index % 3,
                 mtime_ns=None if index % 7 == 0 else index % 3,

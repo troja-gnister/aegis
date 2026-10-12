@@ -75,6 +75,9 @@ def test_all_six_order_indexes_exist(browse_fixture: Any) -> None:
 @pytest.mark.parametrize("order", ["asc", "desc"])
 def test_order_indexes_support_real_query_plans(browse_fixture: Any, sort: str, order: str) -> None:
     browse_fixture.seed_ties(251)
+    # Another folder's entries: a root holding one directory's children only would make
+    # the root-wide indexes an equally good order for this directory.
+    browse_fixture.seed_ties(400, parent=browse_fixture.entry(b"sibling", kind="directory"))
     browse_fixture.page(sort=sort, order=order, limit=2)
     statement = next(sql for sql in browse_fixture.statements if sql.startswith("WITH candidates"))
     with transaction.atomic(), connection.cursor() as cursor:

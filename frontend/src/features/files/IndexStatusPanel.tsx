@@ -52,6 +52,11 @@ function stateDescription(status: IndexStatus): string {
   }
 }
 
+/** The counters describe one scan: the running one, or else the last one. */
+function scanScope(status: IndexStatus): string {
+  return status.state === "queued" || status.state === "scanning" ? "in this scan" : "in the last scan";
+}
+
 /** RFC 4122 version-4 UUID from getRandomValues, which also works outside secure contexts. */
 function newRequestId(): string {
   const bytes = new Uint8Array(16);
@@ -147,9 +152,15 @@ export function IndexStatusPanel({rootId, canRequestScan, rootEpoch = 0, onStatu
           </p>
           <p className="index-status__detail">{stateDescription(status)}</p>
           <dl className="index-status__counters">
-            <div><dt>Observed entries</dt><dd>{formatExactCount(status.observedEntries)}</dd></div>
-            <div><dt>Completed directories</dt><dd>{formatExactCount(status.completedDirectories)}</dd></div>
-            <div><dt>Directories with problems</dt><dd>{formatExactCount(status.degradedDirectories)}</dd></div>
+            <div><dt>Entries observed {scanScope(status)}</dt><dd>{formatExactCount(status.observedEntries)}</dd></div>
+            <div>
+              <dt>Directories completed {scanScope(status)}</dt>
+              <dd>{formatExactCount(status.completedDirectories)}</dd>
+            </div>
+            <div>
+              <dt>Directories with problems {scanScope(status)}</dt>
+              <dd>{formatExactCount(status.degradedDirectories)}</dd>
+            </div>
             <div><dt>Status updated</dt><dd>{formatInstant(status.updatedAt) ?? "Not yet"}</dd></div>
             <div><dt>Last completed scan</dt><dd>{formatInstant(status.lastCompletedAt) ?? "None yet"}</dd></div>
           </dl>

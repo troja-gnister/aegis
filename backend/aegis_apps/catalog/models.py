@@ -37,6 +37,60 @@ def browse_indexes() -> list[models.Index]:
     return indexes
 
 
+def root_scope_indexes() -> list[models.Index]:
+    """Root-wide keyset orders, optionally per type hint, for the ``root`` browse scope.
+
+    Every column but the sort value, name and ID is an equality of one query branch
+    (missing, kind rank, null rank and type), so one ascending index serves both orders:
+    a descending page scans it backwards.
+    """
+    indexes = []
+    for sort, value_field in (("name", "name_key"), ("modified", "mtime_ns"), ("size", "size")):
+        for typed in (False, True):
+            ranks: list[models.F | models.Func | models.Case] = [
+                models.Case(models.When(source_state="missing", then=True), default=False),
+                models.Case(models.When(kind="directory", then=0), default=1),
+            ]
+            if sort != "name":
+                ranks.append(
+                    models.Case(
+                        models.When(**{f"{value_field}__isnull": True}, then=1),
+                        default=0,
+                    )
+                )
+                ranks.append(Coalesce(value_field, 0, output_field=models.DecimalField()))
+            indexes.append(
+                models.Index(
+                    models.F("root"),
+                    *((models.F("type_hint"),) if typed else ()),
+                    *ranks,
+                    models.F("name_key"),
+                    models.F("id"),
+                    name=f"catalog_root_{'type_' if typed else ''}{sort}",
+                )
+            )
+    return indexes
+
+
+def cascade_indexes() -> list[models.Index]:
+    """Bounded reads for retiring a vanished folder's subtree (see finalize.sql).
+
+    The entries whose children are still to be retired (a transient, tiny set), and each
+    entry's live children in ID order, so every batch reads only what it retires.
+    """
+    return [
+        models.Index(
+            fields=("root", "id"), condition=models.Q(retire_children=True),
+            name="catalog_retiring",
+        ),
+        models.Index(
+            fields=("root", "source_parent", "id"),
+            condition=~models.Q(source_state=SourceState.MISSING),
+            name="catalog_live_children",
+        ),
+    ]
+
+
 class CatalogEntry(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     root = models.ForeignKey(Root, on_delete=models.PROTECT)
@@ -76,13 +130,18 @@ class CatalogEntry(models.Model):
     seen_generation = models.PositiveBigIntegerField(default=0)
     seen_attempt = models.PositiveBigIntegerField(default=0)
     observed_at = models.DateTimeField(null=True)
+    # The entry's children must be retired (marked missing): it went missing as a directory
+    # or a file or link now stands in its place. Cleared once none is left.
+    retire_children = models.BooleanField(default=False, db_default=False)
 
     objects = CatalogEntryQuerySet.as_manager()
 
     class Meta:
         base_manager_name = "objects"
         default_manager_name = "objects"
-        indexes: ClassVar[list[models.Index]] = browse_indexes()
+        indexes: ClassVar[list[models.Index]] = [
+            *browse_indexes(), *root_scope_indexes(), *cascade_indexes(),
+        ]
         constraints: ClassVar[list[models.BaseConstraint]] = [
             models.UniqueConstraint(fields=("root", "id"), name="catalog_root_id_uniq"),
             models.UniqueConstraint(

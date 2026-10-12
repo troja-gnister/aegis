@@ -263,7 +263,7 @@ describe("EntryDetailsPanel", () => {
     ));
     const navigation = createFileNavigation(SESSION.cacheNamespace);
     navigation.remember("key", {
-      rootId: FIXTURE_ROOT_ID, parentId: null, filters: {v: 1, prefix: "private"}, sort: "name",
+      rootId: FIXTURE_ROOT_ID, parentId: null, filters: {v: 1, prefix: "private"}, scope: "directory", sort: "name",
       order: "asc", cursor: null, visibleAnchorId: null, visibleAnchorOffset: 0,
     });
     await renderPanel();

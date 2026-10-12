@@ -75,6 +75,10 @@ DECLARE
     work_attempt bigint;
     captured_epoch bigint;
     affected integer;
+    cascaded integer := 0;
+    retired integer;
+    budget integer;
+    retiring record;
     finished boolean;
 BEGIN
     /* AEGIS_CHECKPOINT_FENCE_NULL */
@@ -96,14 +100,50 @@ BEGIN
            AND entry.observation_epoch<=captured_epoch AND entry.source_state<>'missing'
          ORDER BY entry.id LIMIT batch_limit FOR UPDATE
     ) UPDATE public.catalog_catalogentry AS entry
-         SET source_state='missing', catalog_version=entry.catalog_version+1
+         SET source_state='missing', catalog_version=entry.catalog_version+1,
+             retire_children=entry.kind='directory' OR entry.retire_children
         FROM candidates WHERE entry.id=candidates.id AND entry.observation_epoch<=captured_epoch;
     GET DIAGNOSTICS affected = ROW_COUNT;
+    -- A directory that went missing (deleted or moved away), or that a file or link of the
+    -- same name replaced, is never read again: its children are retired here instead, and
+    -- a retired directory's own children after them. Pending entries carry retire_children
+    -- (catalog_retiring); each batch reads only the live children it retires
+    -- (catalog_live_children), and retirements plus cleared flags stay within batch_limit,
+    -- so the work is linear in the subtree and nothing is revisited once retired. The
+    -- pending set is the root's, whoever left it: this directory completes once it is empty.
+    budget := batch_limit-affected;
+    FOR retiring IN SELECT entry.id FROM public.catalog_catalogentry AS entry
+         WHERE entry.root_id=root_uuid AND entry.retire_children LIMIT batch_limit LOOP
+        EXIT WHEN budget <= 0;
+        UPDATE public.catalog_catalogentry AS entry
+           SET source_state='missing', catalog_version=entry.catalog_version+1,
+               retire_children=entry.kind='directory' OR entry.retire_children
+         WHERE entry.id IN (
+               SELECT child.id FROM public.catalog_catalogentry AS child
+                WHERE child.root_id=root_uuid AND child.source_parent_id=retiring.id
+                  AND child.source_state<>'missing' AND child.observation_epoch<=captured_epoch
+                ORDER BY child.id LIMIT budget)
+           AND entry.observation_epoch<=captured_epoch;
+        GET DIAGNOSTICS retired = ROW_COUNT;
+        cascaded := cascaded+retired;
+        budget := budget-retired;
+        IF budget > 0 THEN
+            -- Fewer than allowed were left: none remains (newer epochs are not this run's).
+            -- Clearing the flag is a change, and counts against the batch like a retirement.
+            UPDATE public.catalog_catalogentry SET retire_children=false WHERE id=retiring.id;
+            cascaded := cascaded+1;
+            budget := budget-1;
+        END IF;
+    END LOOP;
+    affected := affected+cascaded;
     SELECT NOT EXISTS (
         SELECT 1 FROM public.catalog_catalogentry AS entry
          WHERE entry.root_id=root_uuid AND entry.source_parent_id=directory_uuid
            AND (entry.seen_generation,entry.seen_attempt)<>(run_generation,work_attempt)
            AND entry.observation_epoch<=captured_epoch AND entry.source_state<>'missing'
+    ) AND NOT EXISTS (
+        SELECT 1 FROM public.catalog_catalogentry AS entry
+         WHERE entry.root_id=root_uuid AND entry.retire_children
     ) INTO finished;
     UPDATE public.indexing_directorywork SET state=CASE WHEN finished THEN 'complete' ELSE state END,
         updated_at=database_now WHERE id=work.id;

@@ -66,6 +66,7 @@ EXPECTED_TABLE_COLUMNS = {
         "root_id",
         "source_parent_id",
         "source_parent_revision",
+        "retire_children",
     ),
     "django_migrations": ("id", "app", "name", "applied"),
     "django_admin_log": (

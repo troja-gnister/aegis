@@ -20,11 +20,14 @@ import {
   peekViewerReturn,
   releaseReturnRetention,
 } from "../media/viewer-return";
+import {MEDIA_KIND_LABEL} from "../media/classify";
+import type {MediaViewerContext} from "../media/types";
+import {viewerLocationState, viewerPath} from "../media/viewer-route";
 import {useAuthorizedRoot} from "../roots/useAuthorizedRoot";
 import {EntryDetailsPanel} from "./EntryDetailsPanel";
-import {FilterChips} from "./FilterChips";
+import {FilterChips, ScopeToggle} from "./FilterChips";
 import {FilterPanel} from "./FilterPanel";
-import {activeFilterFields} from "./filter-state";
+import {activeFilterFields, listingScope} from "./filter-state";
 import {IndexStatusPanel} from "./IndexStatusPanel";
 import {
   createFileNavigation,
@@ -32,7 +35,7 @@ import {
   type FileNavigationRecord,
 } from "./navigation";
 import {directoryQueryOptions} from "./queries";
-import type {BrowseInput, FileFilters, IndexStatus} from "./types";
+import type {BrowseInput, BrowseScope, EntrySummary, FileFilters, IndexStatus} from "./types";
 import {ACTIVE_STATUS_INTERVAL} from "./useIndexStatus";
 import {VirtualFileList, type VisibleAnchor} from "./VirtualFileList";
 import "./files.css";
@@ -105,6 +108,11 @@ function progressKey(status: IndexStatus): string {
 
 type Selection = {namespace: string; routeKey: string; id: string};
 
+/** A root-wide result the viewer can show directly: a present media file, with PREVIEW. */
+function opensInViewer(entry: EntrySummary, canPreview: boolean): boolean {
+  return canPreview && entry.kind === "file" && entry.media !== null && entry.sourceState === "present";
+}
+
 /** The server refused a cursor from an older catalog view; only a page-one restart can continue. */
 function isCursorRestart(error: unknown): boolean {
   return error instanceof ApiProblem && error.status === 409 && error.type === "cursor_restart_required";
@@ -136,9 +144,12 @@ export function FilesPage() {
     () => navigation?.recall(routeKey),
     [navigation, navigationRoute.revision, routeKey],
   );
-  const filters = restored?.rootId === rootId && restored.parentId === (parentId ?? null)
-    ? restored.filters
-    : {v: 1 as const};
+  const routeRecord = restored?.rootId === rootId && restored.parentId === (parentId ?? null)
+    ? restored
+    : undefined;
+  const filters = routeRecord?.filters ?? {v: 1 as const};
+  // Root-wide results need filters; without any, a route always lists its own folder.
+  const scope = listingScope(filters, routeRecord?.scope);
   const sort = restored?.sort ?? "name";
   const order = restored?.order ?? "asc";
   const {rootQuery, root, sessionExpiring} = useAuthorizedRoot(rootId);
@@ -151,11 +162,12 @@ export function FilesPage() {
     namespace: session.cacheNamespace,
     rootId,
     rootEpoch: root?.authorizationEpoch ?? 0,
-    parentId: parentId ?? null,
+    parentId: scope === "root" ? null : parentId ?? null,
     filters,
     sort,
     order,
     cursor: restored?.cursor ?? null,
+    scope,
   };
   const directoryQuery = useInfiniteQuery({
     ...directoryQueryOptions(input),
@@ -192,6 +204,7 @@ export function FilesPage() {
     if (
       stored && stored.rootId === rootId && stored.parentId === (parentId ?? null) &&
       (JSON.stringify(stored.filters) !== JSON.stringify(filters) ||
+        listingScope(stored.filters, stored.scope) !== scope ||
         stored.sort !== sort || stored.order !== order)
     ) {
       // A newer applied query identity owns this route; an obsolete closure must not revert it.
@@ -210,13 +223,14 @@ export function FilesPage() {
       rootId,
       parentId: parentId ?? null,
       filters,
+      scope,
       sort,
       order,
       cursor: typeof pageParam === "string" ? pageParam : null,
       visibleAnchorId: anchor.id,
       visibleAnchorOffset: anchor.offset,
     });
-  }, [directoryQuery.data, filters, navigation, order, parentId, rootId, routeKey, sort]);
+  }, [directoryQuery.data, filters, navigation, order, parentId, rootId, routeKey, scope, sort]);
 
   useEffect(() => () => remember(), [remember]);
 
@@ -289,12 +303,13 @@ export function FilesPage() {
   }, [rootId]);
 
   /** Records page one for this route under `next` filters; the caller resets the query when its key is unchanged. */
-  const rememberPageOne = (next: FileFilters) => {
+  const rememberPageOne = (next: FileFilters, nextScope: BrowseScope) => {
     anchorRef.current = {id: null, offset: 0};
     navigationRoute.rememberRoute(routeKey, {
       rootId,
       parentId: parentId ?? null,
       filters: next,
+      scope: listingScope(next, nextScope),
       sort,
       order,
       cursor: null,
@@ -309,14 +324,15 @@ export function FilesPage() {
     setResetRequest((count) => count + 1);
   };
 
-  const applyFilters = (next: FileFilters) => {
+  const applyFilters = (next: FileFilters, nextScope: BrowseScope) => {
     setFiltersOpen(false);
     setSelection(null);
     if (!navigation) return;
-    const unchanged = JSON.stringify(next) === JSON.stringify(filters);
+    const unchanged = JSON.stringify(next) === JSON.stringify(filters) &&
+      listingScope(next, nextScope) === scope;
     announceResultRef.current = "filters";
     setAnnouncement(activeFilterFields(next).length > 0 ? "Applying filters…" : "Clearing filters…");
-    rememberPageOne(next);
+    rememberPageOne(next, nextScope);
     if (unchanged) restartWindow();
   };
 
@@ -326,7 +342,7 @@ export function FilesPage() {
     if (!navigation) return;
     announceResultRef.current = "restart";
     setAnnouncement("Starting from the beginning…");
-    rememberPageOne(filters);
+    rememberPageOne(filters, scope);
     restartWindow();
     filtersButtonRef.current?.focus({preventScroll: true});
   };
@@ -359,6 +375,20 @@ export function FilesPage() {
       (live.generation !== status.generation || live.lastCompletedAt !== status.lastCompletedAt),
   );
   const announcementTestId = import.meta.env.MODE === "test" ? {"data-testid": "files-announcement"} : {};
+  const canPreview = root.permissions.includes("preview");
+  // History state carries opaque IDs and the route key only; filters stay in the navigation record.
+  const viewerContext: MediaViewerContext = {
+    source: scope === "root" ? "search" : "directory",
+    rootId: root.id,
+    parentId: parentId ?? null,
+    returnKey: routeKey,
+  };
+  const folderName = (entry: EntrySummary) => entry.location === undefined
+    ? null
+    : entry.location.parentName === "" ? root.displayName : entry.location.parentName;
+  const selectedLocation = selectedFileId === null
+    ? undefined
+    : entries.find((entry) => entry.id === selectedFileId)?.location;
 
   return (
     <section className="files-page">
@@ -388,10 +418,13 @@ export function FilesPage() {
         >
           Filters
         </button>
+        {filtersActive ? (
+          <ScopeToggle scope={scope} onChange={(next) => applyFilters(filters, next)} />
+        ) : null}
         <FilterChips
           value={filters}
           onChange={(next) => {
-            applyFilters(next);
+            applyFilters(next, scope);
             filtersButtonRef.current?.focus({preventScroll: true});
           }}
         />
@@ -441,6 +474,11 @@ export function FilesPage() {
               remember();
               setSelection(null);
               navigate(`/files/${root.id}/directories/${entry.id}`);
+            } else if (scope === "root" && opensInViewer(entry, canPreview)) {
+              // The viewer moves through these results; Back returns to this window and row.
+              remember();
+              setSelection(null);
+              navigate(viewerPath(root.id, entry.id), {state: viewerLocationState(entry.id, viewerContext)});
             } else {
               detailsReturnRef.current = document.activeElement instanceof HTMLElement
                 ? document.activeElement
@@ -461,15 +499,28 @@ export function FilesPage() {
             remember(anchor);
           }}
           initialFocusId={initialFocusId}
+          locationOf={scope === "root" ? folderName : undefined}
+          actionOf={scope === "root"
+            ? (entry) => opensInViewer(entry, canPreview) && entry.media !== null
+              ? `Open ${MEDIA_KIND_LABEL[entry.media.kind].toLowerCase()}`
+              : undefined
+            : undefined}
         />
       ) : null}
       {selectedFileId ? (
         <EntryDetailsPanel
           key={selectedFileId}
           entryId={selectedFileId}
-          viewerContext={{source: "directory", rootId: root.id, parentId: parentId ?? null, returnKey: routeKey}}
+          viewerContext={viewerContext}
           // The viewer's Back returns here; record the visible anchor like a directory open does.
           onOpenMedia={() => remember()}
+          folder={selectedLocation === undefined ? undefined : {
+            to: selectedLocation.parentName === ""
+              ? `/files/${root.id}`
+              : `/files/${root.id}/directories/${selectedLocation.parentId}`,
+            name: selectedLocation.parentName === "" ? root.displayName : selectedLocation.parentName,
+            onOpen: () => remember(),
+          }}
           onClose={() => {
             const target = detailsReturnRef.current;
             setSelection(null);
@@ -479,6 +530,7 @@ export function FilesPage() {
       ) : null}
       <FilterPanel
         value={filters}
+        scope={scope}
         open={filtersOpen}
         onApply={applyFilters}
         onCancel={() => setFiltersOpen(false)}

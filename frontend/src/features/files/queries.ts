@@ -69,7 +69,7 @@ export function directoryQueryOptions(input: BrowseInput) {
   const stableInput = {...input, cursor: undefined};
   const queryKey = [
     "files", input.namespace, input.rootId, input.rootEpoch, input.parentId,
-    input.filters, input.sort, input.order,
+    input.filters, input.sort, input.order, input.scope,
   ] as const;
   return infiniteQueryOptions({
     queryKey,

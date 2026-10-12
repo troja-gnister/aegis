@@ -20,6 +20,8 @@ DECLARE
     inserted integer;
     changed integer;
     has_errors boolean := false;
+    repended_complete integer;
+    repended_degraded integer;
 BEGIN
     /* AEGIS_CHECKPOINT_FENCE_NULL */
     IF work.state <> 'reading' THEN RETURN NULL; END IF;
@@ -160,7 +162,14 @@ BEGIN
                     THEN 1 ELSE 0 END AS delta) AS source_change
             ),
             observation_epoch=excluded.observation_epoch, seen_generation=excluded.seen_generation,
-            seen_attempt=excluded.seen_attempt, observed_at=excluded.observed_at
+            seen_attempt=excluded.seen_attempt, observed_at=excluded.observed_at,
+            -- A directory observed again is read again; a file or link that replaced one
+            -- leaves the directory's old children to be retired (marked missing). An
+            -- inaccessible observation says nothing about the kind, so it keeps the flag.
+            retire_children=CASE WHEN excluded.source_state='inaccessible'
+                THEN target.retire_children
+                ELSE excluded.kind<>'directory' AND (target.kind='directory' OR target.retire_children)
+                END
         WHERE target.observation_epoch <= run.start_epoch
         RETURNING WITH (OLD AS previous, NEW AS current)
             current.id, current.kind, current.source_state, current.source_revision,
@@ -177,15 +186,25 @@ BEGIN
         ON CONFLICT (run_id,directory_id) DO UPDATE SET state='pending',
             parent_revision=excluded.parent_revision, lease_owner=NULL, lease_expires_at=NULL,
             eof_identity=NULL, error_code=NULL, updated_at=database_now
+            -- A row that used up its attempts (the scan's max_directory_attempts, 3) can
+            -- never be claimed again: it keeps its state, and the next run reads the change.
             WHERE public.indexing_directorywork.parent_revision<>excluded.parent_revision
-        RETURNING id
+              AND public.indexing_directorywork.attempt < 3
+        RETURNING WITH (OLD AS previous) previous.state AS previous_state
     ) SELECT pg_catalog.count(*) FILTER (WHERE was_inserted),
-             pg_catalog.count(*) FILTER (WHERE was_changed) INTO inserted, changed FROM upserted;
+             pg_catalog.count(*) FILTER (WHERE was_changed),
+             (SELECT pg_catalog.count(*) FROM children WHERE previous_state='complete'),
+             (SELECT pg_catalog.count(*) FROM children WHERE previous_state='degraded')
+        INTO inserted, changed, repended_complete, repended_degraded FROM upserted;
     UPDATE public.indexing_directorywork SET last_batch_sequence=sequence_number,
         last_batch_hash=batch_hash, observed_count=observed_count+observed,
         error_code=CASE WHEN has_errors THEN 'permission_denied' ELSE error_code END,
         updated_at=database_now WHERE id=work.id;
+    -- A re-pended directory leaves the count of its earlier terminal state; it is
+    -- counted again by the state its new pass ends in.
     UPDATE public.indexing_rootindexstate SET observed_entries=observed_entries+observed,
+        completed_directories=GREATEST(completed_directories-repended_complete, 0),
+        degraded_directories=GREATEST(degraded_directories-repended_degraded, 0),
         updated_at=database_now WHERE root_id=root.id;
     RETURN pg_catalog.jsonb_build_object('observed',observed,'inserted',inserted,'changed',changed);
 END;

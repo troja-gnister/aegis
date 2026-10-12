@@ -6,6 +6,10 @@ import type {EntrySummary} from "./types";
 type FileRowProps = {
   entry: EntrySummary;
   onOpen(entry: EntrySummary): void;
+  /** Root-wide results: the name of the folder holding the entry. */
+  location?: string | null;
+  /** What activating the row does, when it differs from the kind's default. */
+  action?: string;
 };
 
 function iconFor(entry: EntrySummary): string {
@@ -19,15 +23,16 @@ function entryMetadata(entry: EntrySummary): string {
   return entry.kind === "directory" ? type : `${type} · ${size} · ${entry.sourceState}`;
 }
 
-export function FileRow({entry, onOpen}: FileRowProps) {
+export function FileRow({entry, onOpen, location = null, action}: FileRowProps) {
   const thumbnailDescriptionId = useId();
   const mediaKind = mediaKindOf(entry);
-  const action = entry.kind === "directory" ? "Open directory" : "Select file";
+  const verb = action ?? (entry.kind === "directory" ? "Open directory" : "Select file");
+  const place = location === null ? "" : ` in ${location}`;
   return (
     <button
-      className="file-row interactive"
+      className={`file-row${location === null ? "" : " file-row--located"} interactive`}
       type="button"
-      aria-label={`${action} ${entry.displayName}`}
+      aria-label={`${verb} ${entry.displayName}${place}`}
       // A button's content is presentational; a hidden text node describes the thumbnail state.
       aria-describedby={mediaKind ? thumbnailDescriptionId : undefined}
       title={entry.displayName}
@@ -44,6 +49,9 @@ export function FileRow({entry, onOpen}: FileRowProps) {
       )}
       <span className="file-row__body">
         <span className="file-row__name" dir="auto">{entry.displayName}</span>
+        {location === null ? null : (
+          <span className="file-row__location">in <bdi>{location}</bdi></span>
+        )}
         <span className="file-row__metadata">{entryMetadata(entry)}</span>
       </span>
       <span className="file-row__chevron" aria-hidden="true">›</span>

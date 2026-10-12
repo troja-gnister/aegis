@@ -1,7 +1,7 @@
 import {fireEvent, render, screen, within} from "@testing-library/react";
 import {useRef, useState} from "react";
 import {afterEach, describe, expect, it, vi} from "vitest";
-import {FilterChips} from "./FilterChips";
+import {FilterChips, ScopeToggle} from "./FilterChips";
 import {FilterPanel} from "./FilterPanel";
 import {
   describeFilterField,
@@ -13,7 +13,7 @@ import {
   removeFilter,
 } from "./filter-state";
 import {setTestTimeZone} from "./test-fixtures";
-import type {FileFilters} from "./types";
+import type {BrowseScope, FileFilters} from "./types";
 
 const restorers: Array<() => void> = [];
 
@@ -31,23 +31,28 @@ function applied(draft: Parameters<typeof filtersFromDraft>[0]): FileFilters {
   return result.filters;
 }
 
-function PanelHarness({initial = {v: 1} as FileFilters, onApply = vi.fn()}: {
+function PanelHarness({initial = {v: 1} as FileFilters, initialScope = "directory", onApply = vi.fn()}: {
   initial?: FileFilters;
-  onApply?: (filters: FileFilters) => void;
+  initialScope?: BrowseScope;
+  onApply?: (filters: FileFilters, scope: BrowseScope) => void;
 }) {
   const [value, setValue] = useState<FileFilters>(initial);
+  const [scope, setScope] = useState<BrowseScope>(initialScope);
   const [open, setOpen] = useState(false);
   const opener = useRef<HTMLButtonElement>(null);
   return (
     <>
       <button ref={opener} type="button" onClick={() => setOpen(true)}>Filters</button>
       <output aria-label="Applied filters">{JSON.stringify(value)}</output>
+      <output aria-label="Applied scope">{scope}</output>
       <FilterPanel
         value={value}
+        scope={scope}
         open={open}
-        onApply={(next) => {
-          onApply(next);
+        onApply={(next, nextScope) => {
+          onApply(next, nextScope);
           setValue(next);
+          setScope(nextScope);
           setOpen(false);
         }}
         onCancel={() => setOpen(false)}
@@ -164,7 +169,7 @@ describe("FilterPanel", () => {
   it("does not query while editing or after Cancel", async () => {
     const apply = vi.fn();
     const cancel = vi.fn();
-    render(<FilterPanel value={{v: 1}} open onApply={apply} onCancel={cancel} />);
+    render(<FilterPanel value={{v: 1}} scope="directory" open onApply={apply} onCancel={cancel} />);
     fireEvent.change(screen.getByLabelText("Filename starts with"), {target: {value: "IMG_"}});
     expect(apply).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", {name: "Cancel"}));
@@ -174,7 +179,7 @@ describe("FilterPanel", () => {
 
   it("renders a labelled modal dialog with grouped, named controls", () => {
     timeZone("Europe/Berlin");
-    render(<FilterPanel value={{v: 1}} open onApply={vi.fn()} onCancel={vi.fn()} />);
+    render(<FilterPanel value={{v: 1}} scope="directory" open onApply={vi.fn()} onCancel={vi.fn()} />);
     const dialog = screen.getByRole("dialog", {name: "Filter files"});
     expect(dialog.tagName).toBe("DIALOG");
     expect(within(dialog).getByRole("group", {name: "Entry kind"})).toBeVisible();
@@ -204,7 +209,7 @@ describe("FilterPanel", () => {
     fireEvent.change(screen.getByLabelText("Filename starts with"), {target: {value: "IMG_"}});
     fireEvent.click(screen.getByRole("button", {name: "Apply filters"}));
     expect(onApply).toHaveBeenCalledOnce();
-    expect(onApply).toHaveBeenCalledWith({v: 1, kind: ["directory", "file"], prefix: "IMG_"});
+    expect(onApply).toHaveBeenCalledWith({v: 1, kind: ["directory", "file"], prefix: "IMG_"}, "root");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(opener).toHaveFocus();
   });
@@ -222,7 +227,7 @@ describe("FilterPanel", () => {
     expect(screen.getByLabelText("Minimum size")).toHaveFocus();
     fireEvent.change(screen.getByLabelText("Maximum size"), {target: {value: "20"}});
     fireEvent.click(screen.getByRole("button", {name: "Apply filters"}));
-    expect(onApply).toHaveBeenCalledWith({v: 1, size: {min: "10", max: "20"}});
+    expect(onApply).toHaveBeenCalledWith({v: 1, size: {min: "10", max: "20"}}, "root");
   });
 
   it("discards the draft on Escape and restores focus without changing applied filters", () => {
@@ -248,7 +253,7 @@ describe("FilterPanel", () => {
 
   it("handles a native dialog cancel request as Cancel", () => {
     const cancel = vi.fn();
-    render(<FilterPanel value={{v: 1}} open onApply={vi.fn()} onCancel={cancel} />);
+    render(<FilterPanel value={{v: 1}} scope="directory" open onApply={vi.fn()} onCancel={cancel} />);
     const event = new Event("cancel", {cancelable: true});
     screen.getByRole("dialog").dispatchEvent(event);
     expect(event.defaultPrevented).toBe(true);
@@ -264,11 +269,56 @@ describe("FilterPanel", () => {
     expect(screen.getByRole("checkbox", {name: "File"})).not.toBeChecked();
     expect(screen.getByLabelText("Applied filters")).toHaveTextContent('"kind":["file"]');
     fireEvent.click(screen.getByRole("button", {name: "Apply filters"}));
-    expect(onApply).toHaveBeenCalledWith({v: 1});
+    // Without filters a route lists its own folder, whatever scope the dialog showed.
+    expect(onApply).toHaveBeenCalledWith({v: 1}, "directory");
+  });
+
+  it("searches all folders by default when filters are first set", () => {
+    const onApply = vi.fn();
+    render(<PanelHarness onApply={onApply} />);
+    fireEvent.click(screen.getByRole("button", {name: "Filters"}));
+    const scope = screen.getByRole("group", {name: "Search in"});
+    expect(within(scope).getByRole("radio", {name: "All folders"})).toBeChecked();
+    expect(within(scope).getByRole("radio", {name: "This folder"})).not.toBeChecked();
+    fireEvent.click(screen.getByRole("checkbox", {name: ".jpg"}));
+    fireEvent.click(screen.getByRole("button", {name: "Apply filters"}));
+    expect(onApply).toHaveBeenLastCalledWith({v: 1, type: ["jpg"]}, "root");
+
+    // An applied choice is kept when the dialog opens again; Clear all restores the default.
+    fireEvent.click(screen.getByRole("button", {name: "Filters"}));
+    fireEvent.click(screen.getByRole("radio", {name: "This folder"}));
+    fireEvent.click(screen.getByRole("button", {name: "Apply filters"}));
+    expect(onApply).toHaveBeenLastCalledWith({v: 1, type: ["jpg"]}, "directory");
+    fireEvent.click(screen.getByRole("button", {name: "Filters"}));
+    expect(screen.getByRole("radio", {name: "This folder"})).toBeChecked();
+    fireEvent.click(screen.getByRole("button", {name: "Clear all"}));
+    expect(screen.getByRole("radio", {name: "All folders"})).toBeChecked();
+  });
+
+  it("keeps a scope change in the draft until Apply", () => {
+    const onApply = vi.fn();
+    render(<PanelHarness initial={{v: 1, prefix: "IMG"}} initialScope="root" onApply={onApply} />);
+    fireEvent.click(screen.getByRole("button", {name: "Filters"}));
+    expect(screen.getByRole("radio", {name: "All folders"})).toBeChecked();
+    fireEvent.click(screen.getByRole("radio", {name: "This folder"}));
+    fireEvent.click(screen.getByRole("button", {name: "Cancel"}));
+    expect(screen.getByLabelText("Applied scope")).toHaveTextContent("root");
+    expect(onApply).not.toHaveBeenCalled();
+  });
+
+  it("toggles the applied scope from the toolbar", () => {
+    const onChange = vi.fn();
+    render(<ScopeToggle scope="root" onChange={onChange} />);
+    const group = screen.getByRole("group", {name: "Search in"});
+    expect(within(group).getByRole("button", {name: "All folders"})).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(within(group).getByRole("button", {name: "All folders"}));
+    expect(onChange).not.toHaveBeenCalled();
+    fireEvent.click(within(group).getByRole("button", {name: "This folder"}));
+    expect(onChange).toHaveBeenCalledWith("directory");
   });
 
   it("offers no content, viewer, editor, or destructive action", () => {
-    render(<FilterPanel value={{v: 1}} open onApply={vi.fn()} onCancel={vi.fn()} />);
+    render(<FilterPanel value={{v: 1}} scope="directory" open onApply={vi.fn()} onCancel={vi.fn()} />);
     const names = screen.getAllByRole("button").map((button) => button.textContent);
     expect(names).toEqual(["Clear all", "Cancel", "Apply filters"]);
   });

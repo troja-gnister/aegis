@@ -28,6 +28,10 @@ export type VirtualFileListProps = {
   onAnchorChange?(anchor: VisibleAnchor): void;
   /** A row to focus once it is rendered at mount (the entry a closed viewer showed last). */
   initialFocusId?: string | null;
+  /** Root-wide results: the folder name each row shows. */
+  locationOf?(entry: EntrySummary): string | null;
+  /** The row action's label, when it differs from the kind's default. */
+  actionOf?(entry: EntrySummary): string | undefined;
 };
 
 type FocusedRow = {id: string; index: number};
@@ -63,6 +67,8 @@ export function VirtualFileList({
   initialAnchor,
   onAnchorChange,
   initialFocusId,
+  locationOf,
+  actionOf,
 }: VirtualFileListProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const previousEntriesRef = useRef(entries);
@@ -314,7 +320,12 @@ export function VirtualFileList({
                     ) focusedRef.current = null;
                   }}
                 >
-                  <FileRow entry={entry} onOpen={onOpen} />
+                  <FileRow
+                    entry={entry}
+                    onOpen={onOpen}
+                    location={locationOf?.(entry) ?? null}
+                    action={actionOf?.(entry)}
+                  />
                 </span>
               </li>
             );

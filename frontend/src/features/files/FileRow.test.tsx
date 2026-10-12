@@ -82,6 +82,23 @@ describe("FileRow", () => {
     expect(directoryRow.querySelector(".file-row__icon--directory")).toHaveTextContent("▣");
   });
 
+  it("names a root-wide result's folder and its action", () => {
+    const entry = {...fixtureEntry(9), displayName: "IMG_0009.jpg"};
+    const open = vi.fn();
+    const {rerender} = render(<FileRow entry={entry} onOpen={open} location="DCIM" />);
+    const row = screen.getByRole("button", {name: "Select file IMG_0009.jpg in DCIM"});
+    expect(row).toHaveTextContent("in DCIM");
+    expect(row).toHaveClass("file-row--located");
+    // The folder name is isolated like the file name, so a right-to-left name stays whole.
+    expect(row.querySelector(".file-row__location bdi")).toHaveTextContent(/^DCIM$/);
+
+    rerender(<FileRow entry={entry} onOpen={open} location="DCIM" action="Open photo" />);
+    fireEvent.click(screen.getByRole("button", {name: "Open photo IMG_0009.jpg in DCIM"}));
+    expect(open).toHaveBeenCalledWith(entry);
+    rerender(<FileRow entry={entry} onOpen={open} />);
+    expect(screen.getByRole("button", {name: "Select file IMG_0009.jpg"})).not.toHaveTextContent("in ");
+  });
+
   it("opens the entry when activated", () => {
     const onOpen = vi.fn();
     const entry = photoEntry();

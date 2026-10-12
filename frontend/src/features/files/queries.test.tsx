@@ -37,6 +37,7 @@ const input: BrowseInput = {
   filters: {v: 1},
   sort: "name",
   order: "asc",
+  scope: "directory",
 };
 
 function entryId(page: number, row: number): string {
@@ -255,10 +256,16 @@ describe("directoryQueryOptions", () => {
     const cursorChanged = directoryQueryOptions({...input, cursor: "cursor:two"});
     const filterChanged = directoryQueryOptions({...input, filters: {v: 1, prefix: "a"}});
     const namespaceChanged = directoryQueryOptions({...input, namespace: "another-namespace"});
+    const filtered = {...input, filters: {v: 1 as const, type: ["jpg"]}, parentId: null};
+    const folderSearch = directoryQueryOptions(filtered);
+    const rootSearch = directoryQueryOptions({...filtered, scope: "root"});
 
     expect(first.queryKey).toEqual(cursorChanged.queryKey);
     expect(first.queryKey).not.toEqual(filterChanged.queryKey);
     expect(first.queryKey).not.toEqual(namespaceChanged.queryKey);
+    // The same filters at the same anchor are another listing in the root-wide scope.
+    expect(folderSearch.queryKey).not.toEqual(rootSearch.queryKey);
+    expect(rootSearch.queryKey).toContain("root");
     expect(first.gcTime).toBe(0);
     expect(first.maxPages).toBe(5);
   });
@@ -408,7 +415,7 @@ describe("directoryQueryOptions", () => {
           await activateCacheNamespace(replacementClient, NAMESPACE);
           replacementNavigation = createFileNavigation(NAMESPACE);
           replacementNavigation.remember("renewed", {
-            rootId: ROOT_ID, parentId: DIRECTORY_ID, filters: {v: 1}, sort: "name",
+            rootId: ROOT_ID, parentId: DIRECTORY_ID, filters: {v: 1}, scope: "directory", sort: "name",
             order: "asc", cursor: null, visibleAnchorId: null, visibleAnchorOffset: 0,
           });
           replacementClient.setQueryData(["roots", NAMESPACE], {roots: []});
@@ -480,7 +487,7 @@ describe("directoryQueryOptions", () => {
     await activateCacheNamespace(queryClient, NAMESPACE);
     const navigation = createFileNavigation(NAMESPACE);
     navigation.remember("root", {
-      rootId: ROOT_ID, parentId: DIRECTORY_ID, filters: {v: 1}, sort: "name",
+      rootId: ROOT_ID, parentId: DIRECTORY_ID, filters: {v: 1}, scope: "directory", sort: "name",
       order: "asc", cursor: null, visibleAnchorId: null, visibleAnchorOffset: 0,
     });
     queryClient.setQueryData(["private", NAMESPACE], "secret");
@@ -501,11 +508,11 @@ describe("directoryQueryOptions", () => {
     await activateCacheNamespace(queryClient, NAMESPACE);
     const navigation = createFileNavigation(NAMESPACE);
     navigation.remember("missing", {
-      rootId: ROOT_ID, parentId: DIRECTORY_ID, filters: {v: 1}, sort: "name",
+      rootId: ROOT_ID, parentId: DIRECTORY_ID, filters: {v: 1}, scope: "directory", sort: "name",
       order: "asc", cursor: null, visibleAnchorId: null, visibleAnchorOffset: 0,
     });
     navigation.remember("other", {
-      rootId: FOREIGN_ROOT_ID, parentId: null, filters: {v: 1}, sort: "name",
+      rootId: FOREIGN_ROOT_ID, parentId: null, filters: {v: 1}, scope: "directory", sort: "name",
       order: "asc", cursor: null, visibleAnchorId: null, visibleAnchorOffset: 0,
     });
     queryClient.setQueryData(["roots", NAMESPACE], {roots: []});

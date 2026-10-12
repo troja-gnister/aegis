@@ -84,9 +84,10 @@ function parseContext(value: unknown): MediaViewerContext | null {
   if (!isUuid(fields.rootId) || typeof fields.returnKey !== "string" || !ROUTE_KEY.test(fields.returnKey)) {
     return null;
   }
-  if (fields.source === "directory" && keys === "parentId,returnKey,rootId,source" &&
+  if ((fields.source === "directory" || fields.source === "search") &&
+      keys === "parentId,returnKey,rootId,source" &&
       (fields.parentId === null || isUuid(fields.parentId))) {
-    return {source: "directory", rootId: fields.rootId, parentId: fields.parentId, returnKey: fields.returnKey};
+    return {source: fields.source, rootId: fields.rootId, parentId: fields.parentId, returnKey: fields.returnKey};
   }
   if (fields.source === "timeline" && keys === "kind,returnKey,rootId,source,year" &&
       isTimelineKind(fields.kind) && (fields.year === null || isTimelineYear(fields.year))) {

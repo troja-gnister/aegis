@@ -173,3 +173,196 @@ def test_real_reader_scan_catalogs_tree_and_preserves_every_source(
             assert (row["size"], row["mtime_ns"]) == (value[1], value[2])
 
     assert _snapshot(tmp_path) == before
+
+
+def _expected_counts(before: dict[str, tuple[Any, ...]]) -> tuple[int, int]:
+    """Entries below the source and directories including the source itself (the anchor)."""
+    entries = [key for key in before if key.startswith("source/")]
+    directories = [key for key in entries if before[key][0] == "directory"]
+    return len(entries), len(directories) + 1
+
+
+@pytest.mark.parametrize("start", ["periodic", "manual"])
+@pytest.mark.parametrize("interrupt", [False, True], ids=["complete", "restart"])
+def test_progress_counters_describe_the_current_run_only(
+    scan_fixture: ScanFixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    start: str,
+    interrupt: bool,
+) -> None:
+    """Regression: a new generation used to add its progress to every earlier run's."""
+    import uuid
+
+    from aegis_apps.identity.models import User
+    from aegis_apps.indexing import reader
+    from aegis_apps.indexing.models import RootIndexState, ScanRun
+    from aegis_apps.indexing.scheduling import schedule_root_scan
+    from aegis_apps.indexing.services import request_root_scan
+    from aegis_apps.roots.models import RootGrant
+    from django.db.models.functions import Now
+
+    source = _tree(tmp_path)
+    expected_entries, expected_directories = _expected_counts(_snapshot(tmp_path))
+    monkeypatch.setattr(reader, "_mount_snapshot", lambda fd: ("synthetic", 10, "fixed"))
+    monkeypatch.setattr(reader, "_mount_id", lambda fd: 10)
+    database, root = scan_fixture.database, scan_fixture.root
+
+    def counters() -> tuple[str, int, int, int]:
+        state = RootIndexState.objects.get(root=root)
+        return (
+            state.status,
+            state.observed_entries,
+            state.completed_directories,
+            state.degraded_directories,
+        )
+
+    def settle() -> None:
+        with database.as_django_role("aegis_indexer"):
+            assert schedule_root_scan(root.pk, scan_fixture.worker, "a" * 64) is None
+
+    first_restarts = _scan(scan_fixture, source, interrupt=interrupt)
+    assert first_restarts == (1 if interrupt else 0)
+    settle()
+    assert counters() == ("ready", expected_entries, expected_directories, 0)
+
+    if start == "periodic":
+        RootIndexState.objects.filter(root=root).update(due_at=Now())
+        with database.as_django_role("aegis_indexer"):
+            second = schedule_root_scan(root.pk, scan_fixture.worker, "a" * 64)
+    else:
+        actor = User.objects.create_user(username=f"rescan-{uuid.uuid4().hex}")
+        RootGrant.objects.create(root=root, user=actor, permissions=128)
+        with database.as_django_role("aegis_web"):
+            second = request_root_scan(actor, root.pk, "rescan_counters")
+    assert second is not None and second != scan_fixture.run_id
+    assert ScanRun.objects.get(pk=second).generation == 2
+    # The new run starts from zero, not from the completed run's totals.
+    assert counters() == ("queued", 0, 0, 0)
+
+    scan_fixture.run_id = second
+    assert _scan(scan_fixture, source, interrupt=interrupt) == first_restarts
+    settle()
+    assert counters() == ("ready", expected_entries, expected_directories, 0)
+    assert RootIndexState.objects.get(root=root).next_generation == 3
+
+
+def test_moved_and_deleted_folders_take_their_subtrees_and_come_back(
+    scan_fixture: ScanFixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a vanished folder's descendants used to stay present forever."""
+    import shutil
+
+    from aegis_apps.indexing import reader
+    from aegis_apps.indexing.models import RootIndexState
+    from aegis_apps.indexing.scheduling import schedule_root_scan
+    from django.db.models.functions import Now
+
+    source = _tree(tmp_path)
+    monkeypatch.setattr(reader, "_mount_snapshot", lambda fd: ("synthetic", 10, "fixed"))
+    monkeypatch.setattr(reader, "_mount_id", lambda fd: 10)
+    database, root = scan_fixture.database, scan_fixture.root
+
+    def scan() -> None:
+        _scan(scan_fixture, source, interrupt=False)
+        with database.as_django_role("aegis_indexer"):
+            assert schedule_root_scan(root.pk, scan_fixture.worker, "a" * 64) is None
+        assert RootIndexState.objects.get(root=root).status == "ready"
+
+    def rescan() -> None:
+        RootIndexState.objects.filter(root=root).update(due_at=Now())
+        with database.as_django_role("aegis_indexer"):
+            run_id = schedule_root_scan(root.pk, scan_fixture.worker, "a" * 64)
+        assert run_id is not None
+        scan_fixture.run_id = run_id
+        scan()
+
+    def states(*names: bytes) -> dict[bytes, list[str]]:
+        rows = CatalogEntry.objects.filter(root=root, raw_name__in=names).order_by("source_state")
+        found: dict[bytes, list[str]] = {}
+        for raw, state in rows.values_list("raw_name", "source_state"):
+            found.setdefault(bytes(raw), []).append(state)
+        return found
+
+    scan()
+    subtree = (b"2024", b"summer", b"deep.txt")
+    original = {
+        bytes(raw): pk
+        for raw, pk in CatalogEntry.objects.filter(root=root, raw_name__in=subtree).values_list(
+            "raw_name", "id"
+        )
+    }
+    assert states(*subtree) == {name: ["present"] for name in subtree}
+
+    # A move: the old copy goes missing with its whole subtree, so nothing is listed twice.
+    (source / "archive").mkdir()
+    os.rename(source / "albums" / "2024", source / "archive" / "2024")
+    rescan()
+    assert states(*subtree) == {name: ["missing", "present"] for name in subtree}
+    assert {CatalogEntry.objects.get(pk=pk).source_state for pk in original.values()} == {"missing"}
+
+    # Moving it back brings the very same rows back once the folder is read again.
+    os.rename(source / "archive" / "2024", source / "albums" / "2024")
+    rescan()
+    assert {CatalogEntry.objects.get(pk=pk).source_state for pk in original.values()} == {"present"}
+    assert states(*subtree) == {name: ["missing", "present"] for name in subtree}
+
+    # A delete: everything below goes; the parent folder's other entries stay.
+    shutil.rmtree(source / "albums" / "2024")
+    rescan()
+    assert {CatalogEntry.objects.get(pk=pk).source_state for pk in original.values()} == {"missing"}
+    assert states(*subtree) == {name: ["missing", "missing"] for name in subtree}
+    assert states(b"cover.png", b"albums") == {b"cover.png": ["present"], b"albums": ["present"]}
+
+
+def test_a_folder_replaced_by_a_file_retires_its_old_children(
+    scan_fixture: ScanFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import shutil
+
+    from aegis_apps.indexing import reader
+    from aegis_apps.indexing.models import RootIndexState
+    from aegis_apps.indexing.scheduling import schedule_root_scan
+    from django.db.models.functions import Now
+
+    source = _tree(tmp_path)
+    monkeypatch.setattr(reader, "_mount_snapshot", lambda fd: ("synthetic", 10, "fixed"))
+    monkeypatch.setattr(reader, "_mount_id", lambda fd: 10)
+    database, root = scan_fixture.database, scan_fixture.root
+
+    def scan(first: bool = False) -> None:
+        if not first:
+            RootIndexState.objects.filter(root=root).update(due_at=Now())
+            with database.as_django_role("aegis_indexer"):
+                run_id = schedule_root_scan(root.pk, scan_fixture.worker, "a" * 64)
+            assert run_id is not None
+            scan_fixture.run_id = run_id
+        _scan(scan_fixture, source, interrupt=False)
+        with database.as_django_role("aegis_indexer"):
+            assert schedule_root_scan(root.pk, scan_fixture.worker, "a" * 64) is None
+
+    def state(raw: bytes) -> tuple[str, str]:
+        row = CatalogEntry.objects.filter(root=root, raw_name=raw).values_list(
+            "kind", "source_state",
+        )
+        assert row.count() == 1
+        return row.get()
+
+    scan(first=True)
+    shutil.rmtree(source / "albums" / "2024")
+    _write(source / "albums" / "2024", b"now a file\n")
+    scan()
+    # The same location is now a file; what was below the folder is not listed any more.
+    assert state(b"2024") == ("file", "present")
+    assert state(b"summer") == ("directory", "missing")
+    assert state(b"deep.txt") == ("file", "missing")
+
+    (source / "albums" / "2024").unlink()
+    (source / "albums" / "2024" / "summer").mkdir(parents=True)
+    _write(source / "albums" / "2024" / "summer" / "deep.txt", b"nested\n")
+    scan()
+    assert state(b"2024") == ("directory", "present")
+    assert state(b"summer") == ("directory", "present")
+    assert state(b"deep.txt") == ("file", "present")

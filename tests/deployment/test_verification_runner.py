@@ -28,6 +28,8 @@ def test_verification_database_is_isolated_and_removed_on_failure(
             password=secret.read_text().strip(), connect_timeout=3,
         ) as connection:
             assert connection.info.server_version // 10000 == 18
+            # The memory-only volume also holds WAL, which must be recycled long before it fills.
+            assert connection.execute("SHOW max_wal_size").fetchone() == ("64MB",)
         raise RuntimeError("child failed")
     assert secret is not None and not secret.exists()
     assert not secret.parent.exists()

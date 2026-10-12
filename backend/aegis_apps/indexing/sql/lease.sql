@@ -13,6 +13,8 @@ DECLARE
     max_directory_attempts CONSTANT integer := 3;
     first_retry_seconds CONSTANT integer := 5;
     second_retry_seconds CONSTANT integer := 10;
+    discarded_observations bigint;
+    exhausted_directories integer;
 BEGIN
     IF session_user <> 'aegis_indexer' THEN
         RAISE EXCEPTION 'scan authority denied' USING ERRCODE = '42501';
@@ -53,6 +55,13 @@ BEGIN
         lease_owner=NULL, lease_expires_at=NULL, updated_at=database_now
         WHERE run_id=p_run_id AND state IN ('reading','finalizing')
           AND lease_expires_at <= database_now AND attempt >= max_directory_attempts;
+    -- The run's counters count each directory once, by its current terminal state.
+    GET DIAGNOSTICS exhausted_directories = ROW_COUNT;
+    IF exhausted_directories > 0 THEN
+        UPDATE public.indexing_rootindexstate
+            SET degraded_directories=degraded_directories+exhausted_directories,
+            updated_at=database_now WHERE root_id=root.id;
+    END IF;
     SELECT * INTO work FROM public.indexing_directorywork WHERE run_id=p_run_id
         AND attempt < max_directory_attempts AND available_at <= database_now
         AND (state='pending' OR (state IN ('reading','finalizing')
@@ -69,6 +78,9 @@ BEGIN
         AND h.status IN ('idle','running') AND h.last_seen_at <= database_now
         AND h.last_seen_at > database_now - interval '120 seconds'
     ) THEN RETURN NULL; END IF;
+    -- A new attempt re-reads the directory from its start: the abandoned attempt's
+    -- observations leave the run's progress counter, which then counts each entry once.
+    discarded_observations := work.observed_count;
     UPDATE public.indexing_directorywork SET state='reading', attempt=attempt+1,
         lease_owner=p_worker_id::uuid,
         lease_expires_at=database_now+pg_catalog.make_interval(secs=>lease_seconds),
@@ -76,8 +88,9 @@ BEGIN
         eof_identity=NULL, error_code=NULL, updated_at=database_now
         WHERE id=work.id RETURNING * INTO work;
     UPDATE public.indexing_scanrun SET state='running' WHERE id=run.id;
-    UPDATE public.indexing_rootindexstate SET status='scanning', updated_at=database_now
-        WHERE root_id=root.id;
+    UPDATE public.indexing_rootindexstate SET status='scanning',
+        observed_entries=GREATEST(observed_entries-discarded_observations, 0),
+        updated_at=database_now WHERE root_id=root.id;
     RETURN pg_catalog.jsonb_build_object(
         'run_id', run.id, 'work_id', work.id, 'root_id', root.id, 'directory_id', directory.id,
         'worker_id', p_worker_id, 'attempt', work.attempt, 'generation', run.generation,

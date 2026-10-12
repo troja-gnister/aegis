@@ -10,6 +10,7 @@ DECLARE
     anchor_revision bigint;
     database_now timestamptz;
     max_directory_attempts CONSTANT integer := 3;
+    exhausted_directories integer;
 BEGIN
     IF session_user <> 'aegis_indexer' THEN
         RAISE EXCEPTION 'scan authority denied' USING ERRCODE = '42501';
@@ -60,6 +61,12 @@ BEGIN
                     lease_expires_at=NULL, updated_at=database_now
                     WHERE run_id=run.id AND state IN ('reading','finalizing')
                       AND attempt >= max_directory_attempts AND lease_expires_at <= database_now;
+                GET DIAGNOSTICS exhausted_directories = ROW_COUNT;
+                IF exhausted_directories > 0 THEN
+                    UPDATE public.indexing_rootindexstate
+                        SET degraded_directories=degraded_directories+exhausted_directories,
+                        updated_at=database_now WHERE root_id=p_root_id;
+                END IF;
                 IF EXISTS (SELECT 1 FROM public.indexing_directorywork
                     WHERE run_id=run.id AND state IN ('pending','reading','finalizing')) THEN
                     RETURN run.id;
@@ -83,10 +90,12 @@ BEGIN
     IF root_state.due_at > database_now AND NOT root_state.rescan_requested THEN RETURN NULL; END IF;
 
     /* AEGIS_START_PERIODIC_RUN */
+    -- Progress counters describe the active (or last) run only, never a running total.
     UPDATE public.indexing_rootindexstate SET binding_epoch=deployment.epoch,
         policy_epoch=deployment.epoch, active_run_id=run.id,
         next_generation=root_state.next_generation+1, rescan_requested=false,
-        status='queued', updated_at=database_now WHERE root_id=p_root_id;
+        status='queued', observed_entries=0, completed_directories=0,
+        degraded_directories=0, updated_at=database_now WHERE root_id=p_root_id;
     RETURN run.id;
 END;
 $scan$;
@@ -173,7 +182,8 @@ BEGIN
         UPDATE public.indexing_rootindexstate SET binding_epoch=deployment.epoch,
             policy_epoch=deployment.epoch, active_run_id=run.id, due_at=database_now,
             next_generation=root_state.next_generation+1, rescan_requested=false,
-            status='queued', updated_at=database_now WHERE root_id=p_root_id;
+            status='queued', observed_entries=0, completed_directories=0,
+            degraded_directories=0, updated_at=database_now WHERE root_id=p_root_id;
     END IF;
     INSERT INTO public.indexing_scanrequest (id, root_id, actor_id, client_request_id, run_id, created_at)
         VALUES (pg_catalog.gen_random_uuid(), p_root_id, p_actor_id, p_request_id, run.id, database_now);

@@ -8,6 +8,7 @@ import {
   type SyntheticEvent,
 } from "react";
 import {
+  activeFilterFields,
   AVAILABILITY_OPTIONS,
   COMMON_TYPES,
   draftFromFilters,
@@ -15,24 +16,27 @@ import {
   filtersFromDraft,
   KIND_OPTIONS,
   localTimeZoneName,
+  SCOPE_OPTIONS,
   SIZE_UNITS,
   UNKNOWN_TYPE,
   type FilterDraft,
   type FilterDraftErrors,
   type SizeUnit,
 } from "./filter-state";
-import type {FileFilters} from "./types";
+import type {BrowseScope, FileFilters} from "./types";
 
 export type FilterPanelProps = {
   value: FileFilters;
+  /** The applied scope; it only matters while filters are set. */
+  scope: BrowseScope;
   open: boolean;
-  onApply(filters: FileFilters): void;
+  onApply(filters: FileFilters, scope: BrowseScope): void;
   onCancel(): void;
 };
 
-export function FilterPanel({value, open, onApply, onCancel}: FilterPanelProps) {
+export function FilterPanel({value, scope, open, onApply, onCancel}: FilterPanelProps) {
   if (!open) return null;
-  return <FilterDialog value={value} onApply={onApply} onCancel={onCancel} />;
+  return <FilterDialog value={value} scope={scope} onApply={onApply} onCancel={onCancel} />;
 }
 
 const ERROR_TARGETS: readonly (keyof FilterDraftErrors)[] = [
@@ -43,12 +47,16 @@ function toggle<T>(values: T[], value: T, checked: boolean): T[] {
   return checked ? [...values.filter((item) => item !== value), value] : values.filter((item) => item !== value);
 }
 
-function FilterDialog({value, onApply, onCancel}: Omit<FilterPanelProps, "open">) {
+function FilterDialog({value, scope, onApply, onCancel}: Omit<FilterPanelProps, "open">) {
   const id = useId();
   const dialogRef = useRef<HTMLDialogElement>(null);
   const fieldRefs = useRef(new Map<keyof FilterDraftErrors, HTMLElement>());
   // Each opening starts from the applied filters; nothing here reaches the query until Apply.
   const [draft, setDraft] = useState<FilterDraft>(() => draftFromFilters(value));
+  // Setting filters searches every folder unless this folder is chosen.
+  const [draftScope, setDraftScope] = useState<BrowseScope>(
+    () => activeFilterFields(value).length > 0 ? scope : "root",
+  );
   const [errors, setErrors] = useState<FilterDraftErrors>({});
   const [timeZone] = useState(localTimeZoneName);
 
@@ -86,7 +94,7 @@ function FilterDialog({value, onApply, onCancel}: Omit<FilterPanelProps, "open">
       if (first) fieldRefs.current.get(first)?.focus();
       return;
     }
-    onApply(result.filters);
+    onApply(result.filters, activeFilterFields(result.filters).length > 0 ? draftScope : "directory");
   };
 
   const cancelRequest = (event: SyntheticEvent) => {
@@ -130,6 +138,27 @@ function FilterDialog({value, onApply, onCancel}: Omit<FilterPanelProps, "open">
           </p>
         ) : null}
 
+        <fieldset className="filter-panel__group" aria-describedby={`${id}-scope-hint`}>
+          <legend>Search in</legend>
+          <div className="filter-panel__choices">
+            {SCOPE_OPTIONS.map((option) => (
+              <label key={option.value} className="filter-panel__choice">
+                <input
+                  type="radio"
+                  name={`${id}-scope`}
+                  value={option.value}
+                  checked={draftScope === option.value}
+                  onChange={() => setDraftScope(option.value)}
+                />
+                <span>{option.label}</span>
+              </label>
+            ))}
+          </div>
+          <p id={`${id}-scope-hint`} className="filter-panel__hint">
+            All folders searches the whole library and shows each match&apos;s folder.
+          </p>
+        </fieldset>
+
         <div className="filter-panel__field">
           <label htmlFor={`${id}-prefix`}>Filename starts with</label>
           <input
@@ -143,7 +172,7 @@ function FilterDialog({value, onApply, onCancel}: Omit<FilterPanelProps, "open">
             aria-describedby={describedBy("prefix", `${id}-prefix-hint`)}
             onChange={(event) => update({prefix: event.target.value})}
           />
-          <small id={`${id}-prefix-hint`}>Literal text in this folder; letter case is ignored.</small>
+          <small id={`${id}-prefix-hint`}>Literal text; letter case is ignored.</small>
           {errorText("prefix")}
         </div>
 
@@ -318,6 +347,7 @@ function FilterDialog({value, onApply, onCancel}: Omit<FilterPanelProps, "open">
             type="button"
             onClick={() => {
               setDraft(emptyFilterDraft());
+              setDraftScope("root");
               setErrors({});
             }}
           >

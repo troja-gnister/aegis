@@ -39,6 +39,7 @@ def make_context(**changes: object) -> CursorContext:
         "sort": "name",
         "order": "asc",
         "limit": 100,
+        "scope": "directory",
     }
     values.update(changes)
     return CursorContext(**values)  # type: ignore[arg-type]
@@ -114,6 +115,7 @@ def test_cursor_preserves_maximum_complete_name_key() -> None:
         ("sort", "modified"),
         ("order", "desc"),
         ("limit", 101),
+        ("scope", "root"),
     ],
 )
 def test_every_context_field_invalidates_a_cursor(field: str, changed: object) -> None:
@@ -144,6 +146,19 @@ def test_context_values_are_digested_and_plaintext_namespace_is_not_in_payload()
     token = encode_cursor(context, (0, 0, b"name", b"name", ENTRY_ID), "next")
     assert "plaintext-session-key" not in token
     assert "plaintext-session-key" not in repr(unsigned(token))
+
+
+def test_scope_is_bound_in_both_directions_for_the_same_anchor_and_filters() -> None:
+    directory = make_context(scope="directory")
+    root = make_context(scope="root")
+    key = (1, 0, b"name", b"name", ENTRY_ID)
+    for issued, other in ((directory, root), (root, directory)):
+        token = encode_cursor(issued, key, "next")
+        assert decode_cursor(token, issued).key == key
+        with pytest.raises(CursorRestartRequired, match=r"^cursor_restart_required$"):
+            decode_cursor(token, other)
+    # The scope is digested with the rest of the context, never sent in plain text.
+    assert "root" not in repr(unsigned(encode_cursor(root, key, "next")))
 
 
 def test_signature_tampering_is_a_safe_restartable_error() -> None:
@@ -253,6 +268,8 @@ def test_sort_specific_tuple_types_and_ranges_are_enforced(
         {"limit": True},
         {"limit": 0},
         {"limit": 251},
+        {"scope": "everywhere"},
+        {"scope": None},
     ],
 )
 def test_invalid_context_and_page_limits_are_rejected(changes: dict[str, object]) -> None:

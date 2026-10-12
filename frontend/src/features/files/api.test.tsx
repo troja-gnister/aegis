@@ -27,6 +27,7 @@ const input: BrowseInput = {
   filters: {v: 1, type: ["jpg", "__unknown__"]},
   sort: "name",
   order: "asc",
+  scope: "directory",
 };
 
 function status() {
@@ -108,6 +109,46 @@ describe("file API guards", () => {
     await expect(fetchDirectory(input, new AbortController().signal)).rejects.toMatchObject({
       status: 502,
     });
+  });
+
+  it("requests a root-wide page without a parent and keeps each entry's folder", async () => {
+    const located = {...summary(), parentId: DIRECTORY_ID, parentName: "DCIM"};
+    server.use(http.get(`/api/v1/roots/${ROOT_ID}/entries`, ({request}) => {
+      const url = new URL(request.url);
+      expect([...url.searchParams.keys()].sort()).toEqual(["filters", "limit", "order", "scope", "sort"]);
+      expect(url.searchParams.get("scope")).toBe("root");
+      return HttpResponse.json({...page(), directoryId: ENTRY_ID, entries: [located]});
+    }));
+
+    const result = await fetchDirectory({...input, parentId: null, scope: "root"}, new AbortController().signal);
+    expect(result.entries[0]).toEqual({...summary(), location: {parentId: DIRECTORY_ID, parentName: "DCIM"}});
+  });
+
+  it.each([
+    ["a missing folder", (entry: Record<string, unknown>) => { delete entry.parentName; }],
+    ["a malformed folder ID", (entry: Record<string, unknown>) => { entry.parentId = "../folder"; }],
+    ["a non-text folder name", (entry: Record<string, unknown>) => { entry.parentName = 7; }],
+    ["a private extra field", (entry: Record<string, unknown>) => { entry.parentPath = "/private"; }],
+  ])("rejects %s in a root-wide entry", async (_name, mutate) => {
+    const located: Record<string, unknown> = {...summary(), parentId: DIRECTORY_ID, parentName: "DCIM"};
+    mutate(located);
+    server.use(http.get(`/api/v1/roots/${ROOT_ID}/entries`, () =>
+      HttpResponse.json({...page(), entries: [located]})));
+
+    await expect(fetchDirectory({...input, parentId: null, scope: "root"}, new AbortController().signal))
+      .rejects.toMatchObject({status: 502});
+  });
+
+  it("refuses a root-wide request that names a parent before sending it", async () => {
+    let requests = 0;
+    server.use(http.get(`/api/v1/roots/${ROOT_ID}/entries`, () => {
+      requests += 1;
+      return HttpResponse.json(page());
+    }));
+    await expect(fetchDirectory({...input, scope: "root"}, new AbortController().signal)).rejects.toBeDefined();
+    await expect(fetchDirectory({...input, scope: "everywhere" as "root"}, new AbortController().signal))
+      .rejects.toBeDefined();
+    expect(requests).toBe(0);
   });
 
   it("accepts a media summary with a ready, same-origin thumbnail for the same entry", async () => {

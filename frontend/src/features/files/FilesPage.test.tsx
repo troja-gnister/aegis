@@ -1,5 +1,5 @@
 import {QueryClient, QueryClientProvider} from "@tanstack/react-query";
-import {fireEvent, render, screen, waitFor} from "@testing-library/react";
+import {fireEvent, render, screen, waitFor, within} from "@testing-library/react";
 import {http, HttpResponse} from "msw";
 import {StrictMode, useEffect, useRef} from "react";
 import {MemoryRouter, Route, Routes, useLocation, useNavigate} from "react-router";
@@ -8,6 +8,7 @@ import {server} from "../../test/server";
 import {AppRoutes} from "../../app/router";
 import {activateCacheNamespace} from "../auth/cache";
 import {AuthSessionContext} from "../auth/session";
+import {entryMediaFixture} from "../media/test-fixtures";
 import type {SessionResponse} from "../auth/types";
 import {FileNavigationProvider, FileNavigationRouteConsumer, FilesPage} from "./FilesPage";
 import type {FileNavigation, FileNavigationRecord} from "./navigation";
@@ -30,9 +31,11 @@ function rootResponse(roots = [{
   return {roots};
 }
 
-function pageResponse(parentId: string | null, entries = [fixtureEntry(0)], state = "ready") {
+/** A directory page; a root-scope request's entries also name their folder, as the API does. */
+function pageResponse(parentId: string | null, entries = [fixtureEntry(0)], state = "ready", url?: URL) {
+  const located = url?.searchParams.get("scope") === "root";
   return {
-    entries,
+    entries: located ? entries.map((entry) => ({...entry, parentId: PARENT_ID, parentName: "DCIM"})) : entries,
     nextCursor: null,
     previousCursor: null,
     directoryId: parentId ?? FIXTURE_ROOT_ID,
@@ -77,6 +80,7 @@ function FilterSortRouteControl({navigation, rememberRoute}: {
       rootId: FIXTURE_ROOT_ID,
       parentId: null,
       filters: {v: 1, kind: ["file"]},
+      scope: "directory",
       sort: "size",
       order: "desc",
       cursor: null,
@@ -475,6 +479,7 @@ describe("FilesPage", () => {
       sort: "name",
       order: "asc",
       cursor: null,
+      scope: "directory",
     }).queryKey;
     await waitFor(() => expect(queryClient.getQueryData(rootDirectoryKey)).toBeUndefined());
 
@@ -499,8 +504,9 @@ describe("FilesPage", () => {
     server.use(
       http.get("/api/v1/roots", () => HttpResponse.json(rootResponse())),
       http.get(`/api/v1/roots/${FIXTURE_ROOT_ID}/entries`, ({request}) => {
-        requests.push(new URL(request.url));
-        return HttpResponse.json(pageResponse(null, [file]));
+        const url = new URL(request.url);
+        requests.push(url);
+        return HttpResponse.json(pageResponse(null, [file], "ready", url));
       }),
       http.get(`/api/v1/entries/${file.id}`, () => HttpResponse.json({
         ...file, parentId: FIXTURE_ROOT_ID, ancestors: [], ancestorsTruncated: false,
@@ -558,7 +564,9 @@ describe("FilesPage", () => {
         const cursor = url.searchParams.get("cursor");
         const pageNumber = cursor === null ? 0 : Number(cursor.split(":").at(-1));
         return HttpResponse.json({
-          ...pageResponse(null, Array.from({length: 100}, (_, index) => fixtureEntry(pageNumber * 100 + index))),
+          ...pageResponse(
+            null, Array.from({length: 100}, (_, index) => fixtureEntry(pageNumber * 100 + index)), "ready", url,
+          ),
           nextCursor: `cursor:${pageNumber + 1}`,
           previousCursor: pageNumber > 0 ? `cursor:${pageNumber - 1}` : null,
         });
@@ -596,7 +604,9 @@ describe("FilesPage", () => {
         }
         const pageNumber = cursor === null ? 0 : Number(cursor.split(":").at(-1));
         return HttpResponse.json({
-          ...pageResponse(null, Array.from({length: 100}, (_, index) => fixtureEntry(pageNumber * 100 + index))),
+          ...pageResponse(
+            null, Array.from({length: 100}, (_, index) => fixtureEntry(pageNumber * 100 + index)), "ready", url,
+          ),
           nextCursor: `cursor:${pageNumber + 1}`,
           previousCursor: pageNumber > 0 ? `cursor:${pageNumber - 1}` : null,
         });
@@ -873,7 +883,9 @@ describe("FilesPage", () => {
         const cursor = url.searchParams.get("cursor");
         const pageNumber = cursor === null ? 0 : Number(cursor.split(":").at(-1));
         return HttpResponse.json({
-          ...pageResponse(null, Array.from({length: 100}, (_, index) => fixtureEntry(pageNumber * 100 + index))),
+          ...pageResponse(
+            null, Array.from({length: 100}, (_, index) => fixtureEntry(pageNumber * 100 + index)), "ready", url,
+          ),
           nextCursor: `cursor:${pageNumber + 1}`,
           previousCursor: pageNumber > 0 ? `cursor:${pageNumber - 1}` : null,
         });
@@ -930,5 +942,147 @@ describe("FilesPage", () => {
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(screen.queryByRole("region", {name: "File details"})).not.toBeInTheDocument();
     expect(detailRequests).toBe(1);
+  });
+});
+
+describe("FilesPage root-wide scope", () => {
+  const ROUTE_FOLDER = "33333333-3333-4333-8333-333333333333";
+  const nested = {...fixtureEntry(1), displayName: "IMG_0001.pdf", typeHint: "pdf"};
+  const top = {...fixtureEntry(2), displayName: "top.pdf", typeHint: "pdf"};
+  const photo = {
+    ...fixtureEntry(3), displayName: "IMG_0002.jpg", media: entryMediaFixture(fixtureEntry(3).id),
+  };
+
+  function rootsWith(permissions: string[]) {
+    return http.get("/api/v1/roots", () => HttpResponse.json(rootResponse([{
+      id: FIXTURE_ROOT_ID, displayName: "Synthetic archive", mode: "read_only", permissions,
+      authorizationEpoch: 4,
+    }])));
+  }
+
+  function entriesHandler(requests: URL[], results = [nested, top, photo]) {
+    return http.get(`/api/v1/roots/${FIXTURE_ROOT_ID}/entries`, ({request}) => {
+      const url = new URL(request.url);
+      requests.push(url);
+      if (url.searchParams.get("scope") !== "root") {
+        return HttpResponse.json(pageResponse(url.searchParams.get("parent"), [fixtureEntry(0)]));
+      }
+      return HttpResponse.json(pageResponse(null, results.map((entry) => ({
+        ...entry,
+        parentId: entry === top ? FIXTURE_ROOT_ID : PARENT_ID,
+        parentName: entry === top ? "" : "DCIM",
+      }))));
+    });
+  }
+
+  it("searches all folders once filters are set and keeps the scope out of the URL", async () => {
+    const requests: URL[] = [];
+    server.use(rootsWith(["browse"]), entriesHandler(requests));
+    await renderFiles(`/files/${FIXTURE_ROOT_ID}/directories/${ROUTE_FOLDER}`);
+    await screen.findByRole("list", {name: "Files"});
+    expect(screen.queryByRole("group", {name: "Search in"})).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", {name: "Filters"}));
+    expect(screen.getByRole("radio", {name: "All folders"})).toBeChecked();
+    fireEvent.click(screen.getByRole("checkbox", {name: ".pdf"}));
+    fireEvent.click(screen.getByRole("button", {name: "Apply filters"}));
+
+    const nestedRow = await screen.findByRole("button", {name: "Select file IMG_0001.pdf in DCIM"});
+    expect(nestedRow).toHaveTextContent("in DCIM");
+    expect(screen.getByRole("button", {name: "Select file top.pdf in Synthetic archive"})).toBeVisible();
+    const search = requests.at(-1)!;
+    expect(search.searchParams.get("scope")).toBe("root");
+    expect(search.searchParams.has("parent")).toBe(false);
+    expect(JSON.parse(search.searchParams.get("filters")!)).toEqual({v: 1, type: ["pdf"]});
+    expect(screen.getByLabelText("Current route")).toHaveTextContent(
+      `/files/${FIXTURE_ROOT_ID}/directories/${ROUTE_FOLDER}`,
+    );
+    expect(screen.getByLabelText("History state")).toHaveTextContent("null");
+
+    const scope = screen.getByRole("group", {name: "Search in"});
+    expect(within(scope).getByRole("button", {name: "All folders"})).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(within(scope).getByRole("button", {name: "This folder"}));
+    await waitFor(() => expect(requests.at(-1)!.searchParams.has("scope")).toBe(false));
+    expect(requests.at(-1)!.searchParams.get("parent")).toBe(ROUTE_FOLDER);
+    expect(JSON.parse(requests.at(-1)!.searchParams.get("filters")!)).toEqual({v: 1, type: ["pdf"]});
+    expect(await screen.findByRole("button", {name: `Select file ${fixtureEntry(0).displayName}`})).toBeVisible();
+  });
+
+  it("keeps the chosen scope for chips and lists the folder again without filters", async () => {
+    const requests: URL[] = [];
+    server.use(rootsWith(["browse"]), entriesHandler(requests));
+    await renderFiles();
+    await screen.findByRole("list", {name: "Files"});
+    fireEvent.click(screen.getByRole("button", {name: "Filters"}));
+    fireEvent.click(screen.getByRole("checkbox", {name: ".pdf"}));
+    fireEvent.change(screen.getByLabelText("Filename starts with"), {target: {value: "IMG"}});
+    fireEvent.click(screen.getByRole("button", {name: "Apply filters"}));
+    await waitFor(() => expect(requests.at(-1)!.searchParams.get("scope")).toBe("root"));
+
+    fireEvent.click(screen.getByRole("button", {name: "Remove filter Type: .pdf"}));
+    await waitFor(() => expect(JSON.parse(requests.at(-1)!.searchParams.get("filters")!))
+      .toEqual({v: 1, prefix: "IMG"}));
+    expect(requests.at(-1)!.searchParams.get("scope")).toBe("root");
+    fireEvent.click(await screen.findByRole("button", {name: "Clear all filters"}));
+    await waitFor(() => expect(JSON.parse(requests.at(-1)!.searchParams.get("filters")!)).toEqual({v: 1}));
+    expect(requests.at(-1)!.searchParams.has("scope")).toBe(false);
+    expect(screen.queryByRole("group", {name: "Search in"})).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", {name: "Inspect navigation record"}));
+    expect(JSON.parse(screen.getByRole("button", {name: "Inspect navigation record"}).dataset.record!))
+      .toEqual({filters: {v: 1}, cursor: null, anchor: null});
+  });
+
+  it("opens a media match in the viewer with a search context and other files in details", async () => {
+    const requests: URL[] = [];
+    server.use(
+      rootsWith(["browse", "preview"]),
+      entriesHandler(requests),
+      http.get(`/api/v1/entries/${top.id}`, () => HttpResponse.json({
+        ...top, parentId: FIXTURE_ROOT_ID, ancestors: [{id: FIXTURE_ROOT_ID, displayName: ""}],
+        ancestorsTruncated: false,
+      })),
+    );
+    await renderFiles();
+    await screen.findByRole("list", {name: "Files"});
+    fireEvent.click(screen.getByRole("button", {name: "Filters"}));
+    fireEvent.click(screen.getByRole("checkbox", {name: ".jpg"}));
+    fireEvent.click(screen.getByRole("button", {name: "Apply filters"}));
+
+    fireEvent.click(await screen.findByRole("button", {name: "Select file top.pdf in Synthetic archive"}));
+    const details = screen.getByRole("region", {name: "File details"});
+    const folder = await within(details).findByRole("link", {name: "Open folder Synthetic archive"});
+    expect(folder).toHaveAttribute("href", `/files/${FIXTURE_ROOT_ID}`);
+
+    fireEvent.click(screen.getByRole("button", {name: "Open photo IMG_0002.jpg in DCIM"}));
+    await waitFor(() => expect(screen.getByLabelText("Current route")).toHaveTextContent(
+      `/files/${FIXTURE_ROOT_ID}/view/${photo.id}`,
+    ));
+    const state = screen.getByLabelText("History state").textContent ?? "";
+    expect(JSON.parse(state).aegisMediaViewer.context).toMatchObject({
+      source: "search", rootId: FIXTURE_ROOT_ID, parentId: null,
+    });
+    // Filters and names stay in memory: the history entry carries opaque IDs and a route key.
+    expect(state).not.toMatch(/jpg|pdf|DCIM|filters/);
+  });
+
+  it("opens media matches in details without PREVIEW", async () => {
+    server.use(
+      rootsWith(["browse"]),
+      entriesHandler([]),
+      http.get(`/api/v1/entries/${photo.id}`, () => HttpResponse.json({
+        ...photo, parentId: PARENT_ID, ancestors: [{id: FIXTURE_ROOT_ID, displayName: ""}],
+        ancestorsTruncated: false,
+      })),
+    );
+    await renderFiles();
+    await screen.findByRole("list", {name: "Files"});
+    fireEvent.click(screen.getByRole("button", {name: "Filters"}));
+    fireEvent.click(screen.getByRole("checkbox", {name: ".jpg"}));
+    fireEvent.click(screen.getByRole("button", {name: "Apply filters"}));
+    fireEvent.click(await screen.findByRole("button", {name: "Select file IMG_0002.jpg in DCIM"}));
+    const details = screen.getByRole("region", {name: "File details"});
+    expect(await within(details).findByRole("link", {name: "Open folder DCIM"}))
+      .toHaveAttribute("href", `/files/${FIXTURE_ROOT_ID}/directories/${PARENT_ID}`);
+    expect(screen.getByLabelText("Current route")).toHaveTextContent(`/files/${FIXTURE_ROOT_ID}`);
   });
 });

@@ -1,4 +1,11 @@
-"""Private HTTP transport for bounded catalog metadata and scan requests."""
+"""Private HTTP transport for bounded catalog metadata and scan requests.
+
+``GET /api/v1/roots/{root}/entries`` lists one directory's children (``scope=directory``,
+the default; ``parent`` names the directory, the root anchor when omitted) or, with
+``scope=root``, the entries matching the filters anywhere in the root. A root-scope
+request refuses ``parent`` (400) rather than ignoring it, so one URL never stands for
+two different listings; its entries also carry ``parentId`` and ``parentName``.
+"""
 
 from __future__ import annotations
 
@@ -52,7 +59,7 @@ CATALOG_UNAVAILABLE = {"type": "catalog_unavailable", "title": "Catalog unavaila
 SCAN_REQUEST_DENIED = {"type": "scan_request_denied", "title": "Scan request denied"}
 
 _ALLOWED_DIRECTORY_PARAMETERS = frozenset(
-    {"filters", "sort", "order", "limit", "parent", "cursor"}
+    {"filters", "sort", "order", "limit", "parent", "cursor", "scope"}
 )
 _INTEGER = re.compile(r"[1-9][0-9]{0,2}\Z", re.ASCII)
 _MAX_QUERY_STRING_BYTES = 32_768
@@ -66,6 +73,7 @@ class DirectoryInput(TypedDict):
     order: str
     limit: int
     cursor: str | None
+    scope: str
 
 
 def _response(data: Any = None, *, status: int = 200) -> Response:
@@ -146,6 +154,9 @@ def _directory_input(request: Request) -> DirectoryInput:
     limit = int(encoded_limit)
     if limit > 250:
         raise ValueError("invalid_catalog_query")
+    scope = values.get("scope", "directory")
+    if scope not in ("directory", "root") or (scope == "root" and "parent" in values):
+        raise ValueError("invalid_catalog_query")
     parent: UUID | None = None
     if "parent" in values:
         try:
@@ -166,6 +177,7 @@ def _directory_input(request: Request) -> DirectoryInput:
         "order": order,
         "limit": limit,
         "cursor": cursor,
+        "scope": scope,
     }
 
 

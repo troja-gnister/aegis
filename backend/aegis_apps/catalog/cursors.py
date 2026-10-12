@@ -29,6 +29,7 @@ MAX_TIMESTAMP_NS = 2**63 - 1
 
 type SortName = Literal["name", "modified", "size"]
 type SortOrder = Literal["asc", "desc"]
+type BrowseScope = Literal["directory", "root"]
 type CursorTravel = Literal["next", "previous"]
 type CursorSortValue = bytes | int
 type CursorKey = tuple[int, int, CursorSortValue, bytes, UUID]
@@ -56,6 +57,9 @@ class CursorContext:
     sort: SortName
     order: SortOrder
     limit: int
+    # A directory's children, or matching entries anywhere in the root (``parent_id``
+    # then names the root anchor). A cursor never crosses from one scope to the other.
+    scope: BrowseScope
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +104,8 @@ def _context_fields(context: CursorContext) -> dict[str, object]:
         raise _invalid()
     if not _bounded_integer(context.limit, 1, 250):
         raise _invalid()
+    if context.scope not in ("directory", "root") or type(context.scope) is not str:
+        raise _invalid()
     return {
         "user_id": str(context.user_id),
         "cache_namespace": context.cache_namespace,
@@ -112,6 +118,7 @@ def _context_fields(context: CursorContext) -> dict[str, object]:
         "sort": context.sort,
         "order": context.order,
         "limit": context.limit,
+        "scope": context.scope,
     }
 
 

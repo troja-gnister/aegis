@@ -1,6 +1,11 @@
 import type {EntryMedia} from "../media/types";
 
 export type EntryKind = "directory" | "file" | "symlink" | "special";
+/**
+ * Where a listing looks: one folder's children, or entries matching the filters
+ * anywhere in the root. Kept in memory with the filters, never in a URL.
+ */
+export type BrowseScope = "directory" | "root";
 export type SourceState = "present" | "missing" | "inaccessible" | "unsupported";
 
 export type FileFilters = {
@@ -25,7 +30,11 @@ export type EntrySummary = {
   version: string;
   /** Media summary for photo and video files; null for every other entry. */
   media: EntryMedia | null;
+  /** Root-wide results only: the folder holding the entry (an empty name is the root's top level). */
+  location?: EntryLocation;
 };
+
+export type EntryLocation = {parentId: string; parentName: string};
 
 export type IndexStatus = {
   state: "not_indexed" | "queued" | "scanning" | "ready" | "degraded" | "unavailable";
@@ -62,4 +71,6 @@ export type BrowseInput = {
   sort: "name" | "modified" | "size";
   order: "asc" | "desc";
   cursor?: string | null;
+  /** A `root` listing has no parent: `parentId` is then null. */
+  scope: BrowseScope;
 };

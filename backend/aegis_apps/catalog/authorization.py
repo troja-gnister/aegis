@@ -69,12 +69,17 @@ class BrowseContext:
 
 @contextmanager
 def bounded_read() -> Iterator[None]:
-    """Limit database waits, exposing only recognized timeout failures."""
+    """Limit database waits, exposing only recognized timeout failures.
+
+    JIT compilation is off for these page-sized reads: the planner's estimates for the
+    bounded ancestry walks exceed the JIT cost thresholds, and compiling then costs
+    orders of magnitude more than executing.
+    """
     try:
         with transaction.atomic():
             with connection.cursor() as cursor:
                 cursor.execute("SET LOCAL statement_timeout = '5s'")
-                cursor.execute("SET LOCAL lock_timeout = '1s'")
+                cursor.execute("SET LOCAL lock_timeout = '1s'; SET LOCAL jit = off")
             yield
     except OperationalError as exc:
         if getattr(exc.__cause__, "sqlstate", None) in ("57014", "55P03"):

@@ -1,5 +1,31 @@
-import {activeFilterFields, describeFilterField, removeFilter} from "./filter-state";
-import type {FileFilters} from "./types";
+import {activeFilterFields, describeFilterField, removeFilter, SCOPE_OPTIONS} from "./filter-state";
+import type {BrowseScope, FileFilters} from "./types";
+
+export type ScopeToggleProps = {
+  scope: BrowseScope;
+  onChange(scope: BrowseScope): void;
+};
+
+/** Where applied filters search: this folder or every folder of the root. */
+export function ScopeToggle({scope, onChange}: ScopeToggleProps) {
+  return (
+    <div className="scope-toggle" role="group" aria-label="Search in">
+      {SCOPE_OPTIONS.map((option) => (
+        <button
+          key={option.value}
+          className="interactive"
+          type="button"
+          aria-pressed={scope === option.value}
+          onClick={() => {
+            if (scope !== option.value) onChange(option.value);
+          }}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 export type FilterChipsProps = {
   value: FileFilters;

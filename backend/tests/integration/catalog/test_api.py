@@ -136,6 +136,10 @@ def test_unknown_and_foreign_catalog_objects_are_indistinguishable(api_catalog: 
         "delete=true",
         "move=true",
         "rename=true",
+        "scope=everywhere",
+        "scope=ROOT",
+        "scope=root&scope=root",
+        "scope=root&parent=00000000-0000-4000-8000-000000000000",
     ),
 )
 def test_directory_query_rejects_bad_bounded_or_content_inputs(
@@ -453,6 +457,69 @@ def test_http_filter_bounds_and_unknown_type_token_remain_distinct(api_catalog: 
     ]
     assert too_many.status_code == too_large.status_code == 400
     assert too_many.json()["type"] == too_large.json()["type"] == "invalid_catalog_query"
+
+
+def test_http_root_scope_lists_nested_matches_with_their_folder_only(api_catalog: Any) -> None:
+    def add(raw: bytes, parent: CatalogEntry, kind: str = "file") -> CatalogEntry:
+        name = source_name(raw)
+        return CatalogEntry.objects.create(
+            root=api_catalog.root,
+            source_parent=parent,
+            logical_parent=parent,
+            source_parent_revision=parent.source_revision,
+            raw_name=name.raw,
+            display_name=name.display,
+            name_key=name.order_key,
+            type_hint=name.type_hint,
+            kind=kind,
+            device=77,
+            inode=987654321,
+        )
+
+    dcim = add(b"DCIM", api_catalog.anchor, "directory")
+    nested = add(b"IMG_0001.JPG", dcim)
+    top = add(b"top.jpg", api_catalog.anchor)
+    jpg = json.dumps({"v": 1, "type": ["jpg"]})
+    folder = api_catalog.get(_root_path(api_catalog.root.pk), data={"filters": jpg})
+    root = api_catalog.get(
+        _root_path(api_catalog.root.pk),
+        data={"filters": jpg, "scope": "root", "limit": "1"},
+    )
+
+    assert [entry["id"] for entry in folder.json()["entries"]] == [str(top.pk)]
+    assert root.status_code == 200
+    _assert_private(root)
+    payload = root.json()
+    located = [(item["id"], item["parentId"], item["parentName"]) for item in payload["entries"]]
+    assert located == [(str(nested.pk), str(dcim.pk), "DCIM")]
+    assert payload["directoryId"] == str(api_catalog.anchor.pk)
+    raw = root.content.decode()
+    private = ("/srv/aegis", "raw_name", "rawName", "inode", "987654321")
+    assert all(value not in raw for value in private)
+    following = api_catalog.get(
+        _root_path(api_catalog.root.pk),
+        data={
+            "filters": jpg,
+            "scope": "root",
+            "limit": "1",
+            "cursor": payload["nextCursor"],
+        },
+    )
+    assert [entry["id"] for entry in following.json()["entries"]] == [str(top.pk)]
+    assert following.json()["entries"][0]["parentName"] == ""
+    # A root-scope cursor never continues the folder listing of the same filters.
+    replayed = api_catalog.get(
+        _root_path(api_catalog.root.pk),
+        data={
+            "filters": jpg,
+            "limit": "1",
+            "cursor": payload["nextCursor"],
+        },
+    )
+    assert replayed.status_code == 409
+    assert replayed.json()["type"] == "cursor_restart_required"
+    hidden = api_catalog.get(_root_path(uuid.uuid4()), data={"filters": jpg, "scope": "root"})
+    assert hidden.status_code == 404
 
 
 def test_authenticated_http_browse_stays_within_middleware_inclusive_budget(

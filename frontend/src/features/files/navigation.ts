@@ -3,7 +3,7 @@ import {
   isPrivateStateCurrent,
   registerPrivateStateCleanup,
 } from "../auth/cache";
-import type {FileFilters} from "./types";
+import type {BrowseScope, FileFilters} from "./types";
 
 const MAX_NAVIGATION_RECORDS = 32;
 const MAX_NAVIGATION_RECORD_BYTES = 8 * 1024;
@@ -13,6 +13,8 @@ export type FileNavigationRecord = {
   rootId: string;
   parentId: string | null;
   filters: FileFilters;
+  /** Applies while filters are set; without filters a route lists its own folder. */
+  scope: BrowseScope;
   sort: "name" | "modified" | "size";
   order: "asc" | "desc";
   cursor: string | null;
@@ -36,6 +38,7 @@ function clonedRecord(record: FileNavigationRecord): FileNavigationRecord {
     rootId: record.rootId,
     parentId: record.parentId,
     filters: JSON.parse(JSON.stringify(record.filters)) as FileFilters,
+    scope: record.scope === "root" ? "root" : "directory",
     sort: record.sort,
     order: record.order,
     cursor: record.cursor,

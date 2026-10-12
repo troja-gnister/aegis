@@ -24,7 +24,7 @@ type ContextViewerProps = {
 };
 
 function DirectoryViewer({context, navigation, ...props}: ContextViewerProps & {
-  context: Extract<MediaViewerContext, {source: "directory"}>;
+  context: Extract<MediaViewerContext, {source: "directory" | "search"}>;
   navigation: FileNavigation | null;
 }) {
   const list = useDirectoryViewerList(context, props.rootEpoch, props.namespace, navigation, props.entryId);
@@ -79,7 +79,7 @@ function ViewerPage({navigation}: {navigation: FileNavigation | null}) {
     onNavigate: showEntry,
     onClose: close,
   };
-  if (context?.source === "directory") {
+  if (context?.source === "directory" || context?.source === "search") {
     return <DirectoryViewer key={context.returnKey} context={context} navigation={navigation} {...props} />;
   }
   if (context?.source === "timeline") {

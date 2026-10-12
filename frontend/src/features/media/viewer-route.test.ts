@@ -32,8 +32,14 @@ describe("viewer route state", () => {
     const filteredTimeline = viewerLocationState(ENTRY_ID, {
       source: "timeline", rootId: ROOT_ID, returnKey: "k10", kind: "video", year: 2026,
     });
+    const search = viewerLocationState(ENTRY_ID, {
+      source: "search", rootId: ROOT_ID, parentId: PARENT_ID, returnKey: "k11",
+    });
 
-    for (const state of [directory, rootDirectory, timeline, filteredTimeline]) {
+    expect(search?.aegisMediaViewer.context).toEqual({
+      source: "search", rootId: ROOT_ID, parentId: PARENT_ID, returnKey: "k11",
+    });
+    for (const state of [directory, rootDirectory, timeline, filteredTimeline, search]) {
       expect(state).not.toBeNull();
       expect(parseMediaViewerState(JSON.parse(JSON.stringify(state)))).toEqual(state);
     }
@@ -55,6 +61,12 @@ describe("viewer route state", () => {
     }}}],
     ["retained filters", {aegisMediaViewer: {v: 1, entryId: ENTRY_ID, context: {
       source: "directory", rootId: ROOT_ID, parentId: null, returnKey: "k", filters: {v: 1, prefix: "private"},
+    }}}],
+    ["search filters", {aegisMediaViewer: {v: 1, entryId: ENTRY_ID, context: {
+      source: "search", rootId: ROOT_ID, parentId: null, returnKey: "k", filters: {v: 1, type: ["jpg"]},
+    }}}],
+    ["a search without its route folder", {aegisMediaViewer: {v: 1, entryId: ENTRY_ID, context: {
+      source: "search", rootId: ROOT_ID, returnKey: "k",
     }}}],
     ["a malformed entry ID", {aegisMediaViewer: {v: 1, entryId: "../x", context: {
       source: "timeline", rootId: ROOT_ID, returnKey: "k", kind: "all", year: null,

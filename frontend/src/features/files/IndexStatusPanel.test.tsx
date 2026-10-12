@@ -110,6 +110,24 @@ describe("IndexStatusPanel", () => {
     expect(panel).not.toHaveTextContent("%");
   });
 
+  it.each([
+    ["queued", "in this scan"],
+    ["scanning", "in this scan"],
+    ["ready", "in the last scan"],
+    ["degraded", "in the last scan"],
+  ] as const)("labels the %s counters as one scan's, never a running total", async (state, scope) => {
+    statusHandler(status(state, {observedEntries: "680123", completedDirectories: "146000"}));
+    await renderStatus();
+    const panel = await screen.findByRole("region", {name: "Index status"});
+    const counter = (name: string) => screen.getByText(name, {selector: "dt"}).nextElementSibling;
+    expect(await screen.findByText(`Entries observed ${scope}`)).toBeVisible();
+    expect(counter(`Entries observed ${scope}`)).toHaveTextContent("680,123");
+    expect(counter(`Directories completed ${scope}`)).toHaveTextContent("146,000");
+    expect(counter(`Directories with problems ${scope}`)).toBeInTheDocument();
+    expect(panel.querySelectorAll("dt")).toHaveLength(5);
+    expect(screen.queryByText(/total/i, {selector: "dt"})).not.toBeInTheDocument();
+  });
+
   it("distinguishes a failed status request from every index state", async () => {
     server.use(http.get(`/api/v1/roots/${FIXTURE_ROOT_ID}/index-status`, () =>
       HttpResponse.json({type: "catalog_unavailable", title: "Catalog unavailable"}, {status: 503}),

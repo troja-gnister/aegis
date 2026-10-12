@@ -1,5 +1,6 @@
 import {useQuery, useQueryClient} from "@tanstack/react-query";
 import {useEffect, useRef} from "react";
+import {Link} from "react-router";
 import {ApiProblem} from "../../api/problem";
 import {useAuthSession} from "../auth/session";
 import {mediaKindOf} from "../media/classify";
@@ -16,6 +17,8 @@ export type EntryDetailsPanelProps = {
   viewerContext?: MediaViewerContext;
   /** Called when Open is activated for a media entry, before the viewer route is entered. */
   onOpenMedia?(entryId: string): void;
+  /** Root-wide results: the entry's folder, offered as a link to its listing. */
+  folder?: {to: string; name: string; onOpen?(): void};
 };
 
 const KIND_TEXT: Record<EntryKind, string> = {
@@ -83,7 +86,7 @@ function detailsError(error: unknown): string {
   return "File details could not be loaded.";
 }
 
-export function EntryDetailsPanel({entryId, onClose, viewerContext, onOpenMedia}: EntryDetailsPanelProps) {
+export function EntryDetailsPanel({entryId, onClose, viewerContext, onOpenMedia, folder}: EntryDetailsPanelProps) {
   const {session} = useAuthSession();
   const queryClient = useQueryClient();
   const options = entryQueryOptions(session.cacheNamespace, entryId);
@@ -161,6 +164,15 @@ export function EntryDetailsPanel({entryId, onClose, viewerContext, onOpenMedia}
               <li key={ancestor.id} dir="auto">{ancestor.displayName === "" ? "Root" : ancestor.displayName}</li>
             ))}
           </ol>
+          {folder ? (
+            <Link
+              className="file-page-control entry-details__folder interactive"
+              to={folder.to}
+              onClick={() => folder.onOpen?.()}
+            >
+              Open folder <bdi>{folder.name}</bdi>
+            </Link>
+          ) : null}
           <p className="entry-details__read-only">{readOnlyText(entry)}</p>
         </>
       ) : null}

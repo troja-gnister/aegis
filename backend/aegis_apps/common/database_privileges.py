@@ -34,7 +34,7 @@ MANAGED_TABLE_COLUMNS: Final[dict[str, tuple[str, ...]]] = {
         "catalog_version", "children_version", "observation_epoch",
         "seen_generation", "seen_attempt",
         "observed_at", "logical_parent_id", "root_id", "source_parent_id",
-        "source_parent_revision",
+        "source_parent_revision", "retire_children",
     ),
     "django_migrations": ("id", "app", "name", "applied"),
     "django_admin_log": (

@@ -533,6 +533,114 @@ describe("Viewer in the directory context", () => {
   });
 });
 
+describe("Viewer in the search context", () => {
+  const photo = {
+    ...fixtureEntry(1), displayName: "Synthetic photo A.jpg", media: entryMediaFixture(fixtureEntry(1).id),
+  };
+  const notes = {...fixtureEntry(2), displayName: "Notes.txt", typeHint: "txt"};
+  const clip = {
+    ...fixtureEntry(3), displayName: "Synthetic clip B.mp4", typeHint: "mp4",
+    media: entryMediaFixture(fixtureEntry(3).id, {kind: "video", durationMs: 5000}),
+  };
+  const status = {
+    state: "ready", generation: "1", observedEntries: "3", completedDirectories: "1",
+    degradedDirectories: "0", updatedAt: "2026-09-21T12:00:00Z", lastCompletedAt: "2026-09-21T12:00:00Z",
+  };
+
+  it("moves through the root-wide results and returns to them with their filters", async () => {
+    const requests: URL[] = [];
+    server.use(
+      rootsHandler(),
+      mediaHandler({videos: new Set([clip.id])}),
+      http.get(`/api/v1/roots/${FIXTURE_ROOT_ID}/index-status`, () => HttpResponse.json(status)),
+      http.get(`/api/v1/roots/${FIXTURE_ROOT_ID}/entries`, ({request}) => {
+        const url = new URL(request.url);
+        requests.push(url);
+        const located = url.searchParams.get("scope") === "root";
+        return HttpResponse.json({
+          // The folder's own listing has no media: neighbors can only come from the search.
+          entries: located
+            ? [photo, notes, clip].map((entry) => ({...entry, parentId: PARENT_ID, parentName: "DCIM"}))
+            : [notes],
+          nextCursor: null,
+          previousCursor: null,
+          directoryId: FIXTURE_ROOT_ID,
+          directoryVersion: "1",
+          contractVersion: 1,
+          indexStatus: status,
+        });
+      }),
+    );
+    const queryClient = new QueryClient({defaultOptions: {queries: {retry: false}}});
+    clients.add(queryClient);
+    await activateCacheNamespace(queryClient, SESSION.cacheNamespace);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AuthSessionContext.Provider value={{session: SESSION}}>
+          <MemoryRouter initialEntries={[`/files/${FIXTURE_ROOT_ID}`]}>
+            <FileNavigationProvider>
+              <LocationProbe />
+              <Routes>
+                <Route path="/files/:rootId" element={<FilesPage />} />
+                <Route path="/files/:rootId/view/:entryId" element={<ViewerRoute />} />
+              </Routes>
+            </FileNavigationProvider>
+          </MemoryRouter>
+        </AuthSessionContext.Provider>
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", {name: "Filters"}));
+    fireEvent.click(screen.getByRole("checkbox", {name: ".jpg"}));
+    fireEvent.click(screen.getByRole("checkbox", {name: ".mp4"}));
+    fireEvent.click(screen.getByRole("button", {name: "Apply filters"}));
+    fireEvent.click(await screen.findByRole("button", {name: "Open photo Synthetic photo A.jpg in DCIM"}));
+
+    await screen.findByRole("dialog", {name: "Synthetic photo A.jpg"});
+    expect(await screen.findByText("1 of 2")).toBeVisible();
+    expect(historyState().aegisMediaViewer.context).toMatchObject({source: "search", parentId: null});
+    fireEvent.keyDown(screen.getByRole("dialog"), {key: "ArrowRight"});
+    await screen.findByRole("dialog", {name: "Synthetic clip B.mp4"});
+    expect(screen.getByText("2 of 2")).toBeVisible();
+    // The viewer read the file list's cached search window: no second search was sent.
+    expect(requests.filter((url) => url.searchParams.get("scope") === "root")).toHaveLength(1);
+
+    fireEvent.keyDown(screen.getByRole("dialog"), {key: "Escape"});
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() => expect(document.activeElement)
+      .toHaveAccessibleName("Open video Synthetic clip B.mp4 in DCIM"));
+    expect(screen.getByRole("button", {name: "Remove filter Type: .jpg or .mp4"})).toBeVisible();
+    expect(within(screen.getByRole("group", {name: "Search in"})).getByRole("button", {name: "All folders"}))
+      .toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("shows only the entry when the search it came from is gone", async () => {
+    let requests = 0;
+    server.use(
+      rootsHandler(),
+      mediaHandler(),
+      http.get(`/api/v1/entries/${photo.id}`, () => HttpResponse.json({
+        ...photo, parentId: PARENT_ID, ancestors: [], ancestorsTruncated: false,
+      })),
+      http.get(`/api/v1/roots/${FIXTURE_ROOT_ID}/entries`, () => {
+        requests += 1;
+        return HttpResponse.json({});
+      }),
+    );
+    const context: MediaViewerContext = {
+      source: "search", rootId: FIXTURE_ROOT_ID, parentId: null, returnKey: "lost-search",
+    };
+    await renderViewer([
+      {pathname: `/files/${FIXTURE_ROOT_ID}`, key: "lost-search"},
+      {pathname: viewerPath(FIXTURE_ROOT_ID, photo.id), state: viewerLocationState(photo.id, context)},
+    ]);
+    await screen.findByRole("dialog", {name: "Synthetic photo A.jpg"});
+    expect(screen.queryByRole("button", {name: /^(Next|Previous)/})).not.toBeInTheDocument();
+    expect(screen.queryByText(/ of /)).not.toBeInTheDocument();
+    expect(requests).toBe(0);
+  });
+});
+
 describe("Viewer toolbar and accessibility", () => {
   it("offers Download only with EXPORT", async () => {
     server.use(rootsHandler(), timelineHandler(), mediaHandler({exportAllowed: true}));

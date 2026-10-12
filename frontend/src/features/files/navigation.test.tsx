@@ -10,6 +10,7 @@ function record(index: number) {
     rootId: ROOT_ID,
     parentId: `${index.toString(16).padStart(8, "0")}-2222-4222-8222-222222222222`,
     filters: {v: 1 as const},
+    scope: "directory" as const,
     sort: "name" as const,
     order: "asc" as const,
     cursor: `cursor:${index}`,
@@ -61,6 +62,21 @@ describe("file navigation", () => {
     expect(() => navigation.remember("x".repeat(9 * 1024), record(34)))
       .toThrow("Navigation record exceeds 8192 bytes");
     expect(navigation.size).toBe(32);
+  });
+
+  it("keeps a root-wide scope with its filters and copies records in both directions", async () => {
+    const queryClient = new QueryClient();
+    clients.add(queryClient);
+    await activateCacheNamespace(queryClient, "scope-namespace");
+    const navigation = createFileNavigation("scope-namespace");
+    stores.add(navigation);
+    const search = {...record(1), filters: {v: 1 as const, type: ["jpg"]}, scope: "root" as const};
+    navigation.remember("search", search);
+    search.filters.type!.push("png");
+    const recalled = navigation.recall("search")!;
+    expect(recalled).toEqual({...record(1), filters: {v: 1, type: ["jpg"]}, scope: "root"});
+    recalled.filters.type!.push("gif");
+    expect(navigation.recall("search")!.filters).toEqual({v: 1, type: ["jpg"]});
   });
 
   it("clears synchronously on auth purge and unsubscribes on owner disposal", async () => {

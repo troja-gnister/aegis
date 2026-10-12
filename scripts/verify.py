@@ -378,6 +378,9 @@ def test_database() -> Iterator[dict[str, str]]:
             "--mount", f"type=bind,src={password_file},dst=/run/test-password,readonly",
             "--env", "POSTGRES_PASSWORD_FILE=/run/test-password",
             "--env", "POSTGRES_DB=aegis", POSTGRES_IMAGE,
+            # WAL shares the memory-only data volume: checkpoint and recycle it early
+            # instead of letting the default 1 GB WAL budget fill the tmpfs (PANIC).
+            "postgres", "-c", "max_wal_size=64MB", "-c", "min_wal_size=32MB",
         )
         container("start", container_id)
         binding = container("port", name, "5432/tcp").stdout.strip()

@@ -143,6 +143,24 @@
   -webkit-line-clamp: 2;
 }
 
+.entry-details__folder {
+  max-inline-size: 100%;
+  overflow-wrap: anywhere;
+  text-align: start;
+}
+
+.file-row--located .file-row__name {
+  -webkit-line-clamp: 1;
+}
+
+.file-row__location {
+  overflow: hidden;
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .file-row__metadata {
   overflow: hidden;
   color: var(--color-text-muted);
@@ -284,6 +302,26 @@
 .file-page-control--primary {
   border-color: var(--color-primary-strong);
   background: var(--color-primary-strong);
+}
+
+.scope-toggle {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.scope-toggle button {
+  padding-inline: 0.875rem;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  color: var(--color-text);
+  background: var(--color-surface-raised);
+  cursor: pointer;
+}
+
+.scope-toggle button[aria-pressed="true"] {
+  border-color: var(--color-primary);
+  background: rgb(129 140 248 / 22%);
 }
 
 .filter-chips {

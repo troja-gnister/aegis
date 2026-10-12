@@ -11,6 +11,7 @@ import {capturePrivateState} from "../auth/cache";
 import {validatedEntryMedia} from "../media/validate";
 import type {
   BrowseInput,
+  BrowseScope,
   DirectoryPage,
   EntryDetails,
   EntryKind,
@@ -145,7 +146,22 @@ function validatedIndexStatus(value: unknown): IndexStatus {
   };
 }
 
-function validatedDirectoryPage(value: unknown, rootId: string, parentId: string | null): DirectoryPage {
+/** A root-wide result: an entry summary plus its folder (`parentId`, `parentName`). */
+function validatedLocatedSummary(value: unknown, rootId: string): EntrySummary {
+  const fields = objectWithKeys(value, [...SUMMARY_KEYS, "parentId", "parentName"]);
+  const summaryFields = Object.fromEntries(SUMMARY_KEYS.map((key) => [key, fields[key]]));
+  return {
+    ...validatedSummary(summaryFields, rootId),
+    location: {parentId: uuid(fields.parentId), parentName: label(fields.parentName, true)},
+  };
+}
+
+function validatedDirectoryPage(
+  value: unknown,
+  rootId: string,
+  parentId: string | null,
+  scope: BrowseScope,
+): DirectoryPage {
   const fields = objectWithKeys(value, [
     "contractVersion", "directoryId", "directoryVersion", "entries", "indexStatus",
     "nextCursor", "previousCursor",
@@ -153,7 +169,9 @@ function validatedDirectoryPage(value: unknown, rootId: string, parentId: string
   if (!Array.isArray(fields.entries) || fields.entries.length > 250 || fields.contractVersion !== 1) {
     invalidResponse();
   }
-  const entries = fields.entries.map((entry) => validatedSummary(entry, rootId));
+  const entries = fields.entries.map((entry) => scope === "root"
+    ? validatedLocatedSummary(entry, rootId)
+    : validatedSummary(entry, rootId));
   if (new Set(entries.map((entry) => entry.id)).size !== entries.length) invalidResponse();
   const directoryId = uuid(fields.directoryId);
   if (parentId !== null && directoryId !== parentId) invalidResponse();
@@ -250,12 +268,15 @@ function validatedFilters(value: FileFilters): FileFilters {
 }
 
 function assertInput(input: BrowseInput): void {
-  const allowed = new Set(["namespace", "rootId", "rootEpoch", "parentId", "filters", "sort", "order", "cursor"]);
+  const allowed = new Set([
+    "namespace", "rootId", "rootEpoch", "parentId", "filters", "sort", "order", "cursor", "scope",
+  ]);
   if (!input || typeof input !== "object" || Array.isArray(input) ||
       Object.keys(input).some((key) => !allowed.has(key)) ||
       typeof input.namespace !== "string" || input.namespace.length < 1 || input.namespace.length > 128 ||
       !Number.isSafeInteger(input.rootEpoch) || input.rootEpoch < 0 ||
-      !["name", "modified", "size"].includes(input.sort) || !["asc", "desc"].includes(input.order)) {
+      !["name", "modified", "size"].includes(input.sort) || !["asc", "desc"].includes(input.order) ||
+      !["directory", "root"].includes(input.scope) || (input.scope === "root" && input.parentId !== null)) {
     invalidResponse();
   }
   uuid(input.rootId);
@@ -272,6 +293,7 @@ export async function fetchDirectory(input: BrowseInput, signal: AbortSignal): P
     filters: JSON.stringify(input.filters), sort: input.sort, order: input.order, limit: "100",
   });
   if (input.parentId !== null) parameters.set("parent", input.parentId);
+  if (input.scope === "root") parameters.set("scope", "root");
   if (input.cursor !== undefined && input.cursor !== null) parameters.set("cursor", input.cursor);
   const response = await authorityBoundRequest(
     apiRequest<unknown>(`/api/v1/roots/${input.rootId}/entries?${parameters.toString()}`, {
@@ -281,7 +303,7 @@ export async function fetchDirectory(input: BrowseInput, signal: AbortSignal): P
     signal,
     input.namespace,
   );
-  const result = validatedDirectoryPage(response, input.rootId, input.parentId);
+  const result = validatedDirectoryPage(response, input.rootId, input.parentId, input.scope);
   assertAuthority(snapshot, signal, input.namespace);
   return result;
 }

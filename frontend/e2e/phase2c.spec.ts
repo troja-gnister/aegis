@@ -295,6 +295,7 @@ async function showOnly(page: Page, prefix: string) {
   const dialog = page.getByRole("dialog", {name: "Filter files"});
   await expect(dialog).toBeVisible();
   await dialog.getByRole("button", {name: "Clear all", exact: true}).click();
+  await dialog.getByRole("radio", {name: "This folder", exact: true}).check();
   await dialog.getByLabel("Filename starts with").fill(prefix);
   const firstPage = page.waitForResponse((response) =>
     ENTRIES_PATH.test(new URL(response.url()).pathname) && response.request().method() === "GET");
@@ -905,4 +906,54 @@ test("revoking the grant turns every media URL into 404 and clears the open view
   } finally {
     await setRootGrant(page, rootId, ALICE_PERMISSIONS);
   }
+});
+
+test("filters search all folders: .jpg finds the nested photo and the viewer follows the results", async ({page}) => {
+  await signIn(page, "alice", requiredSecret("E2E_ALICE_PASSWORD"));
+  const rootId = await aliceRootId(page);
+  const beach = named(await mediaItems(page, rootId), "beach.jpg");
+  await openFiles(page, rootId);
+
+  await page.getByRole("button", {name: "Filters", exact: true}).click();
+  const dialog = page.getByRole("dialog", {name: "Filter files"});
+  await expect(dialog.getByRole("radio", {name: "All folders", exact: true})).toBeChecked();
+  await dialog.getByLabel(".jpg", {exact: true}).check();
+  const search = page.waitForResponse((response) =>
+    ENTRIES_PATH.test(new URL(response.url()).pathname) && response.request().method() === "GET");
+  await dialog.getByRole("button", {name: "Apply filters", exact: true}).click();
+  const response = await search;
+  expect(response.status()).toBe(200);
+  const sent = new URL(response.url()).searchParams;
+  expect(sent.get("scope")).toBe("root");
+  expect(sent.has("parent")).toBe(false);
+
+  // The photo two folders down is found, with its folder; the top-level matches name the root.
+  const files = page.getByRole("list", {name: "Files"});
+  await expect(files.getByRole("listitem")).toHaveCount(3);
+  const nested = page.getByRole("button", {name: "Open photo beach.jpg in summer", exact: true});
+  await expect(nested).toContainText("in summer");
+  await expect(page.getByRole("button", {name: "Open photo photo.JPG in Alice files", exact: true}))
+    .toBeVisible();
+  // Scope and filters stay in memory, never in the address.
+  await expect(page).toHaveURL(new RegExp(`/files/${rootId}$`));
+
+  await nested.click();
+  const viewer = page.getByRole("dialog");
+  await expect(viewer.getByRole("heading", {level: 2})).toHaveText("beach.jpg");
+  await expect(page).toHaveURL(new RegExp(`/files/${rootId}/view/${beach.id}$`));
+  // Its neighbors are the search results (its own folder holds no other photo).
+  await expect(viewer.getByText("1 of 3", {exact: true})).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page).toHaveURL(new RegExp(`/files/${rootId}$`));
+  await expect(nested).toBeFocused();
+
+  // This folder narrows the same filters to the root's own entries.
+  const narrowed = page.waitForResponse((answer) =>
+    ENTRIES_PATH.test(new URL(answer.url()).pathname) && answer.request().method() === "GET");
+  await page.getByRole("group", {name: "Search in"}).getByRole("button", {name: "This folder"}).click();
+  expect(new URL((await narrowed).url()).searchParams.has("scope")).toBe(false);
+  await expect(files.getByRole("listitem")).toHaveCount(2);
+  await expect(fileRow(page, "photo.JPG")).toBeVisible();
+  await expect(page.getByText("beach.jpg", {exact: true})).toHaveCount(0);
 });

@@ -126,6 +126,8 @@ export type TimelinePage = {
  */
 export type MediaViewerContext =
   | {source: "directory"; rootId: string; parentId: string | null; returnKey: string}
+  /** Root-wide filtered results opened from the Files route of `parentId`. */
+  | {source: "search"; rootId: string; parentId: string | null; returnKey: string}
   | {source: "timeline"; rootId: string; returnKey: string; kind: TimelineKind; year: number | null};
 
 export type MediaViewerState = {

@@ -32,12 +32,17 @@ function emptyNotice(page: Page): Locator {
   return page.locator("p.files-page__empty");
 }
 
+function escaped(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** A file row; root-wide results (filters search all folders by default) also name their folder. */
 function fileRow(page: Page, name: string): Locator {
-  return page.getByRole("button", {name: `Select file ${name}`, exact: true});
+  return page.getByRole("button", {name: new RegExp(`^Select file ${escaped(name)}( in .+)?$`)});
 }
 
 function directoryRow(page: Page, name: string): Locator {
-  return page.getByRole("button", {name: `Open directory ${name}`, exact: true});
+  return page.getByRole("button", {name: new RegExp(`^Open directory ${escaped(name)}( in .+)?$`)});
 }
 
 async function openRoot(page: Page, name: string) {
@@ -72,9 +77,13 @@ async function filterBy(page: Page, edit: (dialog: Locator) => Promise<void>) {
   await applyFilters(page, dialog);
 }
 
+/** Exactly these rows, by their names (a root-wide row also names its folder). */
 async function expectOnlyRows(page: Page, names: string[]) {
   const list = files(page);
-  for (const name of names) await expect(list.getByText(name, {exact: true})).toBeVisible();
+  for (const name of names) {
+    const row = list.locator(".file-row__name", {hasText: new RegExp(`^${escaped(name)}$`)});
+    await expect(row).toBeVisible();
+  }
   await expect(list.getByRole("listitem")).toHaveCount(names.length);
 }
 
@@ -204,7 +213,8 @@ test.describe("filters in a DST-observing browser time zone", () => {
       await dialog.getByLabel(".jpg", {exact: true}).check();
       await dialog.getByLabel(".pdf", {exact: true}).check();
     });
-    await expectOnlyRows(page, ["corrupt.jpg", "photo.JPG", "résumé.pdf"]);
+    // Filters search every folder by default: the nested photo is found too.
+    await expectOnlyRows(page, ["beach.jpg", "corrupt.jpg", "photo.JPG", "résumé.pdf"]);
 
     await filterBy(page, async (dialog) => {
       await dialog.getByLabel("Minimum size", {exact: true}).fill("1");
@@ -234,7 +244,7 @@ test.describe("filters in a DST-observing browser time zone", () => {
     await filterBy(page, (dialog) => dialog.getByLabel("Symbolic link", {exact: true}).check());
     await expectOnlyRows(page, ["link-outside"]);
     await filterBy(page, (dialog) => dialog.getByLabel("Directory", {exact: true}).check());
-    await expectOnlyRows(page, ["albums", "empty-folder"]);
+    await expectOnlyRows(page, ["2024", "albums", "empty-folder", "summer"]);
 
     // Chip removal and Clear all return to the unfiltered first page.
     const cleared = entriesResponse(page, (url) => !url.searchParams.has("cursor"));

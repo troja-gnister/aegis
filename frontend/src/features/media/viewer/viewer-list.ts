@@ -1,6 +1,7 @@
 import {useInfiniteQuery, useQueryClient, type QueryKey} from "@tanstack/react-query";
 import {useCallback, useEffect, useMemo, useRef} from "react";
 import {ApiProblem} from "../../../api/problem";
+import {listingScope} from "../../files/filter-state";
 import type {FileNavigation} from "../../files/navigation";
 import {directoryQueryOptions} from "../../files/queries";
 import type {BrowseInput, EntrySummary, SourceState} from "../../files/types";
@@ -51,7 +52,7 @@ export type ViewerList = {
   rememberShown(entryId: string, moved: boolean): void;
 };
 
-type DirectoryContext = Extract<MediaViewerContext, {source: "directory"}>;
+type DirectoryContext = Extract<MediaViewerContext, {source: "directory" | "search"}>;
 type TimelineContext = Extract<MediaViewerContext, {source: "timeline"}>;
 
 /** A media file the viewer can show: a regular file the catalog describes as media. */
@@ -145,7 +146,12 @@ function useWindowControls(query: WindowQuery, currentPage: number, pageCount: n
  * session check), hold the context's list query so the opener gets its
  * window back instead of fetching it again.
  */
-function useRetainOnUnmount(options: {queryKey: QueryKey}, namespace: string, returnKey: string): void {
+function useRetainOnUnmount(
+  options: {queryKey: QueryKey},
+  namespace: string,
+  returnKey: string,
+  enabled = true,
+): void {
   const queryClient = useQueryClient();
   const optionsRef = useRef(options);
 
@@ -154,16 +160,20 @@ function useRetainOnUnmount(options: {queryKey: QueryKey}, namespace: string, re
   });
 
   useEffect(() => {
+    if (!enabled) return;
     // The viewer's own observer holds the window while it is mounted.
     releaseReturnRetention(namespace, returnKey);
     return () => retainForReturn(queryClient, optionsRef.current, namespace, returnKey);
-  }, [namespace, queryClient, returnKey]);
+  }, [enabled, namespace, queryClient, returnKey]);
 }
 
 /**
- * The directory window the viewer was opened from. The directory's filters,
- * sort and window cursor are recalled from the opener's in-memory navigation
- * record, so the query key (and cached pages) match the file list's.
+ * The file list window the viewer was opened from: a directory's children, or
+ * the root-wide filtered results of a Files route (`search`). The filters,
+ * scope, sort and window cursor are recalled from the opener's in-memory
+ * navigation record, so the query key (and cached pages) match the file list's.
+ * A directory without its record falls back to its unfiltered listing; search
+ * results exist only with theirs, so without it the viewer shows just the entry.
  */
 export function useDirectoryViewerList(
   context: DirectoryContext,
@@ -173,27 +183,32 @@ export function useDirectoryViewerList(
   entryId: string,
 ): ViewerList {
   const record = useMemo(() => navigation?.recall(context.returnKey), [context.returnKey, navigation]);
-  const usable = record && record.rootId === context.rootId && record.parentId === context.parentId
+  const search = context.source === "search";
+  const usable = record && record.rootId === context.rootId && record.parentId === context.parentId &&
+    listingScope(record.filters, record.scope) === (search ? "root" : "directory")
     ? record
     : undefined;
+  const enabled = !search || usable !== undefined;
   const input: BrowseInput = {
     namespace,
     rootId: context.rootId,
     rootEpoch,
-    parentId: context.parentId,
+    parentId: search ? null : context.parentId,
     filters: usable?.filters ?? {v: 1},
     sort: usable?.sort ?? "name",
     order: usable?.order ?? "asc",
     cursor: usable?.cursor ?? null,
+    scope: search ? "root" : "directory",
   };
   const options = directoryQueryOptions(input);
   const query = useInfiniteQuery({
     ...options,
+    enabled,
     refetchOnMount: false,
     refetchOnWindowFocus: false,
   });
   // The query is subscribed above, so its own observer is released first on unmount.
-  useRetainOnUnmount(options, namespace, context.returnKey);
+  useRetainOnUnmount(options, namespace, context.returnKey, enabled);
   const {data} = query;
   const items = useMemo(
     () => (data?.pages ?? []).flatMap((page) => page.entries)
@@ -223,6 +238,7 @@ export function useDirectoryViewerList(
     }
   }, [context.returnKey, data, namespace, navigation, usable]);
 
+  if (!enabled) return {...STANDALONE_VIEWER_LIST, rememberShown};
   return {items, ...controls, rememberShown};
 }
 
