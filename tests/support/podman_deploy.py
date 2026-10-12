@@ -44,6 +44,8 @@ SAMPLE_IMAGES = {
 SAMPLE_DERIVATIVES_DIR = "/srv/aegis-operator/derivatives"
 # A synthetic install's shared SELinux MCS level (the installer draws one at random).
 SAMPLE_LABEL_LEVEL = "s0:c17,c912"
+# A synthetic install's scan interval: daily, unlike compose's hourly development default.
+SAMPLE_SCAN_INTERVAL_SECONDS = 86400
 # Where the fake Podman keeps the operator's named volumes (podman info: store.volumePath).
 SAMPLE_VOLUME_STORAGE = "/home/aegis-operator/.local/share/containers/storage/volumes"
 
@@ -81,6 +83,7 @@ def sample_config(**overrides: Any) -> Any:
         "backend_subnet": SAMPLE_BACKEND_SUBNET,
         "install_token": SAMPLE_INSTALL_TOKEN,
         "label_level": SAMPLE_LABEL_LEVEL,
+        "scan_interval_seconds": SAMPLE_SCAN_INTERVAL_SECONDS,
         **{f"image_{role}": image for role, image in SAMPLE_IMAGES.items()},
     }
     return installer.UnitConfig(**(fields | overrides))

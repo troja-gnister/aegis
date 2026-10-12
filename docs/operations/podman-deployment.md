@@ -106,6 +106,7 @@ python3 aegis-podman init --release sha-<commit> --https-port <port> \
 - Clients must use one of the configured names or addresses with `<port>`; other host names are refused.
 - `--registry` selects another registry path holding the same `aegis-<role>:sha-<commit>` images (default `ghcr.io/troja-gnister`).
 - `--backend-subnet` gives a free private IPv4 /24 for the internal backend network instead of the first free candidate.
+- `--scan-interval-hours` sets how long the indexer waits between scans of each root, 1 to 168 hours (default 24, because a large library's full scan can take hours). `upgrade --scan-interval-hours` changes it, other upgrades keep it, and `status` shows it. A changed interval resets every root's index and rescans every root once. Releases from before the setting always scan hourly and refuse the option; see [Upgrade](#upgrade) for moving from one.
 
 For example, `--name aegis.example.test --address 192.0.2.10` serves `https://aegis.example.test:<port>` and `https://192.0.2.10:<port>`.
 
@@ -271,6 +272,8 @@ The upgrade runs in two phases:
 2. Only after that does the new release become current.
 
 If an upgrade stops between the phases, `status` shows it as pending, and most other commands refuse until it is resolved. Rerun `upgrade --release sha-<new-commit>` to finish it, or `upgrade --abandon` to go back: the current release's units and drop-ins are installed again and, when Aegis runs, restarted. Once the restart into the new release was queued, its migrations may have changed the database schema, so `--abandon` is refused unless you also pass `--allow-downgrade`.
+
+**The scan interval.** Releases from before `--scan-interval-hours` scan every root hourly. The first upgrade to a release that has the setting moves to 24 hours and therefore rescans every root once; on a large library that takes hours. Pass `--scan-interval-hours 1` to that upgrade to keep hourly scans and avoid the rescan, or another value to choose it now. Later upgrades keep the recorded value, and going back to a release from before the setting scans hourly again until the next upgrade to one that has it.
 
 **Downgrades.** Releases are ordered by the backend image's commit-time label. `upgrade` refuses an older release, or one that cannot be ordered, unless `--allow-downgrade` is given. **A downgrade does not reverse migrations: restore a matching database backup first**, then rerun with `--allow-downgrade`.
 

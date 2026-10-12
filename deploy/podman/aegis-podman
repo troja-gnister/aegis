@@ -51,11 +51,12 @@ from typing import Any, TextIO
 TEMPLATE_DIRECTORY = Path(__file__).resolve().parent / "quadlet"
 # The interface an installer relies on when it renders with a release's own copy of this file:
 # UnitConfig, load_templates, render_units and unit_directory. Change it only with a new value.
-# 2 added the media image, the optional derivatives directory and the shared SELinux level.
-RENDER_API = 2
+# 2 added the media image, the optional derivatives directory and the shared SELinux level;
+# 3 added the scan interval.
+RENDER_API = 3
 # The interfaces this installer renders with: 1 is a release before the media processor
 # (four images, no derivatives directory), so a pending upgrade from one can be abandoned.
-RENDER_APIS = (1, 2)
+RENDER_APIS = (1, 2, 3)
 TEMPLATE_NAMES = frozenset({
     "backend.network", "edge.network", "tls-hop.network",
     "postgres-data.volume", "indexer-coordination.volume", "staging.volume",
@@ -98,6 +99,9 @@ INSTALL_TOKEN = re.compile(r"[0-9a-f]{32}")
 # The install's one SELinux MCS level, s0 with two categories, the lower first.
 LABEL_LEVEL = re.compile(r"s0:c(0|[1-9][0-9]{0,3}),c(0|[1-9][0-9]{0,3})")
 MAX_CATEGORY = 1023
+# The bounds the backend accepts for AEGIS_SCAN_INTERVAL_SECONDS
+# (aegis_apps.indexing.config.ScanPolicy).
+SCAN_INTERVAL_SECONDS = (60, 604800)
 PRIVATE_IPV4 = tuple(
     ipaddress.IPv4Network(network) for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
 )
@@ -133,6 +137,7 @@ class UnitConfig:
     renders starts at boot (the deployment test installs units that way).
     ``derivatives_dir``, when set, is the operator directory the derivatives volume binds
     (spec M8); otherwise that volume is a plain named volume.
+    ``scan_interval_seconds`` is how long the indexer waits between scans of a root.
     """
 
     prefix: str
@@ -150,6 +155,7 @@ class UnitConfig:
     backend_subnet: str
     install_token: str
     label_level: str
+    scan_interval_seconds: int
     allow_test_values: bool = False
     install_sections: bool = True
     derivatives_dir: str | None = None
@@ -307,6 +313,9 @@ def unit_values(config: UnitConfig) -> dict[str, str]:
         "GATEWAY_ADDRESS": str(subnet[GATEWAY_HOST]),
         "INSTALL_TOKEN": _matching("install_token", config.install_token, INSTALL_TOKEN),
         "LABEL_LEVEL": _label_level(config.label_level),
+        "SCAN_INTERVAL_SECONDS": str(_integer(
+            "scan_interval_seconds", config.scan_interval_seconds, *SCAN_INTERVAL_SECONDS,
+        )),
     }
 
 
@@ -460,6 +469,10 @@ DEV_LABEL_LEVEL = "s0:c403,c871"
 RELABEL_TIMEOUT = 3600.0
 MINIMUM_SYSTEMD = 254
 MINIMUM_PORT = 1024
+# The indexer's wait between scans of a root, in whole hours: a library whose full scan takes
+# hours rescans daily unless the operator chooses otherwise, at most the backend's maximum.
+DEFAULT_SCAN_INTERVAL_HOURS = 24
+MAX_SCAN_INTERVAL_HOURS = SCAN_INTERVAL_SECONDS[1] // 3600
 DEFAULT_DEADLINE = 600.0
 POLL_SECONDS = 5.0
 STATE_VERSION = 1
@@ -805,7 +818,8 @@ _STATE_TYPES: dict[str, type | tuple[type, ...]] = {
     "secrets": dict, "releases": dict, "units": dict, "volumes": list, "networks": list,
     "extractions": list, "roots": dict, "selinux_covered": list, "selinux_pending": list,
     "mounts": dict, "local_images": bool, "derivatives": (dict, type(None)),
-    "label_level": (str, type(None)), "level_migration": (dict, type(None)), "version": int,
+    "label_level": (str, type(None)), "level_migration": (dict, type(None)),
+    "scan_interval_hours": (int, type(None)), "scan_interval_rendered": bool, "version": int,
 }
 _INVENTORY_TYPES: dict[str, type] = {
     "files": list, "socket": str, "services": list, "oneshots": list, "generated": list,
@@ -848,6 +862,12 @@ class State:
     units of a release that uses it are next written) and kept from then on.
     ``level_migration`` maps each volume recorded before that late draw to whether its content
     is relabelled to the level yet (a one-time migration); None when there was nothing to do.
+
+    ``scan_interval_hours`` is the indexer's wait between scans of a root, set at init and
+    kept until an upgrade changes it; None until a release that takes the setting (render
+    API 3) is current, which then records the default. ``scan_interval_rendered`` says whether
+    the current release's units carry it: a release from before the setting scans hourly,
+    and a kept value applies again at the next upgrade to a release that takes it.
     """
 
     phase: str
@@ -885,16 +905,20 @@ class State:
     derivatives: dict[str, Any] | None = None
     label_level: str | None = None
     level_migration: dict[str, bool] | None = None
+    scan_interval_hours: int | None = None
+    scan_interval_rendered: bool = False
     version: int = STATE_VERSION
 
     @classmethod
     def from_json(cls, data: object) -> State:
         if isinstance(data, dict):
-            # A record written before roots, local images or a derivatives directory existed.
+            # A record written before roots, local images, a derivatives directory or the scan
+            # interval existed.
             defaults: dict[str, Any] = {
                 "roots": {}, "selinux_covered": [], "selinux_pending": [],
                 "mounts": {"current": None, "generations": {}}, "local_images": False,
                 "derivatives": None, "label_level": None, "level_migration": None,
+                "scan_interval_hours": None, "scan_interval_rendered": False,
             }
             data = defaults | data
             if isinstance(data["mounts"], dict):
@@ -952,7 +976,10 @@ def _record_problem(data: object) -> str | None:
                  and BOOT_ID.fullmatch(pending["boot_id"]) is not None))
     ):
         return "malformed pending upgrade"
-    if pending is not None and _derivatives_problem(pending.get("previous_derivatives")):
+    if pending is not None and (
+        _derivatives_problem(pending.get("previous_derivatives"))
+        or _scan_interval_problem(pending.get("scan_interval_hours"))
+    ):
         return "malformed pending upgrade"
     if pending is not None and data["prefix"] == PRODUCTION_PREFIX and (
         pending.get("local_images", False) or TEST_RELEASE.fullmatch(pending["release"])
@@ -976,6 +1003,10 @@ def _record_problem(data: object) -> str | None:
         return "installed without a unit inventory"
     if _derivatives_problem(data["derivatives"]):
         return "malformed derivatives directory"
+    if _scan_interval_problem(data["scan_interval_hours"]) or (
+        data["scan_interval_rendered"] and data["scan_interval_hours"] is None
+    ):
+        return "malformed scan interval"
     if data["label_level"] is not None:
         try:
             _label_level(data["label_level"])
@@ -1005,6 +1036,43 @@ def _derivatives_problem(record: object) -> bool:
         all(type(record[key]) is int and record[key] >= 0 for key in ("device", "inode"))
         and isinstance(record["prepared"], bool)
     )
+
+
+def _scan_interval_problem(value: object) -> bool:
+    """Whether a recorded scan interval is malformed (None is a record from before it)."""
+    return value is not None and not (
+        type(value) is int and 1 <= value <= MAX_SCAN_INTERVAL_HOURS
+    )
+
+
+def _scan_interval_hours(state: State) -> int:
+    """The recorded scan interval, or the default for a record from before it."""
+    if state.scan_interval_hours is None:
+        return DEFAULT_SCAN_INTERVAL_HOURS
+    return state.scan_interval_hours
+
+
+def _takes_scan_interval(module: types.ModuleType) -> bool:
+    """Whether a release's renderer takes the scan interval; units before it scan hourly."""
+    return bool(module.RENDER_API >= 3)
+
+
+def _note_scan_interval(state: State, module: types.ModuleType) -> None:
+    """Record whether the current release's units, rendered by ``module``, carry the scan
+    interval; once they do, a record from before the setting takes the default."""
+    state.scan_interval_rendered = _takes_scan_interval(module)
+    if state.scan_interval_rendered and state.scan_interval_hours is None:
+        state.scan_interval_hours = DEFAULT_SCAN_INTERVAL_HOURS
+
+
+def _refuse_scan_interval(release: str, step: str) -> None:
+    raise InstallError(f"release {release} scans hourly and has no scan interval setting; "
+                       f"{step} without --scan-interval-hours")
+
+
+def _effective_scan_interval(state: State) -> int:
+    """The hours the current release's units wait between scans of a root."""
+    return _scan_interval_hours(state) if state.scan_interval_rendered else 1
 
 
 def _roots_problem(data: Mapping[str, Any]) -> str | None:
@@ -1433,6 +1501,14 @@ def _registry_argument(value: str) -> str:
         raise InstallError(
             f"registry {value!r} must be a lowercase registry host and path, such as "
             f"{DEFAULT_REGISTRY}"
+        )
+    return value
+
+
+def _scan_interval_argument(value: int | None) -> int | None:
+    if value is not None and not 1 <= value <= MAX_SCAN_INTERVAL_HOURS:
+        raise InstallError(
+            f"--scan-interval-hours must be between 1 and {MAX_SCAN_INTERVAL_HOURS}"
         )
     return value
 
@@ -1995,7 +2071,8 @@ def _render(
 
     A release before the media processor (render API 1) takes neither the media image, a
     derivatives directory nor the shared level; its units get random levels and a plain
-    derivatives volume.
+    derivatives volume. A release before the scan interval (render API 2 or older) scans
+    hourly.
     """
     try:
         values: dict[str, Any] = {
@@ -2013,6 +2090,8 @@ def _render(
             usable = _usable_derivatives(state)
             values["derivatives_dir"] = None if usable is None else usable["path"]
             values["label_level"] = state.label_level
+        if _takes_scan_interval(module):
+            values["scan_interval_seconds"] = _scan_interval_hours(state) * 3600
         config = module.UnitConfig(**values)
         texts = module.render_units(config, templates)
         units = {}
@@ -2281,6 +2360,18 @@ def _print_units(
         )
 
 
+def _scan_interval_text(state: State) -> str:
+    if state.scan_interval_rendered:
+        return f"scan interval {_scan_interval_hours(state)} h between scans of each root"
+    later = (
+        f"the first upgrade to a release that has it moves to {DEFAULT_SCAN_INTERVAL_HOURS} h "
+        "and rescans every root once, unless --scan-interval-hours 1 keeps hourly scans"
+        if state.scan_interval_hours is None else
+        f"{state.scan_interval_hours} h applies at the next upgrade to a release that has it"
+    )
+    return f"scan interval 1 h (this release predates the setting); {later}"
+
+
 def _print_status(
     host: Host, state: State, states: Mapping[str, Mapping[str, str]],
     observed: Mapping[str, Mapping[str, str]], failed: Sequence[str],
@@ -2295,6 +2386,7 @@ def _print_status(
         ))
     if state.label_level is not None:
         _say(host, f"  SELinux level {state.label_level}, shared by every container")
+    _say(host, f"  {_scan_interval_text(state)}")
     unfinished = _migration_pending(state)
     if unfinished:
         _say(host, f"  volumes not yet relabelled to that level: {', '.join(unfinished)}; "
@@ -2964,6 +3056,8 @@ def _config_text(paths: Paths, state: State) -> str:
         **({} if state.label_level is None else {
             "AEGIS_PODMAN_LABEL_LEVEL": state.label_level,
         }),
+        # What the units carry: a release from before the setting scans hourly.
+        "AEGIS_PODMAN_SCAN_INTERVAL_HOURS": str(_effective_scan_interval(state)),
     }
     lines = [
         "# Aegis on rootless Podman: non-secret configuration, written by aegis-podman.",
@@ -4185,6 +4279,7 @@ def command_init(host: Host, paths: Paths, args: argparse.Namespace) -> int:
     derivatives = (
         None if args.derivatives_dir is None else _derivatives_argument(args.derivatives_dir)
     )
+    hours = _scan_interval_argument(args.scan_interval_hours)
     _check_directories(paths, host.uid, create=False)
     previous = load_state(paths, host.uid)
     if previous is not None and previous.phase != "initializing":
@@ -4200,14 +4295,14 @@ def command_init(host: Host, paths: Paths, args: argparse.Namespace) -> int:
             raise InstallError("aegis-podman is already initialized")
         return _initialize(host, paths, previous, release, registry, prefix, port, names,
                            requested_subnet, local_images=local_images, reader_type=reader_type,
-                           derivatives=derivatives)
+                           derivatives=derivatives, scan_interval_hours=hours)
 
 
 def _initialize(
     host: Host, paths: Paths, previous: State | None, release: str, registry: str, prefix: str,
     port: int, names: list[str], requested_subnet: str | None, *,
     local_images: Mapping[str, str] | None = None, reader_type: str = PRODUCTION_READER_TYPE,
-    derivatives: str | None = None,
+    derivatives: str | None = None, scan_interval_hours: int | None = None,
 ) -> int:
     state = State(
         phase="initializing", release=release, registry=registry, prefix=prefix, names=names,
@@ -4250,6 +4345,10 @@ def _initialize(
     save_state(paths, state)
     _extract_release(host, paths, state, release, state.images["backend"])
     module, templates = _release_renderer(paths, state, release)
+    if scan_interval_hours is not None and not _takes_scan_interval(module):
+        _refuse_scan_interval(release, "initialize it")
+    state.scan_interval_hours = scan_interval_hours
+    _note_scan_interval(state, module)
     units = _render(module, templates, state, paths)
     inventory, volumes, networks = _inventory(units)
     _refuse_existing_objects(host, containers, inventory, volumes, networks)
@@ -4275,6 +4374,7 @@ def _initialize(
     if kept is not None:
         _say(host, f"  derivatives in {kept['path']}, prepared for the containers")
     _say(host, f"  SELinux level {state.label_level}, shared by every container")
+    _say(host, f"  {_scan_interval_text(state)}")
     _say(host, f"  {len(SECRET_NAMES)} secret files in {paths.secrets} (values are never shown)")
     _say(host, "Next: the host setup (SELinux module and firewall rules), then "
                "aegis-podman install and aegis-podman start.")
@@ -4326,6 +4426,7 @@ def command_install(host: Host, paths: Paths, args: argparse.Namespace) -> int:
             if state.roots and _roots_need_render(paths, state, roles) else None
         )
         leftover = _leftover_drop_ins(paths, state)
+        _note_scan_interval(state, module)
         if drawn:
             assert level is not None
             _adopt_level(state, level, list(state.volumes))
@@ -4470,6 +4571,9 @@ def command_upgrade(host: Host, paths: Paths, args: argparse.Namespace) -> int:
     )
     if args.abandon and derivatives is not None:
         raise InstallError("--derivatives-dir goes with --release, not --abandon")
+    hours = _scan_interval_argument(args.scan_interval_hours)
+    if args.abandon and hours is not None:
+        raise InstallError("--scan-interval-hours goes with --release, not --abandon")
     release = None if args.abandon else _release_argument(
         args.release, local_images=local_images is not None,
     )
@@ -4479,9 +4583,9 @@ def command_upgrade(host: Host, paths: Paths, args: argparse.Namespace) -> int:
         if local_images is not None:
             _refuse_test_option("--local-images", state.prefix)
         recorded = _usable_derivatives(state)
-        settled = derivatives is None or (
+        settled = (derivatives is None or (
             recorded is not None and recorded["path"] == derivatives
-        )
+        )) and (hours is None or hours == state.scan_interval_hours)
         if args.abandon:
             if state.pending is None:
                 raise InstallError("no upgrade is pending, so there is nothing to abandon")
@@ -4490,15 +4594,16 @@ def command_upgrade(host: Host, paths: Paths, args: argparse.Namespace) -> int:
             if release != state.pending["release"]:
                 _refuse_pending(state)
             wait = _upgrade(host, paths, args, state, state.pending["release"], None, resume=True,
-                            derivatives=derivatives)
+                            derivatives=derivatives, scan_interval_hours=hours)
         elif release == state.release and settled:
             _say(host, f"aegis-podman: release {release} is already current; nothing to do")
             return 0
         else:
-            # The current release again, too, when it is to adopt a derivatives directory.
+            # The current release again, too, when it is to adopt a derivatives directory or
+            # change the scan interval.
             assert release is not None
             wait = _upgrade(host, paths, args, state, release, local_images, resume=False,
-                            derivatives=derivatives)
+                            derivatives=derivatives, scan_interval_hours=hours)
     # The wait changes nothing, so other commands may read the record meanwhile.
     if not wait:
         return 0
@@ -4615,6 +4720,7 @@ def _abandon_units(
     stale = _stale_units(state, units)
     _check_units(paths, state, units, stale)
     _check_replaceable(state, paths.env_file)
+    _note_scan_interval(state, module)
     # The drop-ins go back to the current release's aegisctl render too: one for each root
     # role that release has a unit for.
     rendered = (
@@ -4649,6 +4755,7 @@ def _abandon_units(
 def _upgrade(
     host: Host, paths: Paths, args: argparse.Namespace, state: State, release: str,
     local_images: Mapping[str, str] | None, *, resume: bool, derivatives: str | None = None,
+    scan_interval_hours: int | None = None,
 ) -> bool:
     """Move to ``release`` in two phases; True when a wait for readiness follows.
 
@@ -4660,6 +4767,11 @@ def _upgrade(
     ``derivatives`` adopts that directory for the derivatives volume once the images are in
     place (``_derivatives_request`` says when it can). It is prepared then, and recorded with
     the pending record, so a failure before that leaves nothing recorded.
+    ``scan_interval_hours`` replaces the recorded scan interval; without it, a resumed upgrade
+    keeps the one it began with and any other keeps the recorded one (the default for a record
+    from before it). It is recorded with the pending record, and becomes the install's only
+    when the release does, so an abandon keeps the previous one. A release from before the
+    setting refuses it, scans hourly, and keeps the recorded one for a later release.
     """
     _preflight(host, paths)
     adopt = _derivatives_request(host, paths, state, derivatives)
@@ -4691,12 +4803,21 @@ def _upgrade(
             f"read the volumes moved to this install's level {state.label_level}; going back "
             "is upgrade --abandon from a pending upgrade, or a restore"
         )
+    hours = scan_interval_hours
+    if hours is None and resume:
+        hours = (state.pending or {}).get("scan_interval_hours")
+    if not _takes_scan_interval(module):
+        if scan_interval_hours is not None:
+            _refuse_scan_interval(release, "upgrade to it")
+        hours = state.scan_interval_hours  # kept for a later release that takes it
+    elif hours is None:
+        hours = _scan_interval_hours(state)
     level, drawn = _render_level(state, module)
     if planned is not None and module.RENDER_API >= 2:  # these units bind it
         _check_derivatives(host, paths, state, planned)
     candidate = dataclasses.replace(
         state, release=release, images=images, local_images=local, label_level=level,
-        derivatives=planned,
+        derivatives=planned, scan_interval_hours=hours,
     )
     units = _render(module, templates, candidate, paths)
     inventory, volumes, networks = _inventory(units)
@@ -4704,6 +4825,8 @@ def _upgrade(
     if not state.installed:
         state.release, state.images, state.created = release, images, created
         state.local_images = local
+        state.scan_interval_hours = hours
+        _note_scan_interval(state, module)
         state.pending = None
         if drawn:  # nothing runs; install relabels the recorded volumes before it writes units
             assert level is not None
@@ -4737,7 +4860,7 @@ def _upgrade(
     state.pending = {
         "release": release, "images": images, "created": created, "local_images": local,
         "previous_derivatives": previous_derivatives, "boot_id": _boot_id(host),
-        **({"restart_queued": True} if queued else {}),
+        "scan_interval_hours": hours, **({"restart_queued": True} if queued else {}),
     }
     if drawn:  # with the pending record, so an interrupted migration resumes or goes back
         assert level is not None
@@ -4783,6 +4906,8 @@ def _upgrade(
         raise
     state.release, state.images, state.created = release, images, created
     state.local_images = local
+    state.scan_interval_hours = hours
+    _note_scan_interval(state, module)
     state.pending = None
     _record_history(state, release)
     _record_inventory(state, inventory, volumes, networks)
@@ -5161,6 +5286,12 @@ def _parser() -> argparse.ArgumentParser:
         "the containers and recorded, and never changes afterwards"
     )
     init.add_argument("--derivatives-dir", metavar="DIRECTORY", help=derivatives_help)
+    scan_help = (
+        f"hours the indexer waits between scans of each root, 1 to {MAX_SCAN_INTERVAL_HOURS}"
+    )
+    init.add_argument("--scan-interval-hours", type=int, metavar="HOURS", help=(
+        f"{scan_help} (default {DEFAULT_SCAN_INTERVAL_HOURS})"
+    ))
     # The deployment test's options (spec D12), hidden from help and refused for the
     # production prefix: images built locally, used by ID, and plain container_t readers.
     init.add_argument("--local-images", help=argparse.SUPPRESS)
@@ -5190,6 +5321,10 @@ def _parser() -> argparse.ArgumentParser:
                               "--abandon after the restart into the new release was queued")
     upgrade.add_argument("--derivatives-dir", metavar="DIRECTORY", help=(
         f"{derivatives_help}. Adopting one needs Aegis stopped and no derivatives volume yet"
+    ))
+    upgrade.add_argument("--scan-interval-hours", type=int, metavar="HOURS", help=(
+        f"{scan_help} (default: the recorded one, or {DEFAULT_SCAN_INTERVAL_HOURS} for an "
+        "install from before the setting)"
     ))
     upgrade.add_argument("--local-images", help=argparse.SUPPRESS)
     deadline(upgrade)

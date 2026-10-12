@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from aegis_apps.indexing.config import ScanPolicy
 
 from tests.support.podman_deploy import (
     INSTALLER,
@@ -25,6 +26,7 @@ from tests.support.podman_deploy import (
     SAMPLE_PREFIX,
     SAMPLE_READER_TYPE,
     SAMPLE_RELEASE,
+    SAMPLE_SCAN_INTERVAL_SECONDS,
     SAMPLE_SECRETS_DIR,
     Unit,
     environment_assignments,
@@ -269,6 +271,11 @@ INVALID_VALUES = [
     ("derivatives_dir", "/srv/a,b"), ("derivatives_dir", "/srv/a b"),
     ("derivatives_dir", "/srv/%h/derivatives"), ("derivatives_dir", "/srv/$HOME"),
     ("derivatives_dir", "/srv/\u00e4"), ("derivatives_dir", 7), ("derivatives_dir", b"/srv/d"),
+    # The indexer's scan interval: an integer within the backend's bounds.
+    ("scan_interval_seconds", 59), ("scan_interval_seconds", 604801),
+    ("scan_interval_seconds", 0), ("scan_interval_seconds", -3600),
+    ("scan_interval_seconds", "86400"), ("scan_interval_seconds", 86400.0),
+    ("scan_interval_seconds", True), ("scan_interval_seconds", None),
 ]
 
 
@@ -302,6 +309,7 @@ def test_values_with_line_breaks_nul_or_token_markers_are_refused(
 @pytest.mark.parametrize(("field", "value"), [
     ("label_level", "s0:c0,c1"), ("label_level", "s0:c0,c1023"),
     ("label_level", "s0:c1022,c1023"),
+    ("scan_interval_seconds", 60), ("scan_interval_seconds", 604800),
     ("reader_type", "container_t"), ("reader_type", "aegis_reader2.process"),
     ("secrets_dir", "/srv/aegis_1.2@x+y-z/Secrets"),
     ("image_backend", "registry.example.test:65535/aegis-backend@sha256:" + "a" * 64),
@@ -573,6 +581,30 @@ def test_production_environment_replaces_development_defaults() -> None:
     }
 
 
+def test_every_backend_role_scans_at_the_configured_interval_and_nothing_else_names_it() -> None:
+    for name in BACKEND:
+        environment = environment_assignments(container(name))
+        assert environment["AEGIS_SCAN_INTERVAL_SECONDS"] == str(SAMPLE_SCAN_INTERVAL_SECONDS)
+        assert environment_assignments(container(name, scan_interval_seconds=43200))[
+            "AEGIS_SCAN_INTERVAL_SECONDS"
+        ] == "43200", name
+    for name, text in rendered().items():
+        assert ("AEGIS_SCAN_INTERVAL_SECONDS" in text) is (
+            name.removeprefix(SAMPLE_PREFIX).removesuffix(".container") in BACKEND
+        ), name
+
+
+def test_the_scan_interval_bounds_are_the_backends() -> None:
+    lower, upper = load_installer().SCAN_INTERVAL_SECONDS
+
+    for value in (lower, upper):
+        policy = ScanPolicy.from_environment({"AEGIS_SCAN_INTERVAL_SECONDS": str(value)})
+        assert policy.interval_seconds == value
+    for value in (lower - 1, upper + 1):
+        with pytest.raises(ValueError, match="invalid scan policy"):
+            ScanPolicy.from_environment({"AEGIS_SCAN_INTERVAL_SECONDS": str(value)})
+
+
 def test_names_are_lowercased_and_ipv6_literals_are_bracketed() -> None:
     names = ("Aegis.Example.Test", "2001:DB8::10", "192.0.2.10")
     web = environment_assignments(container("web", names=names))
@@ -796,14 +828,18 @@ def test_the_derivatives_directory_token_has_no_value_without_a_directory() -> N
     assert installer.render_units(sample_config(derivatives_dir=SAMPLE_DERIVATIVES_DIR), templates)
 
 
-def test_the_renderer_interface_names_the_media_image_and_the_derivatives_directory() -> None:
+def test_the_renderer_interface_names_the_media_image_derivatives_and_scan_interval() -> None:
     installer = load_installer()
 
     # An installer renders with each release's own copy of this interface (RENDER_API).
-    assert installer.RENDER_API == 2 and installer.RENDER_APIS == (1, 2)
+    assert installer.RENDER_API == 3 and installer.RENDER_APIS == (1, 2, 3)
     fields = {field.name for field in dataclasses.fields(installer.UnitConfig)}
-    assert {"image_media", "derivatives_dir"} <= fields
+    assert {"image_media", "derivatives_dir", "scan_interval_seconds"} <= fields
     assert installer.UnitConfig.__dataclass_fields__["derivatives_dir"].default is None
+    # Required: a unit never falls back to a default the installer did not choose.
+    assert installer.UnitConfig.__dataclass_fields__["scan_interval_seconds"].default is (
+        dataclasses.MISSING
+    )
 
 
 def test_every_container_shares_the_install_level_and_nothing_else_names_one() -> None:

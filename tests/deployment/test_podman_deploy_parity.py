@@ -23,6 +23,7 @@ from tests.support.podman_deploy import (
     SAMPLE_LABEL_LEVEL,
     SAMPLE_PREFIX,
     SAMPLE_READER_TYPE,
+    SAMPLE_SCAN_INTERVAL_SECONDS,
     SAMPLE_SECRETS_DIR,
     Unit,
     environment_assignments,
@@ -47,10 +48,14 @@ PRODUCTION_KEYS = frozenset({
     "AEGIS_ALLOWED_HOSTS",
 })
 PRODUCTION_VALUE = "<production value>"
+# The installer's setting (aegis-podman --scan-interval-hours), compared by presence only.
+SCAN_INTERVAL_KEY = "AEGIS_SCAN_INTERVAL_SECONDS"
+INSTALL_VALUE = "<install setting>"
 
 ALL = frozenset(CONTAINERS)
 CADDY = frozenset({"caddy"})
 HEALTH_GATED = frozenset({"postgres", "web", "operations", "indexer", "media"})
+BACKEND = frozenset({"migrate", "web", "operations", "indexer", "media"})
 GROUP_MAPPED = frozenset({
     "gateway", "migrate", "operations", "indexer", "media", "media-processor", "web",
 })
@@ -88,6 +93,11 @@ ALLOWED_DIFFERENCES: dict[str, tuple[frozenset[str], str]] = {
     "production-environment-values": (
         frozenset({"migrate", "web", "operations", "indexer", "media", "gateway"}),
         "production values replace development defaults",
+    ),
+    "scan-interval-environment-value": (
+        BACKEND,
+        "a long-scan library rescans daily on the server deployment; compose keeps its "
+        "development default",
     ),
     "static-backend-addresses": (
         frozenset({"web", "gateway"}),
@@ -262,11 +272,15 @@ def compose_view(name: str, service: dict[str, Any], allowances: Allowances) -> 
 def production_view(
     name: str, environment: dict[str, str], allowances: Allowances,
 ) -> dict[str, str]:
-    """Environment values, with production keys compared by presence only."""
+    """Environment values, with production keys and the scan interval compared by presence
+    only."""
     if PRODUCTION_KEYS & set(environment):
         assert allowances.take(name, "production-environment-values"), name
+    if SCAN_INTERVAL_KEY in environment:
+        assert allowances.take(name, "scan-interval-environment-value"), name
     return {
-        key: PRODUCTION_VALUE if key in PRODUCTION_KEYS else value
+        key: PRODUCTION_VALUE if key in PRODUCTION_KEYS
+        else INSTALL_VALUE if key == SCAN_INTERVAL_KEY else value
         for key, value in environment.items()
     }
 
@@ -379,6 +393,16 @@ def test_each_unit_matches_its_compose_service(
     expected = compose_view(name, compose["services"][name], Allowances())
 
     assert unit_view(name, container(units, name), Allowances()) == expected
+
+
+def test_the_units_scan_at_the_install_interval_and_compose_keeps_its_default(
+    compose: dict[str, Any], units: dict[str, Unit],
+) -> None:
+    for name in sorted(BACKEND):
+        assert compose["services"][name]["environment"][SCAN_INTERVAL_KEY] == "3600", name
+        assert environment_assignments(container(units, name))[SCAN_INTERVAL_KEY] == str(
+            SAMPLE_SCAN_INTERVAL_SECONDS
+        ), name
 
 
 def object_view(name: str, unit: Unit, allowances: Allowances) -> tuple[str, str, set[str]]:

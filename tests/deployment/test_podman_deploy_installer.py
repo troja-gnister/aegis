@@ -236,9 +236,12 @@ def rendered_for(rig: Rig, release: str = SAMPLE_RELEASE, **overrides: Any) -> d
     recorded = rig.state() if rig.state_path.exists() else {}
     token = recorded.get("install_token", "0" * 32)
     level = {"label_level": recorded["label_level"]} if recorded.get("label_level") else {}
+    hours = recorded.get("scan_interval_hours")
+    interval = {"scan_interval_seconds": hours * 3600} if hours else {}
     config = sample_config(
         release=release, names=NAMES, secrets_dir=str(rig.secrets),
-        backend_subnet=FIRST_SUBNET, install_token=token, **images, **(level | overrides),
+        backend_subnet=FIRST_SUBNET, install_token=token, **images,
+        **(level | interval | overrides),
     )
     return dict(load_installer().render_units(config))
 
@@ -428,7 +431,7 @@ def test_a_release_renderer_with_another_interface_is_refused(rig: Rig) -> None:
     def other_interface(tree: Path) -> None:
         script = tree / "aegis-podman"
         text = script.read_text(encoding="utf-8")
-        script.write_text(text.replace("RENDER_API = 2", "RENDER_API = 3", 1), encoding="utf-8")
+        script.write_text(text.replace("RENDER_API = 3", "RENDER_API = 4", 1), encoding="utf-8")
 
     rig.system.tree_hook = other_interface
 
@@ -766,7 +769,9 @@ def test_a_failed_record_write_keeps_the_previous_record(
     "unprepared-flag", "level-one-category", "level-equal-categories",
     "level-descending-categories", "level-leading-zero", "level-out-of-range",
     "level-other-sensitivity", "level-not-a-string", "migration-without-level",
-    "migration-not-a-flag",
+    "migration-not-a-flag", "scan-interval-zero", "scan-interval-beyond-a-week",
+    "scan-interval-boolean", "scan-interval-string", "pending-scan-interval",
+    "scan-interval-rendered-without-one", "scan-interval-rendered-not-a-flag",
 ])
 def test_an_unsafe_or_unknown_record_is_refused(tmp_path: Path, damage: str) -> None:
     installer = load_installer()
@@ -822,6 +827,16 @@ def test_an_unsafe_or_unknown_record_is_refused(tmp_path: Path, damage: str) -> 
         "migration-without-level": {"level_migration": {"aegis-staging": True}},
         "migration-not-a-flag": {"label_level": "s0:c1,c2",
                                  "level_migration": {"aegis-staging": "yes"}},
+        "scan-interval-zero": {"scan_interval_hours": 0},
+        "scan-interval-beyond-a-week": {"scan_interval_hours": 169},
+        "scan-interval-boolean": {"scan_interval_hours": True},
+        "scan-interval-string": {"scan_interval_hours": "24"},
+        "pending-scan-interval": {"pending": {"release": SAMPLE_OTHER_RELEASE, "images": {},
+                                              "scan_interval_hours": 0}},
+        "scan-interval-rendered-without-one": {"scan_interval_rendered": True,
+                                               "scan_interval_hours": None},
+        "scan-interval-rendered-not-a-flag": {"scan_interval_rendered": 1,
+                                              "scan_interval_hours": 24},
     }
     if damage == "symlink":
         target = tmp_path / "elsewhere.json"
@@ -4641,9 +4656,7 @@ def test_an_upgrade_from_a_record_without_the_media_image_pulls_and_pins_it(rig:
     )
 
 
-def test_only_a_render_api_2_release_gets_the_media_image_and_the_derivatives_directory(
-    tmp_path: Path,
-) -> None:
+def test_each_render_api_gets_exactly_the_values_it_takes(tmp_path: Path) -> None:
     installer = load_installer()
     paths = private_paths(installer, tmp_path)
     state = sample_state(installer)
@@ -4663,6 +4676,7 @@ def test_only_a_render_api_2_release_gets_the_media_image_and_the_derivatives_di
         )
 
     state.label_level = "s0:c17,c912"
+    state.scan_interval_hours = 12
     for api in installer.RENDER_APIS:
         assert installer._render(release(api), {}, state, paths) == {}
     # A release before the media processor renders four images, a plain volume and random
@@ -4673,6 +4687,9 @@ def test_only_a_render_api_2_release_gets_the_media_image_and_the_derivatives_di
     assert seen[2]["derivatives_dir"] == "/srv/aegis-operator/derivatives"
     assert seen[2]["label_level"] == state.label_level
     assert {key: value for key, value in seen[2].items() if key not in added} == seen[1]
+    # A release before the scan interval scans hourly, whatever the record says.
+    assert "scan_interval_seconds" not in seen[1] and "scan_interval_seconds" not in seen[2]
+    assert seen[3] == seen[2] | {"scan_interval_seconds": 12 * 3600}
 
 
 def processorless(tree: Path) -> None:
@@ -5516,6 +5533,7 @@ def test_abandoning_to_a_release_before_the_level_moves_the_volumes_back_to_s0(
             render_units=module.render_units,
             UnitConfig=lambda **values: module.UnitConfig(
                 **values, image_media=state.images["media"], label_level="s0:c1,c2",
+                scan_interval_seconds=3600,
             ),
         ), templates
 
@@ -5526,3 +5544,252 @@ def test_abandoning_to_a_release_before_the_level_moves_the_volumes_back_to_s0(
     state = rig.state()
     assert state["label_level"] is None and state["level_migration"] is None
     assert state["pending"] is None
+
+
+# -- the scan interval -------------------------------------------------------------------------
+
+BACKEND_UNITS = ("migrate", "web", "operations", "indexer", "media")
+
+
+def scan_intervals(rig: Rig) -> set[str]:
+    """AEGIS_SCAN_INTERVAL_SECONDS in every installed backend unit."""
+    return {
+        environment_assignments(parse_unit(
+            unit_path(rig, f"{SAMPLE_PREFIX}{name}.container").read_text(encoding="utf-8"),
+        ))["AEGIS_SCAN_INTERVAL_SECONDS"]
+        for name in BACKEND_UNITS
+    }
+
+
+def test_init_records_a_daily_scan_interval_that_every_backend_unit_carries(rig: Rig) -> None:
+    rig.install()
+
+    assert rig.state()["scan_interval_hours"] == 24
+    assert rig.state()["scan_interval_rendered"] is True
+    assert scan_intervals(rig) == {"86400"}
+    assert "AEGIS_PODMAN_SCAN_INTERVAL_HOURS=24\n" in rig.env_file.read_text(encoding="utf-8")
+    assert "scan interval 24 h" in rig.stdout.getvalue()
+    rig.fresh_output()
+    rig("status")
+    assert "scan interval 24 h between scans of each root" in rig.stdout.getvalue()
+
+
+def test_init_takes_the_scan_interval_in_hours(rig: Rig) -> None:
+    assert rig(*INIT, "--scan-interval-hours", "6") == 0, rig.output()
+    assert rig("install") == 0, rig.output()
+
+    assert rig.state()["scan_interval_hours"] == 6
+    assert scan_intervals(rig) == {"21600"}
+    for name, text in rendered_for(rig).items():
+        assert unit_path(rig, name).read_text(encoding="utf-8") == text, name
+
+
+@pytest.mark.parametrize("hours", ["0", "-1", "169"])
+def test_a_scan_interval_outside_one_hour_to_a_week_is_refused_before_anything_runs(
+    rig: Rig, hours: str,
+) -> None:
+    rig.refused(*INIT, "--scan-interval-hours", hours, match="between 1 and 168")
+    assert not rig.system.calls
+    assert not (rig.home / ".local").exists()
+
+    rig.started()
+    before, first = rig.state_path.read_bytes(), len(rig.system.calls)
+    rig.refused("upgrade", "--release", SAMPLE_OTHER_RELEASE, "--scan-interval-hours", hours,
+                match="between 1 and 168")
+    assert rig.system.calls[first:] == []
+    assert rig.state_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("hours", ["1.5", "daily", ""])
+def test_a_scan_interval_must_be_whole_hours(rig: Rig, hours: str) -> None:
+    with pytest.raises(SystemExit):
+        rig(*INIT, "--scan-interval-hours", hours)
+    assert not rig.system.calls
+
+
+def test_upgrade_keeps_the_scan_interval_unless_it_is_changed(rig: Rig) -> None:
+    assert rig(*INIT, "--scan-interval-hours", "6") == 0, rig.output()
+    assert rig("install") == 0, rig.output()
+    assert rig("start") == 0, rig.output()
+
+    assert rig("upgrade", "--release", SAMPLE_OTHER_RELEASE) == 0, rig.output()
+    assert rig.state()["scan_interval_hours"] == 6
+    assert scan_intervals(rig) == {"21600"}
+
+    assert rig("upgrade", "--release", SAMPLE_THIRD_RELEASE, "--scan-interval-hours",
+               "48") == 0, rig.output()
+    assert rig.state()["scan_interval_hours"] == 48
+    assert scan_intervals(rig) == {"172800"}
+    assert "AEGIS_PODMAN_SCAN_INTERVAL_HOURS=48\n" in rig.env_file.read_text(encoding="utf-8")
+    for name, text in rendered_for(rig, SAMPLE_THIRD_RELEASE).items():
+        assert unit_path(rig, name).read_text(encoding="utf-8") == text, name
+
+
+def test_upgrade_to_the_current_release_can_change_only_the_scan_interval(rig: Rig) -> None:
+    rig.started()
+    first = len(rig.system.calls)
+
+    assert rig("upgrade", "--release", SAMPLE_RELEASE, "--scan-interval-hours",
+               "12") == 0, rig.output()
+    assert "nothing to do" not in rig.stdout.getvalue()
+    assert rig.state()["release"] == SAMPLE_RELEASE
+    assert rig.state()["scan_interval_hours"] == 12
+    assert scan_intervals(rig) == {"43200"}
+    (restart,) = [call for call in rig.system.calls[first:]
+                  if call[2:4] == ("--no-block", "restart")]
+    # Restarting PostgreSQL reruns migrate, which binds the new interval.
+    assert {f"{SAMPLE_PREFIX}{name}.service" for name in ("postgres", "web", "indexer")} <= set(
+        restart
+    )
+    rig.fresh_output()
+    assert rig("upgrade", "--release", SAMPLE_RELEASE, "--scan-interval-hours",
+               "12") == 0, rig.output()
+    assert "nothing to do" in rig.stdout.getvalue()
+
+
+def test_an_abandoned_upgrade_keeps_the_previous_scan_interval(rig: Rig) -> None:
+    rig.started()
+    rig.system.failures[(*SYSTEMCTL, "daemon-reload")] = (1, "", "Failed to reload")
+    rig.refused("upgrade", "--release", SAMPLE_OTHER_RELEASE, "--scan-interval-hours", "12",
+                match="daemon-reload")
+    rig.system.failures.clear()
+    state = rig.state()
+    assert state["pending"]["scan_interval_hours"] == 12
+    assert state["scan_interval_hours"] == 24
+    rig.refused("upgrade", "--abandon", "--scan-interval-hours", "12",
+                match="goes with --release")
+
+    assert rig("upgrade", "--abandon") == 0, rig.output()
+    assert rig.state()["scan_interval_hours"] == 24
+    assert scan_intervals(rig) == {"86400"}
+
+
+def test_a_resumed_upgrade_keeps_the_scan_interval_it_began_with(rig: Rig) -> None:
+    rig.started()
+    rig.system.failures[(*SYSTEMCTL, "daemon-reload")] = (1, "", "Failed to reload")
+    rig.refused("upgrade", "--release", SAMPLE_OTHER_RELEASE, "--scan-interval-hours", "12",
+                match="daemon-reload")
+    rig.system.failures.clear()
+
+    assert rig("upgrade", "--release", SAMPLE_OTHER_RELEASE) == 0, rig.output()
+    assert rig.state()["scan_interval_hours"] == 12
+    assert scan_intervals(rig) == {"43200"}
+
+
+def forget_the_scan_interval(rig: Rig) -> None:
+    """The record as an installer from before the scan interval wrote it."""
+    raw = rig.state()
+    del raw["scan_interval_hours"], raw["scan_interval_rendered"]
+    rig.state_path.write_text(json.dumps(raw), encoding="utf-8")
+
+
+def test_a_record_from_before_the_scan_interval_gets_the_default_at_the_next_upgrade(
+    rig: Rig,
+) -> None:
+    rig.started()
+    forget_the_scan_interval(rig)
+    rig.fresh_output()
+    rig("status")
+    assert (
+        "scan interval 1 h (this release predates the setting); the first upgrade to a "
+        "release that has it moves to 24 h and rescans every root once, unless "
+        "--scan-interval-hours 1 keeps hourly scans"
+    ) in rig.stdout.getvalue()
+
+    assert rig("upgrade", "--release", SAMPLE_OTHER_RELEASE) == 0, rig.output()
+    assert rig.state()["scan_interval_hours"] == 24
+    assert scan_intervals(rig) == {"86400"}
+    assert "AEGIS_PODMAN_SCAN_INTERVAL_HOURS=24\n" in rig.env_file.read_text(encoding="utf-8")
+
+
+def test_a_record_from_before_the_scan_interval_may_choose_one_at_that_upgrade(
+    rig: Rig,
+) -> None:
+    rig.started()
+    forget_the_scan_interval(rig)
+
+    assert rig("upgrade", "--release", SAMPLE_OTHER_RELEASE, "--scan-interval-hours",
+               "72") == 0, rig.output()
+    assert rig.state()["scan_interval_hours"] == 72
+    assert scan_intervals(rig) == {"259200"}
+
+
+def test_install_records_the_default_once_its_release_renders_the_scan_interval(
+    rig: Rig,
+) -> None:
+    rig.install()
+    forget_the_scan_interval(rig)
+
+    assert rig("install") == 0, rig.output()
+    assert rig.state()["scan_interval_hours"] == 24
+    assert rig.state()["scan_interval_rendered"] is True
+    assert scan_intervals(rig) == {"86400"}
+
+
+def before_the_scan_interval(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch, release: str,
+) -> None:
+    """``release`` as one from before the scan interval (render API 2): its units scan
+    hourly."""
+    installer = rig.installer
+    real = installer._release_renderer
+
+    def renderer(paths: Any, state: Any, name: str) -> tuple[Any, Any]:
+        module, templates = real(paths, state, name)
+        if name != release:
+            return module, templates
+        return types.SimpleNamespace(
+            RENDER_API=2, unit_directory=module.unit_directory,
+            render_units=module.render_units,
+            UnitConfig=lambda **values: module.UnitConfig(**values, scan_interval_seconds=3600),
+        ), templates
+
+    monkeypatch.setattr(installer, "_release_renderer", renderer)
+
+
+def test_a_release_before_the_scan_interval_refuses_one_at_init_and_records_none(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    before_the_scan_interval(rig, monkeypatch, SAMPLE_RELEASE)
+
+    rig.refused(*INIT, "--scan-interval-hours", "6", match="has no scan interval setting; "
+                "initialize it without --scan-interval-hours")
+    assert rig.state()["phase"] == "initializing"
+    assert rig(*INIT) == 0, rig.output()
+    state = rig.state()
+    assert state["scan_interval_hours"] is None and state["scan_interval_rendered"] is False
+    assert "scan interval 1 h (this release predates the setting)" in rig.stdout.getvalue()
+    assert "AEGIS_PODMAN_SCAN_INTERVAL_HOURS=1\n" in rig.env_file.read_text(encoding="utf-8")
+    assert rig("install") == 0, rig.output()
+    assert scan_intervals(rig) == {"3600"}
+    assert rig.state()["scan_interval_hours"] is None
+
+
+def test_a_downgrade_before_the_scan_interval_scans_hourly_and_keeps_the_choice(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert rig(*INIT, "--scan-interval-hours", "6") == 0, rig.output()
+    assert rig("install") == 0, rig.output()
+    assert rig("start") == 0, rig.output()
+    assert rig("upgrade", "--release", SAMPLE_OTHER_RELEASE) == 0, rig.output()
+    before_the_scan_interval(rig, monkeypatch, SAMPLE_RELEASE)
+
+    rig.refused("upgrade", "--release", SAMPLE_RELEASE, "--allow-downgrade",
+                "--scan-interval-hours", "12", match="has no scan interval setting")
+    assert rig.state()["pending"] is None and rig.state()["release"] == SAMPLE_OTHER_RELEASE
+    assert rig("upgrade", "--release", SAMPLE_RELEASE, "--allow-downgrade") == 0, rig.output()
+    state = rig.state()
+    assert state["scan_interval_hours"] == 6 and state["scan_interval_rendered"] is False
+    assert scan_intervals(rig) == {"3600"}
+    assert "AEGIS_PODMAN_SCAN_INTERVAL_HOURS=1\n" in rig.env_file.read_text(encoding="utf-8")
+    rig.fresh_output()
+    rig("status")
+    assert (
+        "scan interval 1 h (this release predates the setting); 6 h applies at the next "
+        "upgrade to a release that has it"
+    ) in rig.stdout.getvalue()
+
+    assert rig("upgrade", "--release", SAMPLE_THIRD_RELEASE) == 0, rig.output()
+    assert rig.state()["scan_interval_rendered"] is True
+    assert scan_intervals(rig) == {"21600"}
+    assert "AEGIS_PODMAN_SCAN_INTERVAL_HOURS=6\n" in rig.env_file.read_text(encoding="utf-8")
