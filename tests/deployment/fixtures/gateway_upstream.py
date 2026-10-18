@@ -66,6 +66,8 @@ class EchoHandler(BaseHTTPRequestHandler):
 
     do_GET = respond
     do_POST = respond
+    # Only described (accel) answers are requested with HEAD; they have no body.
+    do_HEAD = respond
 
     def log_message(self, format: str, *args: object) -> None:
         pass
