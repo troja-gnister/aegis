@@ -524,7 +524,9 @@ LIBRARY_REQUIRED = tuple(
 # -I would make Python ignore PYTHONPATH. -P (no script or working directory on sys.path) and
 # -S (no site-packages, user or system, and no .pth files), with every other PYTHON* variable
 # dropped from the environment, give the same isolation with the release's library on the
-# path; -B keeps bytecode out of that recorded copy.
+# path; -B keeps the host's Python from writing bytecode into that recorded copy. The copy is
+# source only: the image ships its app compiled, and that bytecode is dropped before the copy
+# is verified and recorded.
 AEGISCTL_FLAGS = ("-B", "-P", "-S")
 # The units aegisctl's Quadlet render writes a drop-in for, and the drop-in's name. A release
 # before the media processor renders neither its unit nor its drop-in.
@@ -1949,6 +1951,28 @@ def _walk_tree(root: Path, *, normalize: bool, what: str) -> dict[str, bytes]:
                 else:
                     raise InstallError(f"{what} holds a special file, {relative}; refusing it")
     return contents
+
+
+def _drop_bytecode(root: Path) -> None:
+    """Remove the compiled bytecode (``__pycache__`` directories, ``.pyc`` files) a package
+    copied out of an image carries, leaving its source. Links are left for the walk to refuse.
+    """
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        os.chmod(directory, 0o700)
+        with os.scandir(directory) as scanned:
+            entries = list(scanned)
+        for entry in entries:
+            if entry.is_symlink():
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                if entry.name == "__pycache__":
+                    _remove_tree(Path(entry.path))
+                else:
+                    pending.append(Path(entry.path))
+            elif entry.name.endswith(".pyc") and entry.is_file(follow_symlinks=False):
+                os.unlink(entry.path)
 
 
 def _scan_tree(root: Path, *, normalize: bool) -> dict[str, bytes]:
@@ -3423,6 +3447,7 @@ def _release_library(
     staging.mkdir(mode=0o700)
     try:
         _copy_out(host, paths, state, backend_image, staging / LIBRARY_PACKAGE, LIBRARY_SOURCE)
+        _drop_bytecode(staging)
         contents = _walk_tree(staging, normalize=True, what="the aegisctl copy")
         missing = [name for name in LIBRARY_REQUIRED if name not in contents]
         if missing:

@@ -2910,8 +2910,9 @@ def test_aegisctl_runs_on_the_host_python_with_only_the_release_library(rig: Rig
         assert command[:len(AEGISCTL)] == (sys.executable, "-B", "-P", "-S", "-m", "aegisctl")
         assert environment == {"PATH": "/usr/bin", "PYTHONPATH": str(library(rig)),
                                "AEGIS_CONTAINER_ENGINE": "podman"}
-    # -B: running it wrote no bytecode into the recorded copy.
+    # The image's bytecode was dropped from the copy, and -B wrote none into it.
     assert not list(library(rig).rglob("__pycache__"))
+    assert not list(library(rig).rglob("*.pyc"))
 
 
 def test_roots_add_copies_the_release_aegisctl_out_by_digest_and_records_it(rig: Rig) -> None:
@@ -2930,6 +2931,8 @@ def test_roots_add_copies_the_release_aegisctl_out_by_digest_and_records_it(rig:
     on_disk = {str(path) for path in library(rig).rglob("*") if path.is_file()}
     assert set(recorded) == on_disk
     assert str(library(rig) / "aegisctl" / "mounts.py") in on_disk
+    # The image ships aegisctl compiled; the recorded host copy is its source alone.
+    assert not any("__pycache__" in path or path.endswith(".pyc") for path in on_disk)
     assert all(record == {"kind": "lib", "release": SAMPLE_RELEASE, "sha256": digest(Path(path))}
                for path, record in recorded.items())
     assert mode(library(rig) / "aegisctl") == 0o700

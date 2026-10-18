@@ -648,6 +648,10 @@ class FakeSystem:
             self.library_tree, destination,
             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
         )
+        # As the image ships it: docker/backend.Dockerfile compiles the app, aegisctl included.
+        compiled = destination / "__pycache__"
+        compiled.mkdir()
+        (compiled / "mounts.cpython-313.pyc").write_bytes(b"synthetic compiled module")
         if self.library_hook is not None:
             self.library_hook(destination)
         for directory, subdirectories, files in os.walk(destination, topdown=False):
