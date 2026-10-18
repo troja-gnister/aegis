@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 COORDINATION_PATH = Path("/srv/aegis/indexer-coordination")
 # Beyond the supervisor's five-second reap deadline after EOF or a stop.
 _EXIT_WAIT_SECONDS = 10
-_LOCK_NAME =re.compile(r"(?:deployment|root-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\.lock")
+_LOCK_NAME = re.compile(r"(?:deployment|root-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\.lock")
 
 
 class CoordinationError(RuntimeError):
