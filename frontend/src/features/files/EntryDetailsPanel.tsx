@@ -173,7 +173,7 @@ export function EntryDetailsPanel({entryId, onClose, viewerContext, onOpenMedia,
           ) : null}
           {entry.downloadUrl !== null ? (
             <div className="entry-details__actions">
-              {/* A same-origin attachment: the browser keeps the session cookie and the name. */}
+              {/* Same origin: the browser sends the session cookie and saves under the server's name. */}
               <a className="file-page-control interactive" href={entry.downloadUrl} download>
                 Download original
               </a>
