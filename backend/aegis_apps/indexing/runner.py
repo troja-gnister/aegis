@@ -7,7 +7,7 @@ import select
 import time
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import suppress
+from contextlib import AbstractContextManager, suppress
 from copy import deepcopy
 from threading import BoundedSemaphore, Lock, local
 from typing import TYPE_CHECKING, Any
@@ -376,6 +376,69 @@ class ScanRuntime:
         self._cancel_pool.shutdown(wait=True, cancel_futures=True)
 
 
+class ScanCoordinator:
+    """The control loop around one supervisor: tick, settle, admit, one pass at a time.
+
+    A root whose slot settles is admitted again on the same pass. Only an admission that
+    returned no lease, with no slot settling while it ran, waits a second for the next one.
+    """
+
+    def __init__(
+        self, supervisor: ScanSupervisor,
+        admit: Callable[[frozenset[UUID]], Future[ScanLease | None]],
+        forget: Callable[[ScanLease], None], *, readers: int, stop_requested: Callable[[], bool],
+        start_gate: Callable[[], AbstractContextManager[object]],
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._supervisor, self._admit, self._forget = supervisor, admit, forget
+        self._readers, self._stop_requested = readers, stop_requested
+        self._start_gate, self._clock = start_gate, monotonic
+        self.leases: dict[UUID, ScanLease] = {}
+        self.admission: Future[ScanLease | None] | None = None
+        self.stopping = False
+        self._next_admission = 0.0
+        self._settled = self._settled_at_admission = 0
+
+    def step(self) -> bool:
+        """One pass; False once stopping has settled every slot and the admission."""
+        now = self._clock()
+        if self._stop_requested() and not self.stopping:
+            self.stopping = True
+            self._supervisor.stop()
+        self._supervisor.tick()
+        self.stopping = self.stopping or self._supervisor.stopping
+        for root in set(self.leases) - self._supervisor.states.keys():
+            self._forget(self.leases.pop(root))
+            # The root's next directory may be claimable at once: no backoff applies.
+            self._settled += 1
+            self._next_admission = now
+        if self.admission is not None and self.admission.done():
+            lease = self.admission.result()
+            self.admission = None
+            if lease is None:
+                if self._settled == self._settled_at_admission:
+                    self._next_admission = now + 1
+            else:
+                # Serialize against the existing signal/shutdown start gate.
+                with self._start_gate():
+                    if self.stopping or self._stop_requested():
+                        self._supervisor.discard(lease)
+                    else:
+                        self._supervisor.start(lease)
+                    self.leases[lease.root_id] = lease
+        if self.stopping and not self._supervisor.states and self.admission is None:
+            return False
+        if (not self.stopping and self.admission is None and len(self.leases) < self._readers
+                and now >= self._next_admission):
+            self._settled_at_admission = self._settled
+            self.admission = self._admit(frozenset(self.leases))
+        return True
+
+    def run(self) -> None:
+        while self.step():
+            time.sleep(.05)
+
+
 def run_indexer(identity: WorkerIdentity, stop_requested: Callable[[], bool]) -> None:
     from django.utils import timezone
 
@@ -393,12 +456,8 @@ def run_indexer(identity: WorkerIdentity, stop_requested: Callable[[], bool]) ->
         cancel=runtime.cancel,
         timeout=policy.idle_timeout_seconds, max_readers=policy.readers,
     )
-    leases: dict[UUID, ScanLease] = {}
-    admission: Future[ScanLease | None] | None = None
-    next_admission = 0.0
-    stopping = False
 
-    def admit() -> ScanLease | None:
+    def admit(excluded: frozenset[UUID]) -> ScanLease | None:
         # Retain the actor-bound foundation path without pretending directory work
         # is an Operation. Its start gate and authorization checks remain intact.
         job = claim_next_job("indexer", identity.worker_id, timezone.now())
@@ -407,36 +466,15 @@ def run_indexer(identity: WorkerIdentity, stop_requested: Callable[[], bool]) ->
                 relinquish_job(job, now=timezone.now())
                 return None
             run_role._execute_claim(identity, job)
-        return None if stop_requested() else runtime.claim_next(set(leases))
+        return None if stop_requested() else runtime.claim_next(set(excluded))
 
+    coordinator = ScanCoordinator(
+        supervisor, lambda excluded: runtime.admissions.submit(lambda: admit(excluded)),
+        runtime.forget, readers=policy.readers, stop_requested=stop_requested,
+        start_gate=run_role._serialized_execution_start,
+    )
     try:
-        while True:
-            now = time.monotonic()
-            if stop_requested() and not stopping:
-                stopping = True
-                supervisor.stop()
-            supervisor.tick()
-            stopping = stopping or supervisor.stopping
-            for root in set(leases) - supervisor.states.keys():
-                runtime.forget(leases.pop(root))
-            if admission is not None and admission.done():
-                lease = admission.result()
-                admission = None
-                if lease is not None:
-                    # Serialize against the existing signal/shutdown start gate.
-                    with run_role._serialized_execution_start():
-                        if stopping or stop_requested():
-                            supervisor.discard(lease)
-                        else:
-                            supervisor.start(lease)
-                        leases[lease.root_id] = lease
-            if stopping and not supervisor.states and admission is None:
-                break
-            if (not stopping and admission is None and len(leases) < policy.readers
-                    and now >= next_admission):
-                admission = runtime.admissions.submit(admit)
-                next_admission = now + 1
-            time.sleep(.05)
+        coordinator.run()
     finally:
         supervisor.stop()
         while supervisor.states:
