@@ -24,12 +24,17 @@ class FakeSupervisor:
 
     def __init__(self) -> None:
         self.slots: dict[UUID, ReaderState] = {}
+        self.outcomes: dict[UUID, bool] = {}
         self.discarded: list[ScanLease] = []
         self.stopping = False
 
     @property
     def states(self) -> dict[UUID, ReaderState]:
         return dict(self.slots)
+
+    def settled(self) -> dict[UUID, bool]:
+        outcomes, self.outcomes = self.outcomes, {}
+        return outcomes
 
     def tick(self) -> None:
         pass
@@ -44,8 +49,9 @@ class FakeSupervisor:
     def stop(self) -> None:
         self.stopping = True
 
-    def settle(self, root: UUID) -> None:
+    def settle(self, root: UUID, *, completed: bool = True) -> None:
         del self.slots[root]
+        self.outcomes[root] = completed
 
 
 class Loop:
@@ -143,6 +149,97 @@ def test_a_slot_settling_during_an_empty_admission_skips_its_backoff() -> None:
     ]
 
 
+def test_a_stopped_slot_backs_its_root_off_until_a_directory_completes() -> None:
+    loop = Loop()
+    root = uuid4()
+    loop.step(0)
+    loop.resolve(lease(root))
+    loop.step(0.01)
+    loop.supervisor.settle(root, completed=False)
+    loop.step(0.1)
+    # A failed directory is not retried: the root sits out admissions for a second.
+    assert loop.admissions[-1][:2] == (0.1, frozenset({root}))
+    loop.resolve(None)
+    loop.step(0.2)
+    loop.step(1.25)
+    assert loop.admissions[-1][:2] == (1.25, frozenset())
+    loop.resolve(lease(root))
+    loop.step(1.3)
+    loop.supervisor.settle(root, completed=False)
+    loop.step(1.4)
+    loop.resolve(None)
+    loop.step(1.5)
+    loop.step(2.55)
+    assert loop.admissions[-1][:2] == (2.55, frozenset({root})), "the delay doubles"
+    loop.resolve(None)
+    loop.step(2.6)
+    loop.step(3.65)
+    assert loop.admissions[-1][:2] == (3.65, frozenset())
+    loop.resolve(lease(root))
+    loop.step(3.7)
+    loop.supervisor.settle(root)
+    loop.step(3.8)
+    assert loop.admissions[-1][:2] == (3.8, frozenset()), "a completion clears the backoff"
+    loop.resolve(lease(root))
+    loop.step(3.9)
+    loop.supervisor.settle(root, completed=False)
+    loop.step(4.0)
+    loop.resolve(None)
+    loop.step(4.1)
+    loop.step(5.15)
+    assert loop.admissions[-1][:2] == (5.15, frozenset()), "back to a one-second delay"
+
+
+def test_the_backoff_doubles_up_to_a_minute() -> None:
+    loop = Loop()
+    root = uuid4()
+    delays = []
+    loop.step(0)
+    for _ in range(8):
+        loop.resolve(lease(root))
+        loop.step(loop.now + .01)
+        loop.supervisor.settle(root, completed=False)
+        loop.step(loop.now + .01)
+        delays.append(loop.coordinator._backoff[root][1])
+        # Answer the admissions that exclude the root until one may claim it again.
+        while loop.admissions[-1][1] or loop.admissions[-1][2].done():
+            if not loop.admissions[-1][2].done():
+                loop.resolve(None)
+            loop.step(loop.now + 1)
+    assert delays == [1, 2, 4, 8, 16, 32, 60, 60]
+
+
+def test_a_stopped_slot_keeps_an_armed_admission_backoff() -> None:
+    loop = Loop(readers=2)
+    root = uuid4()
+    loop.step(0)
+    loop.resolve(lease(root))
+    loop.step(0.01)
+    loop.resolve(None)
+    loop.step(0.02)
+    loop.supervisor.settle(root, completed=False)
+    loop.step(0.3)
+    assert len(loop.admissions) == 2, "only a completed directory ends the backoff"
+    loop.step(1.03)
+    assert loop.admissions[-1][:2] == (1.03, frozenset({root}))
+
+
+def test_other_roots_keep_admitting_while_one_backs_off() -> None:
+    loop = Loop(readers=2)
+    failing, other, next_root = uuid4(), uuid4(), uuid4()
+    loop.step(0)
+    loop.resolve(lease(failing))
+    loop.step(0.01)
+    loop.resolve(lease(other))
+    loop.step(0.02)
+    loop.supervisor.settle(failing, completed=False)
+    loop.step(0.2)
+    assert loop.admissions[-1][:2] == (0.2, frozenset({failing, other}))
+    loop.resolve(lease(next_root))
+    loop.step(0.21)
+    assert next_root in loop.supervisor.slots
+
+
 def test_a_stop_discards_a_late_lease_and_ends_after_it_settles() -> None:
     loop = Loop()
     loop.step(0)
@@ -152,7 +249,7 @@ def test_a_stop_discards_a_late_lease_and_ends_after_it_settles() -> None:
     assert loop.step(0.01) is True
     assert loop.supervisor.stopping and loop.supervisor.discarded == [late]
     assert len(loop.admissions) == 1
-    loop.supervisor.settle(late.root_id)
+    loop.supervisor.settle(late.root_id, completed=False)
     assert loop.step(0.02) is False
     assert loop.forgotten == [late]
 

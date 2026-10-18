@@ -379,11 +379,18 @@ class ScanRuntime:
         self._cancel_pool.shutdown(wait=True, cancel_futures=True)
 
 
+_ROOT_BACKOFF_SECONDS = 60.0
+
+
 class ScanCoordinator:
     """The control loop around one supervisor: tick, settle, admit, one pass at a time.
 
-    A root whose slot settles is admitted again on the same pass. Only an admission that
-    returned no lease, with no slot settling while it ran, waits a second for the next one.
+    A root whose directory completed is admitted again on the same pass. A stopped slot has
+    failed its directory for the run, so an outage (an unmounted or replaced source, changed
+    authority) would fail one directory per pass: its root sits out admission for a second,
+    doubling up to a minute until one of its directories completes, while other roots go on.
+    An admission that returned no lease, with no directory completing while it ran, waits a
+    second for the next one.
 
     Between passes the loop waits on ``wake`` for at most ``idle`` seconds. Lane futures'
     done-callbacks and reader receiver threads only set it; this thread alone still accepts
@@ -407,7 +414,9 @@ class ScanCoordinator:
         self.admission: Future[ScanLease | None] | None = None
         self.stopping = False
         self._next_admission = 0.0
-        self._settled = self._settled_at_admission = 0
+        self._completed = self._completed_at_admission = 0
+        # Roots whose last directory stopped: (excluded until, current delay).
+        self._backoff: dict[UUID, tuple[float, float]] = {}
 
     def step(self) -> bool:
         """One pass; False once stopping has settled every slot and the admission."""
@@ -417,16 +426,23 @@ class ScanCoordinator:
             self._supervisor.stop()
         self._supervisor.tick()
         self.stopping = self.stopping or self._supervisor.stopping
+        outcomes = self._supervisor.settled()
         for root in set(self.leases) - self._supervisor.states.keys():
             self._forget(self.leases.pop(root))
-            # The root's next directory may be claimable at once: no backoff applies.
-            self._settled += 1
-            self._next_admission = now
+            if outcomes.get(root, False):
+                # The root's next directory may be claimable at once: no backoff applies.
+                self._backoff.pop(root, None)
+                self._completed += 1
+                self._next_admission = now
+            else:
+                previous = self._backoff.get(root, (0.0, 0.5))[1]
+                delay = min(_ROOT_BACKOFF_SECONDS, previous * 2)
+                self._backoff[root] = (now + delay, delay)
         if self.admission is not None and self.admission.done():
             lease = self.admission.result()
             self.admission = None
             if lease is None:
-                if self._settled == self._settled_at_admission:
+                if self._completed == self._completed_at_admission:
                     self._next_admission = now + 1
             else:
                 # Serialize against the existing signal/shutdown start gate.
@@ -440,8 +456,9 @@ class ScanCoordinator:
             return False
         if (not self.stopping and self.admission is None and len(self.leases) < self._readers
                 and now >= self._next_admission):
-            self._settled_at_admission = self._settled
-            self.admission = self._admit(frozenset(self.leases))
+            self._completed_at_admission = self._completed
+            backing_off = {root for root, (until, _) in self._backoff.items() if until > now}
+            self.admission = self._admit(frozenset(self.leases.keys() | backing_off))
         return True
 
     def wait(self) -> None:

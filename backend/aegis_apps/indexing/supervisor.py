@@ -97,6 +97,7 @@ class ScanSupervisor:
         self._heartbeat, self._cancel, self._clock = heartbeat, cancel, monotonic
         self._timeout, self._limit = timeout, max_readers
         self._slots: dict[UUID, _Slot] = {}
+        self._outcomes: dict[UUID, bool] = {}
         self._stopping = False
         self._next_heartbeat = monotonic() + 15
         self._publication: Future[None] | None = None
@@ -115,6 +116,15 @@ class ScanSupervisor:
     @property
     def states(self) -> dict[UUID, ReaderState]:
         return {root: slot.state for root, slot in self._slots.items()}
+
+    def settled(self) -> dict[UUID, bool]:
+        """Roots whose slots settled since the last call: True only after a completed finalize.
+
+        A slot that stopped instead (failure, timeout, revoked authority, a late discard) has
+        recorded its directory as failed.
+        """
+        outcomes, self._outcomes = self._outcomes, {}
+        return outcomes
 
     def has_unreaped_reader(self, root_id: UUID) -> bool:
         slot = self._slots.get(root_id)
@@ -300,3 +310,4 @@ class ScanSupervisor:
                 if slot.reader is not None:
                     slot.reader.close_credits()
                 del self._slots[root]
+                self._outcomes[root] = not slot.failed

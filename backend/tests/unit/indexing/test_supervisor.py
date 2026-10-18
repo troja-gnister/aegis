@@ -21,6 +21,7 @@ from aegis_apps.indexing.database import ScanLease
 from aegis_apps.indexing.protocol import (
     ReaderBatch,
     ReaderComplete,
+    ReaderFailure,
     ReaderMessage,
     encode_message,
     read_message,
@@ -294,6 +295,25 @@ def test_global_pool_is_bounded_and_other_root_progresses(
     control.tick()
     assert control.supervisor.metrics["scanCompletedDirectories"] == 1
     assert not control.readers[0].terminated
+
+
+def test_settled_slots_report_whether_their_directory_completed(
+    supervisor_fixture: SupervisorFixture,
+) -> None:
+    control = supervisor_fixture
+    reader = control.start()
+    reader.send(ReaderComplete(DirectoryIdentity(1, 2, 1, 1)))
+    reader.alive = False
+    control.tick()
+    assert control.supervisor.settled() == {control.lease.root_id: True}
+    assert control.supervisor.settled() == {}
+    failing = replace(control.lease, root_id=uuid4(), work_id=uuid4())
+    control.supervisor.start(failing)
+    control.tick()
+    control.readers[-1].send(ReaderFailure("source_unavailable"))
+    control.tick()
+    assert ("fail", "source_unavailable") in control.operations
+    assert control.supervisor.settled() == {failing.root_id: False}
 
 
 def test_stop_is_monotonic_and_does_not_apply_queued_observations(
