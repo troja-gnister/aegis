@@ -140,7 +140,8 @@ class ProcessReader:
     """Two sender credits bound pipe + decoding + queue, including partial frames.
 
     ``wake`` is called from the receiver thread after each queued message and once the
-    child has exited (or after a bounded wait for it), so the coordinator need not poll.
+    child has exited (without a pidfd, at the end of its output), so the coordinator need
+    not poll.
     """
 
     def __init__(
@@ -215,15 +216,16 @@ class ProcessReader:
             self._await_exit()
 
     def _await_exit(self) -> None:
-        """Wake the coordinator when the child exits: finalization waits for its reap."""
+        """Wake the coordinator when the child exits: finalization waits for its reap.
+
+        Without a pidfd it wakes at once: the coordinator's idle timeout then bounds how late
+        the reap is seen. Only the coordinator reaps; a second waiter would race its signals.
+        """
         try:
             if self._exit >= 0:
                 exited = select.poll()
                 exited.register(self._exit, select.POLLIN)
                 exited.poll(_EXIT_WAIT_SECONDS * 1000)
-            else:
-                with suppress(subprocess.TimeoutExpired):
-                    self.process.wait(timeout=_EXIT_WAIT_SECONDS)
         finally:
             if self._exit >= 0:
                 os.close(self._exit)

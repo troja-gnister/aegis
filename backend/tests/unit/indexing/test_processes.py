@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -80,7 +81,7 @@ def test_coordination_rejects_nonopaque_lock_names(tmp_path: Path, name: str) ->
         os.close(directory)
 
 
-@pytest.mark.parametrize("exit_watch", ["pidfd", "polling"])
+@pytest.mark.parametrize("exit_watch", ["pidfd", "no_pidfd"])
 def test_reader_wakes_its_coordinator_per_packet_and_once_the_child_exits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exit_watch: str,
 ) -> None:
@@ -109,7 +110,7 @@ def test_reader_wakes_its_coordinator_per_packet_and_once_the_child_exits(
         raise OSError("synthetic: no pidfd")
 
     monkeypatch.setattr("aegis_apps.indexing.processes.subprocess.Popen", spawn)
-    if exit_watch == "polling":
+    if exit_watch == "no_pidfd":
         monkeypatch.setattr("aegis_apps.indexing.processes.os.pidfd_open", unsupported)
     woken = Event()
     reader = processes.ProcessReader(
@@ -119,14 +120,27 @@ def test_reader_wakes_its_coordinator_per_packet_and_once_the_child_exits(
     try:
         assert woken.wait(5)
         assert isinstance(reader.receive(), ReaderComplete)
-        woken.clear()
-        assert not reader.reaped()
-        reader.close_credits()
-        assert woken.wait(5), "child exit did not wake the coordinator"
-        assert reader.reaped() and root_lock.fd == -1
         assert reader._receiver is not None
+        if exit_watch == "pidfd":
+            woken.clear()
+            assert not reader.reaped()
+            reader.close_credits()
+            assert woken.wait(5), "child exit did not wake the coordinator"
+            assert reader.reaped()
+        else:
+            # It woke the coordinator at the end of the output and never waited for the
+            # child: only the coordinator reaps, within its idle timeout.
+            reader._receiver.join(5)
+            assert not reader._receiver.is_alive() and reader.process.returncode is None
+            reader.close_credits()
+            deadline = time.monotonic() + 5
+            while not reader.reaped():
+                assert time.monotonic() < deadline, "child was not reaped"
+                time.sleep(.01)
+        assert root_lock.fd == -1
         reader._receiver.join(5)
         assert not reader._receiver.is_alive()
+        assert reader._exit == -1, "the pidfd stayed open"
     finally:
         reader.close_credits()
         reader.kill()
@@ -173,6 +187,7 @@ def test_post_spawn_failure_retains_owned_handle_and_lock(
         reader = getattr(caught.value, "reader", None)
         assert reader is not None, "owned child was lost by exceptional construction"
         assert reader.process is children[0] and root_lock.fd >= 0
+        assert reader._exit == -1, "no receiver will close the pidfd"
         with pytest.raises(processes.CoordinationBusy):
             processes.ScanLock.acquire(directory, f"root-{root_id}.lock")
         reader.kill()
