@@ -321,6 +321,35 @@ def test_database_clock_retry_backoff_and_exhaustion(
         assert work.attempt == attempt + int(claimed)
 
 
+@pytest.mark.parametrize("earlier", ["pending", "expired"])
+def test_claim_takes_the_earliest_claimable_directory_of_either_kind(
+    role_database: RoleDatabase, earlier: str,
+) -> None:
+    from aegis_apps.indexing.database import claim_directory
+
+    root, lease = _claim(role_database)
+    expired = DirectoryWork.objects.get(pk=lease.work_id)
+    child = CatalogEntry.objects.create(
+        root=root, source_parent_id=lease.directory_id, raw_name=b"child",
+        display_name="child", name_key=b"child", kind="directory",
+    )
+    offset = timedelta(hours=-1 if earlier == "pending" else 1)
+    pending = DirectoryWork.objects.create(
+        run_id=lease.run_id, directory=child, parent_revision=0,
+        available_at=expired.available_at + offset,
+    )
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE indexing_directorywork SET lease_expires_at=clock_timestamp() "
+            "- interval '30 seconds' WHERE id=%s", [lease.work_id],
+        )
+    with role_database.as_django_role("aegis_indexer"):
+        claimed = claim_directory(lease.run_id, lease.worker_id)
+    assert claimed is not None
+    assert claimed.work_id == (pending.pk if earlier == "pending" else expired.pk)
+    assert claimed.attempt == (1 if earlier == "pending" else 2)
+
+
 @pytest.mark.parametrize("value", [None, [], {}, 1, "invalid"])
 def test_nonobject_and_missing_lease_payload_is_rejected(
     role_database: RoleDatabase, value: object
