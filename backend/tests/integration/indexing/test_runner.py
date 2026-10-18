@@ -3,8 +3,8 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import replace
-from threading import Event
-from typing import TYPE_CHECKING
+from threading import Event, Timer
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from aegis_apps.catalog.models import CatalogEntry
@@ -138,6 +138,209 @@ def test_database_lane_is_bounded_and_has_actual_indexer_login(role_database: Ro
     finally:
         release.set()
         lane.close()
+
+
+SESSION_SETTINGS = ("aegis_indexer", "5s", "1s", "5s")
+
+
+def _session() -> tuple[int, str, str, str, str]:
+    """The lane session's backend and the login and settings every session must carry."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT pg_backend_pid(), session_user, current_setting('statement_timeout'), "
+            "current_setting('lock_timeout'), "
+            "current_setting('idle_in_transaction_session_timeout')",
+        )
+        row = cursor.fetchone()
+    return int(row[0]), str(row[1]), str(row[2]), str(row[3]), str(row[4])
+
+
+def _wait_backend_gone(pid: int) -> None:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE pid=%s", [pid])
+            if cursor.fetchone()[0] == 0:
+                return
+        time.sleep(.02)
+    pytest.fail("database backend did not end")
+
+
+def test_database_lane_keeps_one_prepared_session_until_closed(
+    role_database: RoleDatabase,
+) -> None:
+    from aegis_apps.indexing.runner import DatabaseLane
+
+    with role_database.as_django_role("aegis_indexer"):
+        lane = DatabaseLane(1)
+    try:
+        first = lane.submit(_session).result(timeout=5)
+        second = lane.submit(_session).result(timeout=5)
+        assert first[1:] == second[1:] == SESSION_SETTINGS
+        assert first[0] == second[0]
+    finally:
+        lane.close()
+    _wait_backend_gone(first[0])
+
+
+@pytest.mark.parametrize("failure", ["database", "python"])
+def test_database_lane_replaces_its_session_after_any_error(
+    role_database: RoleDatabase, failure: str,
+) -> None:
+    from aegis_apps.indexing.runner import DatabaseLane
+    from django.db import DatabaseError
+
+    def failing() -> None:
+        if failure == "database":
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT 1/0")
+        raise RuntimeError("synthetic failure")
+
+    with role_database.as_django_role("aegis_indexer"):
+        lane = DatabaseLane(1)
+    try:
+        first = lane.submit(_session).result(timeout=5)
+        with pytest.raises((DatabaseError, RuntimeError)):
+            lane.submit(failing).result(timeout=5)
+        second = lane.submit(_session).result(timeout=5)
+        assert second[0] != first[0] and second[1:] == SESSION_SETTINGS
+        _wait_backend_gone(first[0])
+    finally:
+        lane.close()
+
+
+def test_database_lane_replaces_a_session_the_server_ended_before_using_it(
+    role_database: RoleDatabase,
+) -> None:
+    """A restart or termination ends idle sessions; the next call must not fail on one."""
+    from aegis_apps.indexing.runner import DatabaseLane
+
+    with role_database.as_django_role("aegis_indexer"):
+        lane = DatabaseLane(1)
+    try:
+        first = lane.submit(_session).result(timeout=5)
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT pg_terminate_backend(%s)", [first[0]])
+            assert cursor.fetchone()[0]
+        _wait_backend_gone(first[0])
+        second = lane.submit(_session).result(timeout=5)
+        assert second[0] != first[0] and second[1:] == SESSION_SETTINGS
+    finally:
+        lane.close()
+
+
+def test_database_lane_renews_sessions_at_their_maximum_age(role_database: RoleDatabase) -> None:
+    from aegis_apps.indexing.runner import DatabaseLane
+
+    now = [100.0]
+    with role_database.as_django_role("aegis_indexer"):
+        lane = DatabaseLane(1, max_age=60, clock=lambda: now[0])
+    try:
+        first = lane.submit(_session).result(timeout=5)
+        now[0] = 159.9
+        assert lane.submit(_session).result(timeout=5)[0] == first[0]
+        now[0] = 160.0
+        renewed = lane.submit(_session).result(timeout=5)
+        assert renewed[0] != first[0] and renewed[1:] == SESSION_SETTINGS
+    finally:
+        lane.close()
+
+
+def test_database_lane_wakes_after_releasing_capacity(role_database: RoleDatabase) -> None:
+    from aegis_apps.indexing.runner import DatabaseLane
+
+    woken = Event()
+    with role_database.as_django_role("aegis_indexer"):
+        lane = DatabaseLane(1, wake=woken.set)
+    try:
+        future = lane.submit(_session)
+        assert woken.wait(5) and future.done()
+        # Capacity is free as soon as the future is done, never after.
+        lane.submit(_session).result(timeout=5)
+    finally:
+        lane.close()
+
+
+@override_settings(AEGIS_PROCESS_ROLE="indexer")
+def test_late_cancel_never_aborts_the_next_lease_on_a_reused_session(
+    scan_fixture: ScanFixture, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import Mock
+
+    from aegis_apps.indexing import checkpoints
+    from aegis_apps.indexing.config import ScanPolicy
+    from aegis_apps.indexing.database import claim_directory
+    from aegis_apps.indexing.runner import ScanRuntime
+    from aegis_apps.indexing.scheduling import schedule_root_scan
+    from aegis_apps.operations.management.commands.run_role import WorkerIdentity
+
+    from tests.deployment.test_database_roles import _create_scan_fixture
+
+    lease = scan_fixture.claim()
+    with scan_fixture.database.as_django_role("aegis_migrator"):
+        root, worker, digest = _create_scan_fixture()
+    with scan_fixture.database.as_django_role("aegis_indexer"):
+        run_id = schedule_root_scan(root.pk, worker, digest)
+        assert run_id is not None
+        other = claim_directory(run_id, worker)
+    assert other is not None
+
+    class HeldCancels:
+        """Delivers dispatched cancels only when the test says so: as late as possible."""
+
+        def __init__(self) -> None:
+            self.held: list[Callable[[], object]] = []
+
+        def submit(self, function: Callable[..., object], **arguments: object) -> None:
+            self.held.append(lambda: function(**arguments))
+
+        def shutdown(self, **arguments: object) -> None:
+            pass
+
+    held = HeldCancels()
+    entered, release = Event(), Event()
+    backends: dict[str, int] = {}
+    original_fail, original_record = checkpoints.fail_directory, checkpoints.record_batch
+
+    def failing(*args: Any) -> bool:
+        # A fail checkpoint runs without the commit gate, so it completes after the cancel.
+        backends["cancelled"] = connection.connection.info.backend_pid
+        entered.set()
+        assert release.wait(5), "test barrier not released"
+        return original_fail(*args)
+
+    def recording(*args: Any) -> object:
+        backends["next"] = connection.connection.info.backend_pid
+        (deliver,) = held.held
+        late = Timer(.1, deliver)
+        late.start()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_sleep(.5)")
+        finally:
+            late.join()
+        return original_record(*args)
+
+    monkeypatch.setattr(checkpoints, "fail_directory", failing)
+    monkeypatch.setattr(checkpoints, "record_batch", recording)
+    identity = WorkerIdentity("indexer", lease.worker_id, "task4-test", "schema-test",
+                              lease.manifest_identity)
+    with scan_fixture.database.as_django_role("aegis_indexer"):
+        # One reader: a single mutation thread, so a reused session would be the same one.
+        runtime = ScanRuntime(identity, ScanPolicy(3600, 120, 500, 1), Mock())
+    runtime._cancel_pool = held  # type: ignore[assignment]
+    try:
+        failed = runtime.execute(lease, "fail", "source_unavailable")
+        assert entered.wait(5)
+        runtime.cancel(lease)
+        release.set()
+        assert failed.result(timeout=5) is True
+        recorded = runtime.execute(other, "record", scan_fixture.batch(b"next-lease"))
+        assert recorded.result(timeout=5).observed == 1
+        assert backends["next"] != backends["cancelled"]
+    finally:
+        release.set()
+        runtime.close()
 
 
 @override_settings(AEGIS_PROCESS_ROLE="indexer")

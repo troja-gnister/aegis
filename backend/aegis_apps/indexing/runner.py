@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import os
+import select
 import time
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import suppress
 from copy import deepcopy
-from threading import BoundedSemaphore, Lock
+from threading import BoundedSemaphore, Lock, local
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from django.db import connection
+from psycopg.pq import TransactionStatus
 
 from aegis_apps.common.database_privileges import require_runtime_database_login
 
@@ -29,9 +32,20 @@ if TYPE_CHECKING:
 
 
 class DatabaseLane:
-    """A fixed number of sessions, with no unbounded executor submission queue."""
+    """A fixed number of sessions, with no unbounded executor submission queue.
 
-    def __init__(self, capacity: int) -> None:
+    Each worker thread keeps its indexer login between submissions: no SCRAM exchange,
+    login check or session settings per call, and PL/pgSQL plans and relation caches stay
+    warm. A thread replaces its session before the next use after any error, after a cancel
+    was dispatched to it (``retire``), when the server sent anything while it was idle (a
+    restart or termination notice), and once it is ``max_age`` seconds old, which bounds how
+    long an out-of-band password change or NOLOGIN takes to apply.
+    """
+
+    def __init__(
+        self, capacity: int, *, wake: Callable[[], None] | None = None, max_age: float = 60.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         if not 1 <= capacity <= 4:
             raise ValueError("invalid database lane capacity")
         self._settings = deepcopy(connection.settings_dict)
@@ -41,35 +55,99 @@ class DatabaseLane:
         }
         self._capacity = BoundedSemaphore(capacity)
         self._pool = ThreadPoolExecutor(max_workers=capacity, thread_name_prefix="scan-database")
+        self._wake, self._max_age, self._clock = wake, max_age, clock
+        self._local = local()
+        self._mutex = Lock()
+        # Open sessions by identity (kept alive, so an identity is never reused while listed).
+        self._sessions: dict[int, Any] = {}
+        self._retired: set[int] = set()
 
     def submit[T](self, function: Callable[[], T]) -> Future[T]:
         if not self._capacity.acquire(blocking=False):
             raise RuntimeError("scan database lane capacity exhausted")
 
         def execute() -> T:
-            connection.close()
-            connection.settings_dict = deepcopy(self._settings)
             try:
-                connection.ensure_connection()
-                require_runtime_database_login("indexer")
-                with connection.cursor() as cursor:
-                    cursor.execute("SET statement_timeout = '5s'")
-                    cursor.execute("SET lock_timeout = '1s'")
-                    cursor.execute("SET idle_in_transaction_session_timeout = '5s'")
+                self._session()
                 return function()
+            except BaseException:
+                self._discard()
+                raise
             finally:
-                connection.close()
+                # Before the future completes: whoever sees it done may submit at once.
+                self._capacity.release()
+
+        def settled(completed: Future[T]) -> None:
+            if completed.cancelled():  # it never ran, so it never released its slot
+                self._capacity.release()
+            if self._wake is not None:
+                self._wake()
 
         try:
             future = self._pool.submit(execute)
         except BaseException:
             self._capacity.release()
             raise
-        future.add_done_callback(lambda completed: self._capacity.release())
+        future.add_done_callback(settled)
         return future
+
+    def retire(self, session: object) -> None:
+        """Never reuse ``session``: a cancel dispatched to it may still arrive."""
+        with self._mutex:
+            if id(session) in self._sessions:
+                self._retired.add(id(session))
+
+    def _reusable(self, session: Any) -> bool:
+        with self._mutex:
+            if id(session) in self._retired:
+                return False
+        if (self._clock() - self._local.opened >= self._max_age or session.closed
+                or session.broken or not session.autocommit or connection.in_atomic_block
+                or session.info.transaction_status != TransactionStatus.IDLE):
+            return False
+        try:
+            # An idle session receives nothing unless the server is ending it.
+            return not select.select([session.fileno()], [], [], 0)[0]
+        except (OSError, ValueError):
+            return False
+
+    def _session(self) -> None:
+        session = connection.connection
+        if (session is not None and session is getattr(self._local, "session", None)
+                and self._reusable(session)):
+            return
+        self._discard()
+        connection.settings_dict = deepcopy(self._settings)
+        connection.ensure_connection()
+        session = connection.connection
+        with self._mutex:
+            self._sessions[id(session)] = session
+        self._local.session, self._local.opened = session, self._clock()
+        require_runtime_database_login("indexer")
+        with connection.cursor() as cursor:
+            cursor.execute("SET statement_timeout = '5s'")
+            cursor.execute("SET lock_timeout = '1s'")
+            cursor.execute("SET idle_in_transaction_session_timeout = '5s'")
+
+    def _discard(self) -> None:
+        session = getattr(self._local, "session", None)
+        self._local.session = None
+        with suppress(Exception):
+            connection.close()
+        if session is not None:
+            with self._mutex:
+                self._sessions.pop(id(session), None)
+                self._retired.discard(id(session))
 
     def close(self) -> None:
         self._pool.shutdown(wait=True, cancel_futures=True)
+        with self._mutex:
+            sessions = list(self._sessions.values())
+            self._sessions.clear()
+            self._retired.clear()
+        for session in sessions:
+            with suppress(Exception):
+                session.close()
 
 
 # The bounded parent walk of one directory: each step joins the previous row's source parent
@@ -163,6 +241,12 @@ class ScanRuntime:
         interrupt = self._gate(lease).cancel()
         with self._mutex:
             active = self._connections.get(lease.work_id)
+            if active is not None and interrupt:
+                # The cancel is asynchronous and may land after this lease's statement has
+                # finished. Retired while still registered to this lease, the session is
+                # replaced before its thread runs anything else, so no later statement
+                # (another lease's) can be the one it aborts.
+                self.mutations.retire(active)
         if active is not None and interrupt:
             self._cancel_pool.submit(active.cancel_safe, timeout=1)
 
