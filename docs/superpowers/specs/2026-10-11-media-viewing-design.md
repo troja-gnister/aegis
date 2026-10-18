@@ -144,6 +144,56 @@ Delivery rules:
 - The catalog's entry list and details gain a compact `media` object: kind, thumbnail state, sort date and duration.
 - The URLs carry the cache namespace and root epoch, so a browser cache can never serve one user's derivative to another session or after revocation. Logout and account switch already purge the private state; tracked object URLs are not needed, because images and videos load from same-origin URLs.
 
+### M6a. Downloads for every file
+
+Added October 18, 2026 (package D1). It completes FILE-005 for read-only roots.
+
+**Every regular file downloads, not only media.**
+- Entry details (`GET /api/v1/entries/{id}`) carry `downloadUrl`. This is the `d=attachment` original URL of M6, built the same way, and it is the URL that media details give as `original.downloadUrl`.
+- It is set only when the caller has EXPORT on the root and the entry is a regular file that is available: present, with current source and navigation chains. Otherwise it is `null`. Directories, links, special entries, unsupported entries and missing or inaccessible files never get one, and an entry outside the caller's grants is the usual 404.
+- Delivery checks the same conditions again on every request.
+- Attachments outside the inline allowlist are sent as `application/octet-stream` with the RFC 6266 name.
+- The frontend validates the URL as strictly as the media URLs: the exact same-origin path of the entry, `d=attachment`, a namespace and an epoch, and only on a present regular file.
+- **Details panel:** offers "Download original" for every file with a URL, photos and videos included. The media section keeps only Open, so a photo shows a single Download.
+- **Viewer:** its toolbar keeps its own Download, from the media details, with the same URL.
+- **File rows:** no download action. A row is a single button in a virtualized list, and a second control in every row would crowd phone layouts.
+
+**No audit events for downloads.** Platform §11.6 audits authentication, grants, configuration, managed changes and egress, not content reads.
+
+**Version binding: a deliberate difference from platform §11.3.** §11.3 binds delivery authorization to actor, entry, current version, action and a short expiry. Delivery URLs here bind:
+- the actor's session, through the cache namespace `n`, an HMAC of the session key, the user and the user's epoch;
+- the entry, through the path;
+- the action, through `d=inline|attachment`, which requires PREVIEW or EXPORT;
+- the root's authorization epoch `e`.
+
+They bind no file version and no expiry. Instead:
+- **Per-request authorization.** Every request is authorized again against the current catalog, under the same locks as browsing. Each of these turns an issued URL into the same 404 on its next request:
+  - logout or session expiry;
+  - deactivation;
+  - a user or root epoch change, such as a grant change;
+  - the file becoming unavailable.
+
+  This revokes faster than a short expiry, which would keep a revoked link working until it lapsed.
+- **Lifetime.** The URL lives in the session's private query cache, never in history or storage, and logout purges it, so its effective lifetime is the session's.
+- **Which bytes.** The bytes are those of the file when the request arrives. If the file changed after the indexer last observed it, the gateway sends the new bytes.
+- **Resumes never mix versions.** A resumed download (`Range` with `If-Range`) continues only while nginx's validator for the file still matches: the ETag of modification time (in seconds) and size, or `Last-Modified`. Otherwise the gateway answers a full `200`.
+- **Known limit.** A rewrite that keeps the size within the same second keeps the validator. Roots are read-only to Aegis and written only by other software, and a content-strength validator would mean hashing originals, which this part does not do (M1).
+- **Resumes end with the session.** A resume after logout gets 404, and the user starts again from a fresh URL. This is intended.
+
+**Connection cap at the gateway.**
+- `/media/v1/originals/` has its own location, proxied like `/media/`.
+- `limit_conn` allows **16 deliveries in progress per client address**. A slot is taken before web authorizes the request and held until the last byte of the redirected file is sent, so long downloads count for their whole duration.
+- The 17th request gets `429` with `private, no-store` until one ends.
+- 16 leaves a phone streaming and seeking a video (a few range requests at once) room for several parallel downloads. It still stops one client from holding hundreds of disk-bound transfers open.
+- **The key is the effective client address.** Caddy reaches the gateway on its `tls-gateway` listener, where nginx takes the address from Caddy's `X-Forwarded-For` (`real_ip_header`). That listener is the only way in under the Podman deployment, whose socket-activated Caddy sees real client addresses, so the cap applies per real client there. On the plain HTTP listener (development, e2e and compose's published port), the key is the TCP peer.
+- **No request-rate limit.** Each request is already an authorized web request like any API call, and media players legitimately send bursts of range requests while seeking.
+- **Derivatives are not capped.** A grid requests dozens of thumbnails at once over HTTP/2.
+
+**Later work:**
+- downloading a folder;
+- zip archives;
+- multi-select downloads.
+
 ### M7. Frontend
 
 - **File browser:**

@@ -78,7 +78,7 @@ Targets 2A–2G are milestones within the expanded Phase 2. A feature spanning m
 | FILE-002 | Deployment-declared, alias-checked mount slots and logical roots | Verified | Phase 1 | [Acceptance evidence](docs/verification/phase-1.md) |
 | FILE-003 | Resumable uploads into immutable managed storage with progress and conflict handling | Planned | 2B | — |
 | FILE-004 | Copy-on-write folders, copies, logical organization, and idempotent operation recovery | Planned | 2B | — |
-| FILE-005 | Authorized downloads and browser-compatible byte-range streaming | Planned | 2A | — |
+| FILE-005 | Authorized downloads and browser-compatible byte-range streaming | Implemented | 2A | [Read-only roots: every file, resumable within a session](docs/superpowers/specs/2026-10-11-media-viewing-design.md#m6a-downloads-for-every-file); managed files follow 2B |
 | FILE-006 | Reversible metadata archive/hide state with no source or managed-version byte deletion | Planned | 2B | — |
 | FILE-007 | Filesystem event ingestion plus checkpointed full reconciliation | Planned | 2A | — |
 | FILE-008 | Permission-safe filename and path search | Planned | 2A | — |
@@ -87,10 +87,10 @@ Targets 2A–2G are milestones within the expanded Phase 2. A feature spanning m
 | UX-003 | Installable PWA with Files, Photos, Search, and More navigation | Planned | 2C | — |
 | UX-004 | Reconnectable server-sent operation, transfer, and job progress | Planned | 2A/2B | — |
 | UX-005 | Mobile metadata-filter panel, active chips, multi-select/ranges, and saved searches | Planned | 2A/2C/2E | — |
-| MEDIA-001 | Responsive thumbnails, video posters, and media probing | Planned | 2C | — |
-| MEDIA-002 | Keyset photo timeline, date/type filters, and virtualized grids | Planned | 2C | — |
-| MEDIA-003 | Touch-oriented photo and video viewing | Planned | 2C | — |
-| MEDIA-004 | Original video range streaming with cached HLS fallback when required | Planned | 2C | — |
+| MEDIA-001 | Responsive thumbnails, video posters, and media probing | Implemented | 2C | [Read-only roots](docs/superpowers/specs/2026-10-11-media-viewing-design.md#m4-formats-sizes-and-budgets-defaults); managed files follow 2B |
+| MEDIA-002 | Keyset photo timeline, date/type filters, and virtualized grids | Implemented | 2C | [Read-only roots: kind and year filters](docs/superpowers/specs/2026-10-11-media-viewing-design.md#m7-frontend) |
+| MEDIA-003 | Touch-oriented photo and video viewing | Implemented | 2C | [Read-only roots](docs/superpowers/specs/2026-10-11-media-viewing-design.md#m7-frontend) |
+| MEDIA-004 | Original video range streaming with cached HLS fallback when required | Implemented | 2C | [Read-only roots; the fallback is a cached MP4 transcode, not HLS](docs/superpowers/specs/2026-10-11-media-viewing-design.md#m4-formats-sizes-and-budgets-defaults) |
 | DOC-001 | Progressive PDF viewer and page thumbnails | Planned | 2D | — |
 | DOC-002 | Escaped, chunked text viewing with encoding detection | Planned | 2D | — |
 | DOC-003 | Server-paged CSV viewing with bounded filtering | Planned | 2D | — |
@@ -123,7 +123,7 @@ The current focus is **Phase 2A.1 — Indexed-browser implementation**, starting
 
 Development reached a checkpoint on September 28 with **14 tasks accepted and 4 remaining** (updated October 1). The [continuation handoff](HANDOFF.md) records the corrected PostgreSQL, Caddy, and indexer Podman prerequisite slices, all pushed to `origin/main`, and the combined 318-test PostgreSQL, 111/112-test Caddy, and 220-test indexer acceptance. Podman stays a secondary, optional runtime with its follow-ups deferred; Docker CI is green on `e085030` ([run 36462687576](https://github.com/troja-gnister/aegis/actions/runs/36462687576), all four jobs passing), so the full Docker gates are satisfied; Tasks 13 and 14 were accepted afterwards and Task 15 is next.
 
-The first focused specification is [2A.1 — Indexed browser](docs/superpowers/specs/2026-09-14-phase-2a-indexed-browser-design.md): catalog, safe checkpointed scans, cursor API, basic metadata filters, virtualized mobile browsing, and early scale measurements. Event-driven reconciliation, broader search, reconnectable progress, and downloads remain required follow-up work within 2A; this first package alone cannot complete the milestone.
+The first focused specification is [2A.1 — Indexed browser](docs/superpowers/specs/2026-09-14-phase-2a-indexed-browser-design.md): catalog, safe checkpointed scans, cursor API, basic metadata filters, virtualized mobile browsing, and early scale measurements. Event-driven reconciliation, broader search, and reconnectable progress remain required follow-up work within 2A; this first package alone cannot complete the milestone. Downloads and ranges are implemented for read-only roots (FILE-005).
 
 Its [implementation plan and task ledger](docs/superpowers/plans/2026-09-14-phase-2a-indexed-browser.md#status-and-task-ledger) define **18 tasks: 14 complete, 4 remaining**. This is the count for 2A.1 only, not all remaining v1 work. The remaining tasks deliver real-stack journeys, catalog/filesystem/mobile benchmarks, and the operating/acceptance handoff. Task 12's [reviewed correction and verification](docs/superpowers/plans/2026-09-14-phase-2a-indexed-browser.md#task-12-correction-verification) cover deep history restoration, session cleanup, bounded virtualization, and keyboard focus. Its synthetic Chromium probe passed at 320/390/412 pixels with no horizontal overflow, 44-pixel controls, and a five-page window. Task 10's accepted API passed all 1,346 backend tests; authenticated browsing measured 13 SQL statements ordinarily and 16 when refreshing session activity, within the request budget. Historical verification remains in the plan. The 1M-entry/50K-folder performance gates remain open; synthetic fixtures and query-count checks are not physical-scale acceptance. Local nested-mount failures remain [explicitly tracked](docs/superpowers/plans/2026-09-14-phase-2a-indexed-browser.md#task-4-deployment-verification-limitation), separately from Linux results.
 
@@ -146,7 +146,7 @@ On September 14, the remaining v1 scope was consolidated into **seven Phase 2 mi
 | --- | --- | --- | --- |
 | 2A — Indexed drive | Scans/reconciliation, cursor browsing, filename/path search, basic filters, downloads/ranges, scan status, and initial 1M/50K fixtures | Read-side UI/API workflows, mount-loss recovery, authorization, and scale measurements pass | In progress |
 | 2B — Managed files | Resumable uploads, immutable versions/copies, managed folders, logical organization, archive/restore, and transfers | Restart/revocation/conflict journeys preserve every original and published version | Planned |
-| 2C — Photos and videos | Photo thumbnails, video posters, timeline, metadata filters, viewers, compatible playback, and installable PWA navigation | Private preview delivery, bounded media processing, and mobile interaction/load gates pass | Planned |
+| 2C — Photos and videos | Photo thumbnails, video posters, timeline, metadata filters, viewers, compatible playback, and installable PWA navigation | Private preview delivery, bounded media processing, and mobile interaction/load gates pass | In progress |
 | 2D — Documents | PDF/text/CSV/spreadsheet viewers and non-collaborative editing as new immutable versions | Progressive viewing and save/conflict/hostile-document journeys pass | Planned |
 | 2E — Organization and search | Rich metadata/full-text filters, albums, tags, ratings, favorites, saved searches, and duplicate review | Queries, suggestions, and review actions remain permission-safe and metadata-only | Planned |
 | 2F — Local intelligence | Optional CPU models, optional GPU, semantic search, provenance, smart albums, and opt-in frontier providers | Core app works with models off/failed; no unapproved provider egress occurs | Planned |
