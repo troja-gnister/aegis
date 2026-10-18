@@ -12,6 +12,12 @@ COPY backend/aegis_apps ./backend/aegis_apps
 COPY backend/aegisctl ./backend/aegisctl
 COPY backend/aegis_media_processor ./backend/aegis_media_processor
 RUN uv sync --locked --no-dev --no-editable
+# Processes import the app from /app/backend (manage.py's directory, the scan reader's
+# PYTHONPATH), not from the venv. Compile it here: a read-only container with
+# PYTHONDONTWRITEBYTECODE reads these files but would otherwise recompile the source in every
+# reader child and health check. Hash-checked files stay valid whatever mtimes layers keep.
+RUN python -m compileall -q -j 0 --invalidation-mode checked-hash \
+    backend/aegis backend/aegis_apps backend/aegisctl backend/aegis_media_processor
 
 # The rootless Podman installer and its templates, for operators to copy out of the image.
 # Root-owned and read-only; the final stage takes them in one layer with these modes.
@@ -30,6 +36,10 @@ ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1
 ARG AEGIS_UID=10001
 ARG AEGIS_GID=10001
+# The base image ships the standard library without bytecode, so every short-lived process
+# (each scan reader child, each health check) would recompile the modules it imports.
+RUN python -m compileall -q -j 0 --invalidation-mode checked-hash -x /site-packages/ \
+    /usr/local/lib/python3.13
 # Volume mount points, owned by the runtime user: a fresh named volume takes its owner and
 # mode from the image's directory, so the media worker can write it from the first start.
 # Scratch is group-writable: the processor (same identity) claims and publishes jobs there.
