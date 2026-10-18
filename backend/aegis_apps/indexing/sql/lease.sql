@@ -28,9 +28,14 @@ BEGIN
     IF NOT FOUND THEN RETURN NULL; END IF;
     SELECT * INTO deployment FROM public.indexing_indexdeployment WHERE id=1 FOR SHARE;
     IF NOT FOUND THEN RETURN NULL; END IF;
-    SELECT * INTO root FROM public.roots_root WHERE id=discovered_root FOR UPDATE SKIP LOCKED;
+    -- Scan maintenance shares the root lock with browsing. Grant, revocation and root
+    -- changes still lock the root FOR UPDATE, so they serialize with every scan
+    -- transaction; scan transactions of one root serialize on its index state. Here
+    -- SKIP LOCKED passes over only those exclusive holders and a busy index state.
+    SELECT * INTO root FROM public.roots_root WHERE id=discovered_root FOR SHARE SKIP LOCKED;
     IF NOT FOUND OR NOT root.active OR NOT deployment.slot_ids ? root.slot_id THEN RETURN NULL; END IF;
-    SELECT * INTO root_state FROM public.indexing_rootindexstate WHERE root_id=root.id FOR UPDATE;
+    SELECT * INTO root_state FROM public.indexing_rootindexstate WHERE root_id=root.id
+        FOR UPDATE SKIP LOCKED;
     IF NOT FOUND OR root_state.active_run_id IS DISTINCT FROM p_run_id
        OR root_state.binding_epoch <> deployment.epoch OR root_state.policy_epoch <> deployment.epoch
        THEN RETURN NULL; END IF;
@@ -148,7 +153,9 @@ BEGIN
     END LOOP;
     SELECT * INTO deployment FROM public.indexing_indexdeployment WHERE id=1 FOR SHARE;
     IF NOT FOUND THEN RETURN false; END IF;
-    SELECT * INTO root FROM public.roots_root WHERE id=(p_lease->>'root_id')::uuid FOR UPDATE;
+    -- Shared with browsing, exclusive against grant, revocation and root changes; the
+    -- index state lock below serializes this root's scan transactions.
+    SELECT * INTO root FROM public.roots_root WHERE id=(p_lease->>'root_id')::uuid FOR SHARE;
     IF NOT FOUND OR NOT root.active OR NOT deployment.slot_ids ? root.slot_id
         OR root.authorization_epoch <> (p_lease->>'root_epoch')::bigint THEN RETURN false; END IF;
     SELECT * INTO root_state FROM public.indexing_rootindexstate WHERE root_id=root.id FOR UPDATE;

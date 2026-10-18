@@ -22,7 +22,9 @@ BEGIN
     END IF;
     SELECT * INTO deployment FROM public.indexing_indexdeployment WHERE id=1 FOR SHARE;
     IF NOT FOUND OR deployment.manifest_identity <> p_manifest_identity THEN RETURN NULL; END IF;
-    SELECT * INTO root FROM public.roots_root WHERE id=p_root_id FOR UPDATE SKIP LOCKED;
+    -- Shared with browsing; SKIP LOCKED passes over a grant, revocation or root change in
+    -- flight (FOR UPDATE) and, below, a root whose index state another scan holds.
+    SELECT * INTO root FROM public.roots_root WHERE id=p_root_id FOR SHARE SKIP LOCKED;
     IF NOT FOUND OR NOT root.active OR NOT deployment.slot_ids ? root.slot_id THEN
         RETURN NULL;
     END IF;
@@ -43,7 +45,8 @@ BEGIN
         database_now, NULL, false, 'not_indexed', 0, 0, 0, database_now, NULL)
     ON CONFLICT (root_id) DO NOTHING;
     SELECT * INTO root_state FROM public.indexing_rootindexstate
-        WHERE root_id=p_root_id FOR UPDATE;
+        WHERE root_id=p_root_id FOR UPDATE SKIP LOCKED;
+    IF NOT FOUND THEN RETURN NULL; END IF;
     IF root_state.active_run_id IS NOT NULL THEN
         SELECT * INTO run FROM public.indexing_scanrun
             WHERE id=root_state.active_run_id FOR UPDATE;

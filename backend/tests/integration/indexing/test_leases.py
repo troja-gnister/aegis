@@ -397,3 +397,192 @@ def test_every_lease_identity_field_is_fenced(role_database: RoleDatabase, field
             )
             is False
         )
+
+
+def _hold_browse_locks(browser: psycopg.Connection[Any], root_id: uuid.UUID,
+                       user_id: uuid.UUID) -> None:
+    """The shared locks catalog.authorization.root_context takes, root first, as web."""
+    browser.execute(
+        "SELECT id, slot_id, active, authorization_epoch FROM roots_root WHERE id = %s FOR SHARE",
+        [root_id],
+    )
+    browser.execute(
+        "SELECT id, is_active, authorization_epoch FROM identity_user WHERE id = %s FOR SHARE",
+        [user_id],
+    )
+
+
+def _browser() -> uuid.UUID:
+    from aegis_apps.identity.models import User
+
+    return User.objects.create_user(username=f"browse-{uuid.uuid4().hex}").pk
+
+
+SCAN_STEPS = ("schedule", "claim", "renew", "record", "seal", "finalize")
+
+
+def _scan_step(scanner: psycopg.Connection[Any], step: str, root: Root, worker: str,
+               digest: str, state: dict[str, Any]) -> Any:
+    """One scan transaction on its own connection, as the indexer lanes run them."""
+    from aegis_apps.catalog.domain import EntryKind, Observation, SourceState
+    from aegis_apps.catalog.names import source_name
+    from aegis_apps.indexing.payloads import checkpoint_payload
+    from aegis_apps.indexing.protocol import ReaderBatch
+
+    if step == "schedule":
+        state["run"] = _scan_scalar(scanner.execute(
+            "SELECT public.aegis_schedule_root_scan(%s,%s,%s)", [root.pk, worker, digest],
+        ))
+        return state["run"]
+    if step == "claim":
+        state["lease"] = _scan_scalar(scanner.execute(
+            "SELECT public.aegis_claim_scan_directory(%s,%s)", [state["run"], worker],
+        ))
+        return state["lease"]
+    lease = Jsonb(state["lease"])
+    if step == "renew":
+        return _scan_scalar(scanner.execute("SELECT public.aegis_renew_scan_directory(%s)",
+                                            [lease]))
+    if step == "record":
+        batch = ReaderBatch(1, (Observation(
+            source_name(b"browsed"), EntryKind.FILE, SourceState.PRESENT, 12, 100, 100, 1, 2,
+        ),))
+        return _scan_scalar(scanner.execute("SELECT public.aegis_record_scan_batch(%s,%s)",
+                                            [lease, Jsonb(checkpoint_payload(batch))]))
+    if step == "seal":
+        return _scan_scalar(scanner.execute("SELECT public.aegis_seal_scan_directory(%s,%s)",
+                                            [lease, Jsonb([1, 1, 100, 100])]))
+    return _scan_scalar(scanner.execute("SELECT public.aegis_finalize_scan_directory(%s,%s)",
+                                        [lease, 500]))
+
+
+@pytest.mark.parametrize("step", SCAN_STEPS)
+def test_scan_transactions_proceed_while_a_browse_holds_the_root(
+    role_database: RoleDatabase, step: str,
+) -> None:
+    root, worker, digest = _create_scan_fixture()
+    user = _browser()
+    state: dict[str, Any] = {}
+    with (
+        role_database.connect("aegis_web") as browser,
+        role_database.connect("aegis_indexer") as scanner,
+    ):
+        scanner.execute("SET lock_timeout = '1s'")  # the lanes' setting
+        for earlier in SCAN_STEPS[:SCAN_STEPS.index(step)]:
+            _scan_step(scanner, earlier, root, worker, digest, state)
+        with browser.transaction():
+            _hold_browse_locks(browser, root.pk, user)
+            started = time.monotonic()
+            result = _scan_step(scanner, step, root, worker, digest, state)
+            elapsed = time.monotonic() - started
+            browser.execute("SELECT 1")  # the browse is still in flight
+    assert result not in (None, False)
+    if step == "record":
+        assert result["observed"] == 1
+    elif step == "finalize":
+        assert result["complete"] is True
+    assert elapsed < .5, "the scan waited for a browse"
+
+
+@pytest.mark.parametrize("step", ["record", "seal", "finalize", "renew"])
+def test_a_browse_proceeds_while_a_scan_transaction_is_in_flight(
+    role_database: RoleDatabase, step: str,
+) -> None:
+    root, worker, digest = _create_scan_fixture()
+    user = _browser()
+    state: dict[str, Any] = {}
+    with (
+        role_database.connect("aegis_web") as browser,
+        role_database.connect("aegis_indexer") as scanner,
+    ):
+        for earlier in SCAN_STEPS[:SCAN_STEPS.index(step)]:
+            _scan_step(scanner, earlier, root, worker, digest, state)
+        with scanner.transaction():
+            assert _scan_step(scanner, step, root, worker, digest, state) not in (None, False)
+            with browser.transaction():
+                browser.execute("SET LOCAL lock_timeout = '1s'")  # bounded_read's setting
+                started = time.monotonic()
+                _hold_browse_locks(browser, root.pk, user)
+                assert time.monotonic() - started < .5, "the browse waited for a scan"
+
+
+@pytest.mark.parametrize("operation", ["record", "finalize"])
+@pytest.mark.parametrize("first", ["revocation", "checkpoint"])
+def test_revocation_and_checkpoint_serialize_on_the_root_in_both_orders(
+    role_database: RoleDatabase, operation: str, first: str,
+) -> None:
+    """Grant and revocation paths lock the root FOR UPDATE, then advance its epoch."""
+    root, worker, digest = _create_scan_fixture()
+    state: dict[str, Any] = {}
+    steps = SCAN_STEPS[:SCAN_STEPS.index(operation)]
+    revocation = (
+        ("SELECT id FROM public.roots_root WHERE id = %s FOR UPDATE", [root.pk]),
+        ("UPDATE public.roots_root SET authorization_epoch = authorization_epoch + 1 "
+         "WHERE id = %s", [root.pk]),
+    )
+
+    def revoke(connection: psycopg.Connection[Any]) -> None:
+        with connection.transaction():
+            for statement, parameters in revocation:
+                connection.execute(statement, parameters)
+
+    with (
+        role_database.connect("aegis_web") as revoker,
+        role_database.connect("aegis_indexer") as scanner,
+        role_database.connect("aegis_migrator") as observer,
+        ThreadPoolExecutor(max_workers=1) as pool,
+    ):
+        for earlier in steps:
+            _scan_step(scanner, earlier, root, worker, digest, state)
+        if first == "revocation":
+            with revoker.transaction():
+                for statement, parameters in revocation:
+                    revoker.execute(statement, parameters)
+                pending = pool.submit(_scan_step, scanner, operation, root, worker, digest,
+                                      state)
+                _wait_blocked(observer, scanner.info.backend_pid, revoker.info.backend_pid)
+            assert pending.result(timeout=5) is None, "a revoked root accepted a checkpoint"
+        else:
+            with scanner.transaction():
+                assert _scan_step(scanner, operation, root, worker, digest, state) is not None
+                waiting = pool.submit(revoke, revoker)
+                _wait_blocked(observer, revoker.info.backend_pid, scanner.info.backend_pid)
+            waiting.result(timeout=5)
+        assert _scan_step(scanner, operation, root, worker, digest, state) is None
+    if operation == "record":
+        assert CatalogEntry.objects.filter(root=root, raw_name=b"browsed").exists() is (
+            first == "checkpoint"
+        )
+
+
+@pytest.mark.parametrize("step", ["schedule", "claim"])
+@pytest.mark.parametrize("holder", ["browse", "revocation", "scan"])
+def test_claims_pass_over_only_exclusive_root_holders(
+    role_database: RoleDatabase, step: str, holder: str,
+) -> None:
+    """A browse never makes a root look busy; a revocation or another scan transaction does."""
+    root, worker, digest = _create_scan_fixture()
+    user = _browser()
+    state: dict[str, Any] = {}
+    with (
+        role_database.connect("aegis_web") as browser,
+        role_database.connect("aegis_migrator") as other,
+        role_database.connect("aegis_indexer") as scanner,
+    ):
+        scanner.execute("SET lock_timeout = '1s'")
+        # The run and its index state exist; scheduling again only reports the active run.
+        _scan_step(scanner, "schedule", root, worker, digest, state)
+        holding = browser if holder != "scan" else other
+        with holding.transaction():
+            if holder == "browse":
+                _hold_browse_locks(browser, root.pk, user)
+            elif holder == "revocation":
+                browser.execute("SELECT id FROM public.roots_root WHERE id = %s FOR UPDATE",
+                                [root.pk])
+            else:
+                other.execute("SELECT root_id FROM public.indexing_rootindexstate "
+                              "WHERE root_id = %s FOR UPDATE", [root.pk])
+            started = time.monotonic()
+            result = _scan_step(scanner, step, root, worker, digest, state)
+            assert time.monotonic() - started < .5, "a busy root was waited for, not passed over"
+    assert (result is not None) is (holder == "browse")
