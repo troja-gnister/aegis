@@ -528,9 +528,9 @@ if mode == 'setup':
         def start(self):
             raise RuntimeError('owned synthetic receiver exhaustion')
     processes.Thread = BrokenReceiver
-def spawn(source, coordination, root):
+def spawn(source, coordination, root, **options):
     try:
-        child = original_reader(source, coordination, root)
+        child = original_reader(source, coordination, root, **options)
     except ReaderLaunchFailure as error:
         children.append(error.reader)
         raise
