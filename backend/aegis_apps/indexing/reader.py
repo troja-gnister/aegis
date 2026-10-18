@@ -9,7 +9,7 @@ from contextlib import suppress
 from pathlib import PurePosixPath
 from typing import BinaryIO
 
-from aegisctl.mounts import MAX_MOUNTINFO_BYTES, MountAttestationError, parse_mountinfo
+from aegisctl.mountinfo import MAX_MOUNTINFO_BYTES, MountAttestationError, parse_mountinfo
 
 from aegis_apps.catalog.domain import DirectoryIdentity, EntryKind, Observation, SourceState
 from aegis_apps.catalog.names import source_name

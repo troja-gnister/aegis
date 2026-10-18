@@ -21,7 +21,7 @@ from threading import Event, Thread
 from typing import TYPE_CHECKING, BinaryIO, cast
 from uuid import UUID
 
-from aegisctl.mounts import MAX_MOUNTINFO_BYTES, parse_mountinfo
+from aegisctl.mountinfo import MAX_MOUNTINFO_BYTES, parse_mountinfo
 
 from .protocol import ProtocolError, ReaderBatch, ReaderMessage, read_message
 
