@@ -10,8 +10,9 @@ RESPONSE_HEADER = "X-Test-Upstream-Response"
 # the gateway hides web's copies and adds its own.
 DJANGO_SECURITY_HEADERS = (("X-Content-Type-Options", "nosniff"), ("X-Frame-Options", "DENY"))
 # A redirect too long to describe in a request header (8 KiB client header lines): an
-# original eleven directories deep, each named with 240 non-UTF-8 bytes (0xE9).
-LONG_PATH = "/media/accel/long"
+# original eleven directories deep, each named with 240 non-UTF-8 bytes (0xE9), requested
+# through the gateway's originals location.
+LONG_PATH = "/media/v1/originals/long"
 LONG_REDIRECT = (
     "/__aegis_roots/gateway-test/" + "/".join(["%E9" * 240] * 11) + "/long.bin"
 )

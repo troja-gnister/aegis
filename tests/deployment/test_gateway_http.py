@@ -5,9 +5,11 @@ import ipaddress
 import json
 import os
 import re
+import socket
 import subprocess
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
@@ -62,6 +64,19 @@ VIDEO_BYTES = bytes(range(256)) * 16
 SECRET_BYTES = b"outside-the-slot"
 LONG_NAMES = (b"\xe9" * 240,) * 11 + (b"long.bin",)
 LONG_BYTES = b"long-path-original"
+# Resumed downloads: one original that never changes and one the tests rewrite in place
+# (same inode) between requests. Both start at a fixed modification time.
+RESUME_NAME = b"resume.bin"
+CHANGING_NAME = b"changing.bin"
+RESUME_BYTES = bytes(range(256)) * 64
+RESUME_MTIME_NS = 1_700_000_000 * 10**9
+# A sparse original far larger than every socket buffer between the test and nginx, so a
+# client that stops reading keeps its delivery (and connection slot) in progress.
+STREAM_NAME = b"stream.bin"
+STREAM_SIZE = 1 << 30
+# The gateway serves originals under their own location, with a per-client cap.
+ORIGINALS_PATH = "/media/v1/originals/accel"
+ORIGINALS_PER_CLIENT = 16
 # Raw name paths below the slot and their synthetic contents. The names cover a space,
 # "%", "?", "#", "+", a literal percent sequence, a "..." directory, non-UTF-8 and
 # Unicode bytes, and a path the hashed-asset regex location would otherwise claim.
@@ -98,12 +113,20 @@ class HttpResponse:
         return json.loads(self.body)
 
 
+def upstream_response(status: int, headers: Sequence[tuple[str, str]]) -> str:
+    """The X-Test-Upstream-Response value making the echo upstream answer exactly so."""
+    specification = json.dumps({"status": status, "headers": [list(h) for h in headers]})
+    return base64.urlsafe_b64encode(specification.encode()).decode("ascii")
+
+
 @dataclass(frozen=True)
 class GatewayHarness:
     base_url: str
     internal_base_url: str
     resource_prefix: str
     container_name: str
+    # The host directory bound read-only as the gateway's roots; tests change files in it.
+    media_roots: Path
 
     def accel(
         self,
@@ -113,14 +136,17 @@ class GatewayHarness:
         request_headers: Mapping[str, str] | None = None,
         path: str = "/media/accel",
         method: str = "GET",
+        internal: bool = False,
     ) -> HttpResponse:
         """Request *path* with the echo upstream answering exactly *status* and *headers*."""
-        specification = json.dumps({"status": status, "headers": [list(h) for h in headers]})
-        encoded = base64.urlsafe_b64encode(specification.encode()).decode("ascii")
         return self.request(
             path,
             method=method,
-            headers={**(request_headers or {}), "X-Test-Upstream-Response": encoded},
+            headers={
+                **(request_headers or {}),
+                "X-Test-Upstream-Response": upstream_response(status, headers),
+            },
+            internal=internal,
         )
 
     def request(
@@ -466,6 +492,11 @@ def create_media_trees(roots: Path, derivatives: Path) -> None:
         _created_file(roots_tree, _raw_path(slot, names), contents)
     _created_file(roots_tree, slot / "page.html", b"<script>alert(1)</script>")
     _created_file(roots_tree, slot / "video.mp4", VIDEO_BYTES)
+    for name in (RESUME_NAME, CHANGING_NAME):
+        resumable = _created_file(roots_tree, slot / os.fsdecode(name), RESUME_BYTES)
+        os.utime(resumable, ns=(RESUME_MTIME_NS, RESUME_MTIME_NS))
+    stream = _created_file(roots_tree, slot / os.fsdecode(STREAM_NAME), b"")
+    os.truncate(stream, STREAM_SIZE)
     for depth in range(1, len(LONG_NAMES)):
         _created_directory(roots_tree, _raw_path(slot, LONG_NAMES[:depth]))
     _created_file(roots_tree, _raw_path(slot, LONG_NAMES), LONG_BYTES)
@@ -630,7 +661,7 @@ def gateway(tmp_path_factory: pytest.TempPathFactory) -> Iterator[GatewayHarness
         assert internal_port.isdecimal() and int(internal_port) > 0
         internal_base_url = f"http://127.0.0.1:{internal_port}"
         wait_for_gateway(base_url, gateway_name)
-        yield GatewayHarness(base_url, internal_base_url, prefix, gateway_name)
+        yield GatewayHarness(base_url, internal_base_url, prefix, gateway_name, media_roots)
     finally:
         resources = (*reversed(recorded_containers), *recorded_networks)
         cleanup_owned_resources(
@@ -1044,7 +1075,7 @@ def test_encoded_original_paths_resolve_to_the_exact_file(
 ) -> None:
     names, contents = ORIGINAL_VECTORS[vector]
     headers = _original_headers(names)
-    response = gateway.accel(200, headers)
+    response = gateway.accel(200, headers, path=ORIGINALS_PATH)
 
     assert response.status == 200
     assert response.body == contents
@@ -1086,8 +1117,10 @@ def test_long_encoded_original_path_fits_the_media_proxy_buffer(
 
 def test_original_ranges_keep_no_store(gateway: GatewayHarness) -> None:
     headers = _original_headers((b"video.mp4",), content_type="video/mp4")
-    partial = gateway.accel(200, headers, request_headers={"Range": "bytes=16-31"})
-    tail = gateway.accel(200, headers, request_headers={"Range": "bytes=-8"})
+    partial = gateway.accel(
+        200, headers, path=ORIGINALS_PATH, request_headers={"Range": "bytes=16-31"},
+    )
+    tail = gateway.accel(200, headers, path=ORIGINALS_PATH, request_headers={"Range": "bytes=-8"})
 
     assert partial.status == 206
     assert partial.body == VIDEO_BYTES[16:32]
@@ -1099,11 +1132,221 @@ def test_original_ranges_keep_no_store(gateway: GatewayHarness) -> None:
     assert_security_headers(partial)
 
 
+# Resuming an original. Delivery URLs name no file version (spec M6): web authorizes each
+# request against the current catalog, and the gateway's static validators (an ETag of the
+# modification time and size, and Last-Modified) decide whether a resume may continue.
+
+
+def _resume(
+    gateway: GatewayHarness, name: bytes, validator: str, offset: int = 1000,
+) -> HttpResponse:
+    return gateway.accel(
+        200,
+        _original_headers((name,), content_type="application/octet-stream"),
+        path=ORIGINALS_PATH,
+        request_headers={"Range": f"bytes={offset}-", "If-Range": validator},
+    )
+
+
+def test_original_resumes_continue_only_with_the_current_validator(
+    gateway: GatewayHarness,
+) -> None:
+    headers = _original_headers((RESUME_NAME,), content_type="application/octet-stream")
+    first = gateway.accel(200, headers, path=ORIGINALS_PATH)
+    total = len(RESUME_BYTES)
+
+    assert first.status == 200
+    assert first.body == RESUME_BYTES
+    assert first.headers.get_all("Cache-Control") == ["private, no-store"]
+    assert first.headers["Accept-Ranges"] == "bytes"
+    etag = first.headers["ETag"]
+    modified = first.headers["Last-Modified"]
+    # nginx's strong validator for a static file: modification time and size, in hex.
+    assert etag == f'"{RESUME_MTIME_NS // 10**9:x}-{total:x}"'
+    assert modified == "Tue, 14 Nov 2023 22:13:20 GMT"
+    for validator in (etag, modified):
+        resumed = _resume(gateway, RESUME_NAME, validator)
+        assert resumed.status == 206
+        assert resumed.body == RESUME_BYTES[1000:]
+        assert resumed.headers["Content-Range"] == f"bytes 1000-{total - 1}/{total}"
+        assert resumed.headers["ETag"] == etag
+        assert resumed.headers.get_all("Cache-Control") == ["private, no-store"]
+        assert_security_headers(resumed)
+    # Any other validator, a weak one (never usable for If-Range) or another date restarts
+    # the download with the whole file.
+    for stale in ('"0-0"', f"W/{etag}", "Thu, 01 Jan 1970 00:00:00 GMT"):
+        restarted = _resume(gateway, RESUME_NAME, stale)
+        assert restarted.status == 200
+        assert restarted.body == RESUME_BYTES
+        assert restarted.headers.get("Content-Range") is None
+
+
+def test_an_original_changed_between_requests_restarts_the_download(
+    gateway: GatewayHarness,
+) -> None:
+    path = gateway.media_roots / MEDIA_SLOT / os.fsdecode(CHANGING_NAME)
+    first = gateway.accel(
+        200,
+        _original_headers((CHANGING_NAME,), content_type="application/octet-stream"),
+        path=ORIGINALS_PATH,
+    )
+    assert first.status == 200
+    etag, modified = first.headers["ETag"], first.headers["Last-Modified"]
+    assert _resume(gateway, CHANGING_NAME, etag).status == 206
+
+    # The same size with other bytes and a later modification time, then another size:
+    # either way the old validators no longer match, so nothing of the old file is mixed in.
+    same_size = bytes(reversed(RESUME_BYTES))
+    longer = RESUME_BYTES + b"appended"
+    for contents, seconds in ((same_size, 60), (longer, 120)):
+        path.write_bytes(contents)
+        changed_ns = RESUME_MTIME_NS + seconds * 10**9
+        os.utime(path, ns=(changed_ns, changed_ns))
+        for validator in (etag, modified):
+            restarted = _resume(gateway, CHANGING_NAME, validator)
+            assert restarted.status == 200
+            assert restarted.body == contents
+            assert restarted.headers["ETag"] == f'"{changed_ns // 10**9:x}-{len(contents):x}"'
+            assert restarted.headers.get("Content-Range") is None
+        etag, modified = restarted.headers["ETag"], restarted.headers["Last-Modified"]
+        resumed = _resume(gateway, CHANGING_NAME, etag)
+        assert resumed.status == 206
+        assert resumed.body == contents[1000:]
+
+
+# The cap on concurrent original deliveries per client address. A client that stops
+# reading keeps its delivery in progress: nginx holds the request (and its slot) until
+# the client reads on, goes away or send_timeout passes.
+
+
+def _stalled_original(base_url: str, headers: Mapping[str, str]) -> socket.socket:
+    """Start the large original's delivery, read its status line and stop reading."""
+    target = urllib.parse.urlsplit(base_url)
+    assert target.hostname is not None and target.port is not None
+    connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        connection.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        connection.settimeout(5)
+        connection.connect((target.hostname, target.port))
+        lines = [
+            f"GET {ORIGINALS_PATH} HTTP/1.1",
+            f"Host: {target.hostname}:{target.port}",
+            "Connection: close",
+            *(f"{name}: {value}" for name, value in headers.items()),
+        ]
+        connection.sendall(("\r\n".join(lines) + "\r\n\r\n").encode("ascii"))
+        received = b""
+        while b"\r\n" not in received:
+            chunk = connection.recv(256)
+            assert chunk, "the delivery ended before its status line"
+            received += chunk
+        assert received.startswith(b"HTTP/1.1 200 "), received.split(b"\r\n")[0]
+    except BaseException:
+        connection.close()
+        raise
+    return connection
+
+
+def _stream_headers(client: str | None) -> dict[str, str]:
+    headers = {
+        "X-Test-Upstream-Response": upstream_response(
+            200, _original_headers((STREAM_NAME,), content_type="application/octet-stream"),
+        ),
+    }
+    if client is not None:
+        headers["X-Forwarded-For"] = client
+    return headers
+
+
+def _small_original(gateway: GatewayHarness, client: str | None) -> HttpResponse:
+    names, _ = ORIGINAL_VECTORS["space"]
+    return gateway.accel(
+        200,
+        _original_headers(names),
+        path=ORIGINALS_PATH,
+        request_headers={} if client is None else {"X-Forwarded-For": client},
+        internal=client is not None,
+    )
+
+
+def _await_free_slot(gateway: GatewayHarness, client: str | None) -> HttpResponse:
+    deadline = time.monotonic() + 20
+    while True:
+        response = _small_original(gateway, client)
+        if response.status != 429 or time.monotonic() > deadline:
+            return response
+        time.sleep(0.2)
+
+
+def test_original_deliveries_are_capped_per_real_client_address(
+    gateway: GatewayHarness,
+) -> None:
+    # The Caddy-facing listener: the limit keys on the address Caddy reports.
+    client, neighbor = "198.51.100.20", "198.51.100.21"
+    held: list[socket.socket] = []
+    try:
+        for _ in range(ORIGINALS_PER_CLIENT):
+            held.append(_stalled_original(gateway.internal_base_url, _stream_headers(client)))
+
+        refused = _small_original(gateway, client)
+        # Refused before web is asked, privately, with the gateway's security headers.
+        assert refused.status == 429
+        assert refused.body != b"vector-space"
+        assert refused.headers.get_all("Cache-Control") == ["private, no-store"]
+        assert refused.headers.get("X-Accel-Redirect") is None
+        assert_security_headers(refused)
+        # Another client is unaffected, and so are this client's thumbnails and API calls.
+        other = _small_original(gateway, neighbor)
+        assert other.status == 200
+        assert other.body == b"vector-space"
+        derivative = gateway.accel(
+            200, DERIVATIVE_HEADERS, internal=True, request_headers={"X-Forwarded-For": client},
+        )
+        assert derivative.status == 200
+        assert derivative.body == DERIVATIVE_BYTES
+        api = gateway.request(
+            "/api/forwarding", internal=True, headers={"X-Forwarded-For": client},
+        )
+        assert api.status == 200
+        assert api.json()["forwarded_for"] == client
+
+        # Ending one delivery frees its slot.
+        held.pop().close()
+        freed = _await_free_slot(gateway, client)
+        assert freed.status == 200
+        assert freed.body == b"vector-space"
+    finally:
+        for connection in held:
+            connection.close()
+    # Every slot comes back once the stalled clients go away.
+    assert _await_free_slot(gateway, client).status == 200
+
+
+def test_original_deliveries_are_capped_on_the_direct_listener(
+    gateway: GatewayHarness,
+) -> None:
+    held: list[socket.socket] = []
+    try:
+        for _ in range(ORIGINALS_PER_CLIENT):
+            held.append(_stalled_original(gateway.base_url, _stream_headers(None)))
+        assert _small_original(gateway, None).status == 429
+        # Derivatives share the client address but not the cap.
+        assert gateway.accel(200, DERIVATIVE_HEADERS).status == 200
+    finally:
+        for connection in held:
+            connection.close()
+    assert _await_free_slot(gateway, None).status == 200
+
+
 def test_internal_redirect_type_is_web_s_and_never_derived_from_the_name(
     gateway: GatewayHarness,
 ) -> None:
-    labeled = gateway.accel(200, _original_headers((b"page.html",), content_type="image/png"))
-    unlabeled = gateway.accel(200, _original_headers((b"page.html",), content_type=None))
+    labeled = gateway.accel(
+        200, _original_headers((b"page.html",), content_type="image/png"), path=ORIGINALS_PATH,
+    )
+    unlabeled = gateway.accel(
+        200, _original_headers((b"page.html",), content_type=None), path=ORIGINALS_PATH,
+    )
 
     assert labeled.status == 200
     assert labeled.headers.get_all("Content-Type") == ["image/png"]
@@ -1254,23 +1497,39 @@ def test_media_and_internal_locations_have_the_reviewed_shape() -> None:
 
     assert set(media) == PROXY_HEADERS | {"proxy_buffer_size 16k;", "proxy_buffers 8 16k;"}
     assert not any("Cache-Control" in line or "proxy_ignore_headers" in line for line in media)
+    # Originals: /media/'s proxying plus the per-client cap, whose refusal is never stored.
+    originals = blocks["^~ /media/v1/originals/"]
+    assert set(originals) == set(media) | {
+        f"limit_conn media_originals {ORIGINALS_PER_CLIENT};",
+        "limit_conn_status 429;",
+        "add_header Cache-Control $aegis_originals_refusal_cache always;",
+    }
     # Every other proxied location ignores an upstream X-Accel-Redirect.
     proxied = [name for name, lines in blocks.items() if "proxy_pass http://web:8000;" in lines]
     assert set(proxied) == {
         "= /admin/login/", "= /admin", "/admin/", "= /api/v1/auth/login",
-        "~ ^/api/v1/entries/[^/]+/media/requests$", "/api/", "/media/", "/health/",
+        "~ ^/api/v1/entries/[^/]+/media/requests$", "/api/", "/media/",
+        "^~ /media/v1/originals/", "/health/",
     }
     for name in proxied:
-        if name != "/media/":
+        if name not in ("/media/", "^~ /media/v1/originals/"):
             assert "proxy_ignore_headers X-Accel-Redirect;" in blocks[name], name
             assert set(blocks[name]) >= PROXY_HEADERS, name
+    # No other location has a connection cap.
+    assert [name for name, lines in blocks.items() if any("limit_conn" in x for x in lines)] == [
+        "^~ /media/v1/originals/",
+    ]
     assert "limit_req zone=media_requests burst=30 nodelay;" in blocks[
         "~ ^/api/v1/entries/[^/]+/media/requests$"
     ]
     assert "proxy_hide_header X-Frame-Options;" in text.splitlines()
     assert "proxy_hide_header X-Content-Type-Options;" in text.splitlines()
+    main = NGINX_CONFIG.read_text(encoding="utf-8")
     zone = "limit_req_zone $binary_remote_addr zone=media_requests:10m rate=30r/m;"
-    assert zone in NGINX_CONFIG.read_text(encoding="utf-8")
+    assert zone in main
+    # Keyed on the effective client address: behind Caddy, the real client's.
+    assert "limit_conn_zone $binary_remote_addr zone=media_originals:10m;" in main
+    assert 'map $status $aegis_originals_refusal_cache {\n        429 "private, no-store";' in main
     common = {
         "internal;",
         "disable_symlinks on;",
