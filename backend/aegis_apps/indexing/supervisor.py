@@ -76,7 +76,8 @@ class ScanSupervisor:
 
     Callbacks must return immediately with a bounded, independently executed
     future. Checkpoint futures resolve only after the accepted wrapper commits.
-    Only this coordinator thread accepts packets, grants credits and changes state.
+    Only this coordinator thread accepts packets, grants credits and changes state;
+    future completions and reader threads may only wake it for the next tick.
     """
 
     def __init__(
@@ -285,7 +286,9 @@ class ScanSupervisor:
         if now >= self._next_heartbeat and self._publication is None:
             self._publication = self._heartbeat(self.metrics)
             self._next_heartbeat = now + 15
-        # Each root receives at most one new packet/checkpoint per tick.
+        # Each root receives at most one new packet/checkpoint per tick. A slot's tick
+        # already chains every transition that waits on no future (result, credit, next
+        # packet; seal, finalize once reaped; settle); the next is due when one completes.
         for root, slot in tuple(self._slots.items()):
             try:
                 self._tick_slot(slot, now)

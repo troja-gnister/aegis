@@ -9,7 +9,7 @@ from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import AbstractContextManager, suppress
 from copy import deepcopy
-from threading import BoundedSemaphore, Lock, local
+from threading import BoundedSemaphore, Event, Lock, local
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -107,7 +107,9 @@ class DatabaseLane:
             return False
         try:
             # An idle session receives nothing unless the server is ending it.
-            return not select.select([session.fileno()], [], [], 0)[0]
+            pending = select.poll()
+            pending.register(session.fileno(), select.POLLIN)
+            return not pending.poll(0)
         except (OSError, ValueError):
             return False
 
@@ -214,14 +216,15 @@ class ScanRuntime:
     def __init__(
         self, identity: WorkerIdentity, policy: ScanPolicy,
         spawn: Callable[[ReaderSource, UUID], ReaderHandle],
+        wake: Callable[[], None] | None = None,
     ) -> None:
         self.identity, self.policy, self._spawn = identity, policy, spawn
-        self.mutations = DatabaseLane(policy.readers)
-        self.controls = DatabaseLane(policy.readers)
-        self.publications = DatabaseLane(1)
-        self.admissions = DatabaseLane(1)
+        self.mutations = DatabaseLane(policy.readers, wake=wake)
+        self.controls = DatabaseLane(policy.readers, wake=wake)
+        self.publications = DatabaseLane(1, wake=wake)
+        self.admissions = DatabaseLane(1, wake=wake)
         # These persistent launcher threads must outlive their PDEATHSIG children.
-        self.launches = DatabaseLane(policy.readers)
+        self.launches = DatabaseLane(policy.readers, wake=wake)
         self._cancel_pool = ThreadPoolExecutor(max_workers=policy.readers)
         self._gates: dict[UUID, CheckpointCancellation] = {}
         self._connections: dict[UUID, Any] = {}
@@ -381,6 +384,11 @@ class ScanCoordinator:
 
     A root whose slot settles is admitted again on the same pass. Only an admission that
     returned no lease, with no slot settling while it ran, waits a second for the next one.
+
+    Between passes the loop waits on ``wake`` for at most ``idle`` seconds. Lane futures'
+    done-callbacks and reader receiver threads only set it; this thread alone still accepts
+    packets, grants credits and changes slot state, and the timeout keeps every deadline
+    (renewal, heartbeat, progress and reap timeouts, admission backoff) on time.
     """
 
     def __init__(
@@ -388,11 +396,13 @@ class ScanCoordinator:
         admit: Callable[[frozenset[UUID]], Future[ScanLease | None]],
         forget: Callable[[ScanLease], None], *, readers: int, stop_requested: Callable[[], bool],
         start_gate: Callable[[], AbstractContextManager[object]],
+        wake: Event | None = None, idle: float = .05,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._supervisor, self._admit, self._forget = supervisor, admit, forget
         self._readers, self._stop_requested = readers, stop_requested
         self._start_gate, self._clock = start_gate, monotonic
+        self.wake, self._idle = wake or Event(), idle
         self.leases: dict[UUID, ScanLease] = {}
         self.admission: Future[ScanLease | None] | None = None
         self.stopping = False
@@ -434,9 +444,16 @@ class ScanCoordinator:
             self.admission = self._admit(frozenset(self.leases))
         return True
 
+    def wait(self) -> None:
+        self.wake.wait(self._idle)
+
     def run(self) -> None:
-        while self.step():
-            time.sleep(.05)
+        while True:
+            # Cleared before the pass: an event during it ends the next wait at once.
+            self.wake.clear()
+            if not self.step():
+                return
+            self.wait()
 
 
 def run_indexer(identity: WorkerIdentity, stop_requested: Callable[[], bool]) -> None:
@@ -447,8 +464,11 @@ def run_indexer(identity: WorkerIdentity, stop_requested: Callable[[], bool]) ->
 
     policy = ScanPolicy.from_environment(os.environ)
     coordination = Coordination()
+    wake = Event()
     runtime = ScanRuntime(
-        identity, policy, lambda source, root: ProcessReader(source, coordination, root),
+        identity, policy,
+        lambda source, root: ProcessReader(source, coordination, root, wake=wake.set),
+        wake=wake.set,
     )
     supervisor = ScanSupervisor(
         spawn=runtime.spawn, execute=runtime.execute, renew=runtime.renew,
@@ -471,14 +491,15 @@ def run_indexer(identity: WorkerIdentity, stop_requested: Callable[[], bool]) ->
     coordinator = ScanCoordinator(
         supervisor, lambda excluded: runtime.admissions.submit(lambda: admit(excluded)),
         runtime.forget, readers=policy.readers, stop_requested=stop_requested,
-        start_gate=run_role._serialized_execution_start,
+        start_gate=run_role._serialized_execution_start, wake=wake,
     )
     try:
         coordinator.run()
     finally:
         supervisor.stop()
         while supervisor.states:
+            wake.clear()
             supervisor.tick()
-            time.sleep(.05)
+            coordinator.wait()
         runtime.close()
         coordination.close()

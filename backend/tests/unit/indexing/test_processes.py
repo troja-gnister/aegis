@@ -80,6 +80,63 @@ def test_coordination_rejects_nonopaque_lock_names(tmp_path: Path, name: str) ->
         os.close(directory)
 
 
+@pytest.mark.parametrize("exit_watch", ["pidfd", "polling"])
+def test_reader_wakes_its_coordinator_per_packet_and_once_the_child_exits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exit_watch: str,
+) -> None:
+    from threading import Event
+
+    from aegis_apps.catalog.domain import DirectoryIdentity
+    from aegis_apps.indexing.protocol import ReaderComplete, encode_message
+
+    directory = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    deployment = processes.ScanLock.acquire(directory, "deployment.lock")
+    root_id = uuid4()
+    root_lock = processes.ScanLock.acquire(directory, f"root-{root_id}.lock")
+    coordination = cast(processes.Coordination, SimpleNamespace(
+        deployment=deployment, root=lambda root: root_lock,
+    ))
+    frame = encode_message(ReaderComplete(DirectoryIdentity(1, 1, 1, 1)))
+    # Like a reader: one terminal frame, then it exits only when its credits close.
+    child = (f"import sys; sys.stdout.buffer.write({frame!r}); sys.stdout.buffer.flush(); "
+             "sys.stdin.buffer.read()")
+    original_spawn = subprocess.Popen
+
+    def spawn(*args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:
+        return original_spawn([sys.executable, "-c", child], **kwargs)
+
+    def unsupported(pid: int) -> int:
+        raise OSError("synthetic: no pidfd")
+
+    monkeypatch.setattr("aegis_apps.indexing.processes.subprocess.Popen", spawn)
+    if exit_watch == "polling":
+        monkeypatch.setattr("aegis_apps.indexing.processes.os.pidfd_open", unsupported)
+    woken = Event()
+    reader = processes.ProcessReader(
+        processes.ReaderSource("/srv/aegis/roots/synthetic", "a" * 64, (), 500),
+        coordination, root_id, wake=woken.set,
+    )
+    try:
+        assert woken.wait(5)
+        assert isinstance(reader.receive(), ReaderComplete)
+        woken.clear()
+        assert not reader.reaped()
+        reader.close_credits()
+        assert woken.wait(5), "child exit did not wake the coordinator"
+        assert reader.reaped() and root_lock.fd == -1
+        assert reader._receiver is not None
+        reader._receiver.join(5)
+        assert not reader._receiver.is_alive()
+    finally:
+        reader.close_credits()
+        reader.kill()
+        reader.process.wait(timeout=5)
+        reader.reaped()
+        root_lock.close()
+        deployment.close()
+        os.close(directory)
+
+
 @pytest.mark.parametrize("failure", ["nonblocking", "thread_start"])
 def test_post_spawn_failure_retains_owned_handle_and_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,

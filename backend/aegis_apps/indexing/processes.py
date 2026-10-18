@@ -7,10 +7,13 @@ import fcntl
 import json
 import os
 import re
+import select
 import stat
 import struct
 import subprocess
 import sys
+from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Full, Queue
@@ -26,7 +29,9 @@ if TYPE_CHECKING:
     from .supervisor import ReaderHandle
 
 COORDINATION_PATH = Path("/srv/aegis/indexer-coordination")
-_LOCK_NAME = re.compile(r"(?:deployment|root-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\.lock")
+# Beyond the supervisor's five-second reap deadline after EOF or a stop.
+_EXIT_WAIT_SECONDS = 10
+_LOCK_NAME =re.compile(r"(?:deployment|root-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\.lock")
 
 
 class CoordinationError(RuntimeError):
@@ -127,15 +132,28 @@ class ReaderSource:
     batch_records: int
 
 
-class ProcessReader:
-    """Two sender credits bound pipe + decoding + queue, including partial frames."""
+def _no_wake() -> None:
+    pass
 
-    def __init__(self, source: ReaderSource, coordination: Coordination, root_id: UUID) -> None:
+
+class ProcessReader:
+    """Two sender credits bound pipe + decoding + queue, including partial frames.
+
+    ``wake`` is called from the receiver thread after each queued message and once the
+    child has exited (or after a bounded wait for it), so the coordinator need not poll.
+    """
+
+    def __init__(
+        self, source: ReaderSource, coordination: Coordination, root_id: UUID,
+        wake: Callable[[], None] = _no_wake,
+    ) -> None:
         self._lock = coordination.root(root_id)
         self._closed = False
         self._stopped = Event()
         self._queue: Queue[ReaderMessage | ProtocolError] = Queue(maxsize=2)
         self._receiver: Thread | None = None
+        self._wake = wake
+        self._exit = -1
         command = [
             sys.executable, "-m", "aegis_apps.indexing.reader",
             "--root", source.path, "--fingerprint", source.fingerprint,
@@ -159,9 +177,15 @@ class ProcessReader:
         try:
             assert self.process.stdin is not None and self.process.stdout is not None
             os.set_blocking(self.process.stdin.fileno(), False)
+            # Opened before anything can reap the child, so it can never name a reused PID.
+            with suppress(OSError, AttributeError):
+                self._exit = os.pidfd_open(self.process.pid)
             self._receiver = Thread(target=self._receive, name="scan-results", daemon=True)
             self._receiver.start()
         except BaseException:
+            if self._exit >= 0:
+                os.close(self._exit)
+                self._exit = -1
             # Transfer, never erase, ownership. The supervisor closes credits,
             # terminates and retains the slot/locks until this exact child reaps.
             raise ReaderLaunchFailure(self) from None
@@ -173,6 +197,7 @@ class ProcessReader:
             while not self._stopped.is_set():
                 try:
                     self._queue.put(message, timeout=.1)
+                    self._wake()
                     return
                 except Full:
                     continue
@@ -187,6 +212,23 @@ class ProcessReader:
             enqueue(ProtocolError())
         finally:
             self.process.stdout.close()
+            self._await_exit()
+
+    def _await_exit(self) -> None:
+        """Wake the coordinator when the child exits: finalization waits for its reap."""
+        try:
+            if self._exit >= 0:
+                exited = select.poll()
+                exited.register(self._exit, select.POLLIN)
+                exited.poll(_EXIT_WAIT_SECONDS * 1000)
+            else:
+                with suppress(subprocess.TimeoutExpired):
+                    self.process.wait(timeout=_EXIT_WAIT_SECONDS)
+        finally:
+            if self._exit >= 0:
+                os.close(self._exit)
+                self._exit = -1
+            self._wake()
 
     def receive(self) -> ReaderMessage | None:
         try:

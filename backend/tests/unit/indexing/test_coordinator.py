@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from concurrent.futures import Future
 from contextlib import nullcontext
+from threading import Event, Thread
 from typing import cast
 from uuid import UUID, uuid4
 
@@ -48,7 +51,7 @@ class FakeSupervisor:
 class Loop:
     """A coordinator on a fake clock whose admissions the test resolves by hand."""
 
-    def __init__(self, readers: int = 1) -> None:
+    def __init__(self, readers: int = 1, wake: Event | None = None, idle: float = .05) -> None:
         self.now = 0.0
         self.supervisor = FakeSupervisor()
         self.admissions: list[tuple[float, frozenset[UUID], Future[ScanLease | None]]] = []
@@ -57,7 +60,7 @@ class Loop:
         self.coordinator = ScanCoordinator(
             cast(ScanSupervisor, self.supervisor), self.admit, self.forgotten.append,
             readers=readers, stop_requested=lambda: self.stop, start_gate=nullcontext,
-            monotonic=lambda: self.now,
+            wake=wake, idle=idle, monotonic=lambda: self.now,
         )
 
     def admit(self, excluded: frozenset[UUID]) -> Future[ScanLease | None]:
@@ -152,6 +155,37 @@ def test_a_stop_discards_a_late_lease_and_ends_after_it_settles() -> None:
     loop.supervisor.settle(late.root_id)
     assert loop.step(0.02) is False
     assert loop.forgotten == [late]
+
+
+def _eventually(condition: Callable[[], bool], seconds: float) -> float:
+    started = time.monotonic()
+    while not condition():
+        assert time.monotonic() - started < seconds, "condition not reached"
+        time.sleep(.005)
+    return time.monotonic() - started
+
+
+def test_a_wake_event_ends_the_wait_long_before_its_timeout() -> None:
+    wake = Event()
+    loop = Loop(wake=wake, idle=30)
+    runner = Thread(target=loop.coordinator.run, daemon=True)
+    runner.start()
+    try:
+        _eventually(lambda: len(loop.admissions) == 1, 5)
+        first = lease()
+        # What a lane's done-callback does: resolve the future, then only set the event.
+        loop.admissions[-1][2].set_result(first)
+        wake.set()
+        assert _eventually(lambda: first.root_id in loop.supervisor.slots, 5) < 1
+        loop.stop = True
+        loop.supervisor.settle(first.root_id)
+        wake.set()
+        runner.join(5)
+        assert not runner.is_alive()
+        assert loop.forgotten == [first]
+    finally:
+        loop.stop = True
+        wake.set()
 
 
 def test_an_admission_failure_still_propagates() -> None:
