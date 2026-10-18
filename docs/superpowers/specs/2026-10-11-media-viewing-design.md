@@ -174,20 +174,29 @@ They bind no file version and no expiry. Instead:
   - the file becoming unavailable.
 
   This revokes faster than a short expiry, which would keep a revoked link working until it lapsed.
-- **Lifetime.** The URL lives in the session's private query cache, never in history or storage, and logout purges it, so its effective lifetime is the session's.
+- **Lifetime.** The URL lives in the session's private query cache, never in navigation history or app storage, and logout purges it. It only works with the session cookie, so its effective lifetime is the session's. The browser's own download list does keep it, which is harmless for the same reason.
 - **Which bytes.** The bytes are those of the file when the request arrives. If the file changed after the indexer last observed it, the gateway sends the new bytes.
 - **Resumes never mix versions.** A resumed download (`Range` with `If-Range`) continues only while nginx's validator for the file still matches: the ETag of modification time (in seconds) and size, or `Last-Modified`. Otherwise the gateway answers a full `200`.
 - **Known limit.** A rewrite that keeps the size within the same second keeps the validator. Roots are read-only to Aegis and written only by other software, and a content-strength validator would mean hashing originals, which this part does not do (M1).
 - **Resumes end with the session.** A resume after logout gets 404, and the user starts again from a fresh URL. This is intended.
+- **Very deep paths.** A download URL can be issued for a file so deep, with enough non-ASCII names, that its percent-encoded redirect exceeds the 8192-byte bound of the internal redirect. Delivery then answers 404. Media details already behave this way.
 
 **Connection cap at the gateway.**
 - `/media/v1/originals/` has its own location, proxied like `/media/`.
-- `limit_conn` allows **16 deliveries in progress per client address**. A slot is taken before web authorizes the request and held until the last byte of the redirected file is sent, so long downloads count for their whole duration.
-- The 17th request gets `429` with `private, no-store` until one ends.
-- 16 leaves a phone streaming and seeking a video (a few range requests at once) room for several parallel downloads. It still stops one client from holding hundreds of disk-bound transfers open.
-- **The key is the effective client address.** Caddy reaches the gateway on its `tls-gateway` listener, where nginx takes the address from Caddy's `X-Forwarded-For` (`real_ip_header`). That listener is the only way in under the Podman deployment, whose socket-activated Caddy sees real client addresses, so the cap applies per real client there. On the plain HTTP listener (development, e2e and compose's published port), the key is the TCP peer.
+- **Only downloads are capped.** `limit_conn` allows **16 attachment deliveries in progress per client address**. A slot is taken before web authorizes the request and held until the last byte of the redirected file is sent, so long downloads count for their whole duration. HEAD requests, short ranges and aborted transfers give their slot back when they end.
+- **Inline originals are not counted.** Inline originals are the viewer's video streams and photo fallbacks. Refusing one would make the viewer fall back to a server transcode, which costs far more than the stream it replaces.
+- **How the key is chosen.** nginx keys the zone through a map of the raw `d` value: `d=inline` gets an empty key, which nginx never counts. Every other value counts as a download, including percent-encoded spellings that web decodes. The map compares without letter case, but web refuses any spelling other than the exact `inline` and any second `d` parameter, so this exemption cannot carry a download.
+- The 17th download gets `429` with `Retry-After: 10`, `private, no-store` and the gateway's security headers, until one ends.
+- 16 leaves room for several devices behind one address to download in parallel. It still stops one client from holding hundreds of disk-bound transfers open.
+- **The key is the effective client address.** What that means in practice:
+  - Caddy reaches the gateway on its `tls-gateway` listener, where nginx takes the address from Caddy's `X-Forwarded-For` (`real_ip_header`), so behind the reverse proxy the key is the address Caddy forwards. That listener is the only way in under the Podman deployment, whose socket-activated Caddy sees real client addresses.
+  - On the plain HTTP listener (development, e2e and compose's published port), the key is the TCP peer, and a client's own `X-Forwarded-For` changes nothing.
+  - Clients behind one NAT or one masquerading VPN address share one bucket.
+  - IPv6 privacy addresses split one host across several buckets.
+  - Behind a userland port proxy, which presents every client as one address, the cap becomes global.
 - **No request-rate limit.** Each request is already an authorized web request like any API call, and media players legitimately send bursts of range requests while seeking.
 - **Derivatives are not capped.** A grid requests dozens of thumbnails at once over HTTP/2.
+- **Sandboxed originals.** Everything the originals alias answers also carries `Content-Security-Policy: sandbox`, beside the gateway's usual policy. If the inline allowlist were ever widened, an original opened as a document still could not run as the Aegis origin. Images and videos the app embeds are unaffected, because a policy on a subresource does not apply to the page that embeds it.
 
 **Later work:**
 - downloading a folder;
