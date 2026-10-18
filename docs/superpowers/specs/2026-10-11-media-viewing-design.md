@@ -106,7 +106,7 @@ Web gets SELECT on the media tables and INSERT through the existing operation se
 | Category | Formats or values |
 |---|---|
 | Photos | jpg, jpeg, png, webp, gif, heic, heif, avif, bmp, tif, tiff |
-| Videos | mp4, m4v, mov, webm, mkv, avi, 3gp, mts, m2ts |
+| Videos | mp4, m4v, mov, webm, mkv, avi, 3gp, 3g2, mts, m2ts, wmv, asf, flv, f4v, mpg, mpeg, vob, ogv, divx (never `ts`, which TypeScript sources share). Only mp4, m4v, mov and webm originals can play as they are; every other video plays through a transcode. |
 | Thumbnail | Fits within 400×400, WebP quality 75, EXIF orientation applied. Built for every asset during backfill. |
 | Viewer preview | Fits within 2048×2048, WebP quality 82. Built on demand and cached. |
 | Video poster | A frame at 1 s (or the first frame), produced at thumbnail and preview sizes |
@@ -114,7 +114,7 @@ Web gets SELECT on the media tables and INSERT through the existing operation se
 | Budget | Thumbnails and posters are kept. Previews and transcodes are evicted least-recently-used above `AEGIS_DERIVATIVES_CACHE_BUDGET_GB` (default 20). |
 | Concurrency | Processor children, `AEGIS_MEDIA_PROCESSOR_CONCURRENCY` (default 4), at nice 10, within 4 CPUs and 13 GiB (4 × the 3 GiB transcode budget + 1 GiB) |
 
-Pillow's decompression-bomb limit is enforced, and ffmpeg runs with `-nostdin -protocol_whitelist file,pipe`.
+Pillow's decompression-bomb limit is enforced, and ffmpeg and ffprobe run with `-nostdin -protocol_whitelist fd` and a container `-format_whitelist` on every untrusted input.
 
 ### M5. Metadata
 

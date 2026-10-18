@@ -18,6 +18,7 @@ from aegis_apps.media.discovery import (
     reset_asset,
 )
 from aegis_apps.media.enums import DerivativeState, Lane, SortSource, StageState
+from aegis_apps.media.formats import PHOTO_EXTENSIONS, media_kind
 from aegis_apps.media.keys import derivative_key, params_digest
 from aegis_apps.media.leasing import PARKED_UNTIL, claim_assets
 from aegis_apps.media.models import MediaAsset, MediaDerivative
@@ -106,6 +107,59 @@ def test_discovery_creates_one_asset_per_present_media_file(library: Library) ->
         assert asset.captured_at is None
         assert (asset.attempts, asset.attempt_token, asset.lease_owner) == (0, 0, None)
         assert asset.next_attempt_at <= timezone.now()
+
+
+# The video allowlist before 3G2, WMV, ASF, FLV, F4V, MPG, MPEG, VOB, OGV and DivX joined it.
+EARLIER_VIDEO_EXTENSIONS = frozenset(
+    {"mp4", "m4v", "mov", "webm", "mkv", "avi", "3gp", "mts", "m2ts"}
+)
+LEGACY_NAMES = (
+    b"old.wmv", b"phone.3g2", b"stream.asf", b"flash.flv", b"flash.f4v", b"home.mpg",
+    b"home.mpeg", b"VTS_01_1.VOB", b"open.ogv", b"movie.divx",
+)
+
+
+def test_an_upgrade_makes_already_indexed_legacy_videos_assets_without_a_rescan(
+    library: Library,
+) -> None:
+    """The catalog indexed these files while their formats were not media: the next pass of the
+    upgraded worker gives them assets, leaves every existing asset as it was and needs no rescan.
+    """
+    known = library.video()
+    photo = library.photo()
+    legacy = {library.file(name).pk for name in LEGACY_NAMES}
+    library.file(b"app.ts")
+    earlier = PHOTO_EXTENSIONS | EARLIER_VIDEO_EXTENSIONS
+    with (
+        patch("aegis_apps.media.discovery.MEDIA_EXTENSIONS", tuple(sorted(earlier))),
+        patch("aegis_apps.media.discovery.media_kind",
+              lambda hint: media_kind(hint) if hint in earlier else None),
+    ):
+        _pass(library)
+    assert set(MediaAsset.objects.values_list("pk", flat=True)) == {known.pk, photo.pk}
+    _processed(known, video=True)
+    kept = list(MediaAsset.objects.filter(pk__in=[known.pk, photo.pk]).order_by("pk").values())
+    derivatives = list(MediaDerivative.objects.order_by("key").values())
+
+    upgraded = _pass(library)
+
+    assert (upgraded.totals.created, upgraded.totals.reset, upgraded.totals.parked) == (
+        len(LEGACY_NAMES), 0, 0,
+    )
+    assert set(MediaAsset.objects.values_list("pk", flat=True)) == {known.pk, photo.pk, *legacy}
+    assert list(
+        MediaAsset.objects.filter(pk__in=[known.pk, photo.pk]).order_by("pk").values()
+    ) == kept
+    assert list(MediaDerivative.objects.order_by("key").values()) == derivatives
+    for asset in MediaAsset.objects.filter(pk__in=legacy):
+        assert (asset.kind, asset.lane) == ("video", Lane.BACKGROUND)
+        assert (asset.probe_state, asset.thumbnail_state, asset.poster_state) == (
+            StageState.PENDING,) * 3
+        assert asset.next_attempt_at <= timezone.now()
+    # Backfill leases them like any new asset.
+    claimed = claim_assets(uuid.uuid4(), limit=32, root_ids=[library.root.pk],
+                           now=timezone.now())
+    assert legacy <= {item.lease.entry_id for item in claimed}
 
 
 def test_discovery_is_idempotent(library: Library) -> None:

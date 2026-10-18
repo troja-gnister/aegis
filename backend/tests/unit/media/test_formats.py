@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import pytest
 from aegis_apps.media.enums import DerivativeExtension, DerivativeKind, MediaKind
 from aegis_apps.media.formats import (
@@ -15,20 +18,50 @@ from aegis_apps.media.formats import (
     original_content_type,
 )
 
+REPOSITORY = Path(__file__).resolve().parents[4]
+FRONTEND_CLASSIFY = REPOSITORY / "frontend/src/features/media/classify.ts"
+
 
 def test_extension_allowlists_match_m4_exactly() -> None:
     assert frozenset(
         {"jpg", "jpeg", "png", "webp", "gif", "heic", "heif", "avif", "bmp", "tif", "tiff"}
     ) == PHOTO_EXTENSIONS
     assert frozenset(
-        {"mp4", "m4v", "mov", "webm", "mkv", "avi", "3gp", "mts", "m2ts"}
+        {
+            "mp4", "m4v", "mov", "webm", "mkv", "avi", "3gp", "3g2", "mts", "m2ts",
+            "wmv", "asf", "flv", "f4v", "mpg", "mpeg", "vob", "ogv", "divx",
+        }
     ) == VIDEO_EXTENSIONS
+    # TypeScript sources share "ts" with MPEG-TS streams; it is never media.
+    assert "ts" not in MEDIA_EXTENSIONS
     assert not PHOTO_EXTENSIONS & VIDEO_EXTENSIONS
     assert tuple(sorted(PHOTO_EXTENSIONS | VIDEO_EXTENSIONS)) == MEDIA_EXTENSIONS
     for extension in MEDIA_EXTENSIONS:
         assert extension == extension.lower()
         assert extension.isascii() and extension.isalnum()
         assert 1 <= len(extension) <= 16
+
+
+def _frontend_list(source: str, name: str) -> list[str]:
+    match = re.search(
+        rf"^export const {name} = \[(?P<items>[^\]]*)\] as const;$", source, re.MULTILINE,
+    )
+    assert match is not None, name
+    items = match["items"]
+    values = re.findall(r'"([^"]*)"', items)
+    assert re.sub(r'"[^"]*"|[\s,]', "", items) == "", name  # only string literals
+    return values
+
+
+def test_the_frontend_classifies_exactly_the_backend_allowlists() -> None:
+    """``frontend/src/features/media/classify.ts`` must list the same extensions."""
+    source = FRONTEND_CLASSIFY.read_text(encoding="utf-8")
+
+    for name, expected in (("PHOTO_EXTENSIONS", PHOTO_EXTENSIONS),
+                           ("VIDEO_EXTENSIONS", VIDEO_EXTENSIONS)):
+        values = _frontend_list(source, name)
+        assert len(values) == len(set(values)), name
+        assert frozenset(values) == expected, name
 
 
 @pytest.mark.parametrize(
@@ -40,6 +73,21 @@ def test_extension_allowlists_match_m4_exactly() -> None:
         ("mp4", MediaKind.VIDEO),
         ("m2ts", MediaKind.VIDEO),
         ("3gp", MediaKind.VIDEO),
+        ("3g2", MediaKind.VIDEO),
+        ("wmv", MediaKind.VIDEO),
+        ("asf", MediaKind.VIDEO),
+        ("flv", MediaKind.VIDEO),
+        ("f4v", MediaKind.VIDEO),
+        ("mpg", MediaKind.VIDEO),
+        ("mpeg", MediaKind.VIDEO),
+        ("vob", MediaKind.VIDEO),
+        ("ogv", MediaKind.VIDEO),
+        ("divx", MediaKind.VIDEO),
+        ("WMV", None),
+        ("ts", None),
+        ("tsx", None),
+        ("wma", None),
+        ("ogg", None),
         ("JPG", None),
         ("raw", None),
         ("cr2", None),
@@ -75,6 +123,11 @@ def test_inline_originals_are_exactly_the_browser_native_allowlist() -> None:
         ("m4v", "video/mp4", "video/mp4"),
         ("heic", None, "application/octet-stream"),
         ("mkv", None, "application/octet-stream"),
+        ("3g2", None, "application/octet-stream"),
+        ("wmv", None, "application/octet-stream"),
+        ("f4v", None, "application/octet-stream"),
+        ("mpg", None, "application/octet-stream"),
+        ("ogv", None, "application/octet-stream"),
         ("html", None, "application/octet-stream"),
         ("svg", None, "application/octet-stream"),
         (None, None, "application/octet-stream"),

@@ -29,6 +29,12 @@ CONTAINER_COMMAND = container_command()
 DOCKERFILE = "docker/media.Dockerfile"
 OWNER_LABEL = "aegis.verify.owner"
 BUILD_TIMEOUT = 1800
+# The decoders of the legacy video formats (3GP/3G2, WMV/ASF, FLV, MPG/VOB, OGV, DivX). Debian's
+# ffmpeg must keep them: the formats are on the M4 allowlist.
+LEGACY_DECODERS = (
+    "h263", "msmpeg4", "wmv1", "wmv2", "wmv3", "vc1", "flv", "vp6f", "mpeg1video", "mpeg2video",
+    "theora", "amrnb", "amrwb", "wmav1", "wmav2", "wmapro", "mp2", "ac3", "vorbis",
+)
 NETWORK_CLIENTS = (
     "curl", "wget", "nc", "ncat", "netcat", "socat", "ssh", "scp", "sftp", "telnet", "ftp",
     "rsync",
@@ -278,7 +284,7 @@ def test_media_image_records_its_decoding_stack_and_has_no_network_clients(
     upstream = inventory["ffmpeg"]["version"].split(":", 1)[-1]
     assert upstream.split(".", 1)[0] == "7", inventory["ffmpeg"]
     assert inventory["ffmpeg_banner"] == facts["version"]
-    assert {"h264", "hevc"} <= set(inventory["ffmpeg_decoders"])
+    assert {"h264", "hevc", *LEGACY_DECODERS} <= set(inventory["ffmpeg_decoders"])
     assert {"libx264", "aac", "png"} <= set(inventory["ffmpeg_encoders"])
     assert "libde265" in inventory["heif_decoders"]
     assert inventory["libheif"]
@@ -290,7 +296,7 @@ def test_media_image_records_its_decoding_stack_and_has_no_network_clients(
     assert facts["probe_version"].startswith("ffprobe version ")
     for encoder in ("libx264", "aac", "png"):
         assert re.search(rf"^\s*\S+\s+{encoder}\s", facts["encoders"], re.MULTILINE), encoder
-    for decoder in ("h264", "hevc", "vp9", "aac", "mjpeg"):
+    for decoder in ("h264", "hevc", "vp9", "aac", "mjpeg", *LEGACY_DECODERS):
         assert re.search(rf"^\s*\S+\s+{decoder}\s", facts["decoders"], re.MULTILINE), decoder
     assert facts["clients"] == dict.fromkeys(NETWORK_CLIENTS)
     assert facts["apt_lists"] == []
@@ -368,7 +374,8 @@ def test_video_operations_pass_inside_the_media_image(
         "-m", "media_tools", "/src/media_processor/test_video_ops.py",
     ])
 
-    assert passed >= 14
+    # 14 before the legacy formats, plus their 12 clips and 2 loop and refusal tests.
+    assert passed >= 28
 
 
 def test_landlock_confines_the_child_inside_the_media_image(

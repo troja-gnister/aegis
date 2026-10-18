@@ -11,8 +11,10 @@ because ffmpeg duplicates it and the duplicate shares the file offset.
 
 Every input is opened with ``-protocol_whitelist fd`` (no file, network or other protocol) and
 ``-format_whitelist`` naming only the demuxers of the M4 video formats, so a crafted file cannot
-be probed as a DASH manifest, playlist or concat script that would read other files. The mov
-demuxer's ``enable_drefs`` stays at its default (off); it is not passed explicitly because an
+be probed as a DASH manifest, playlist or concat script that would read other files; none of
+the whitelisted demuxers opens another file. Demuxers are chosen by content, never by extension
+(to ffprobe a WMV is ``asf``, an MPG is ``mpeg`` and a 3G2 is ``mov``). The mov demuxer's
+``enable_drefs`` stays at its default (off); it is not passed explicitly because an
 input option the chosen demuxer does not consume is an error. Outputs drop all container
 metadata (``-map_metadata -1``), so location tags never reach a derivative, and the first video
 stream that is not cover art (``0:V:0``) is the one used.
@@ -35,8 +37,10 @@ from . import OperationError
 from .image import render_frame
 
 PROTOCOL_WHITELIST: Final = "fd"
-# The mov (MP4, M4V, MOV, 3GP), Matroska (MKV, WebM), AVI and MPEG-TS (MTS, M2TS) demuxers.
-FORMAT_WHITELIST: Final = "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,mpegts"
+# The mov (MP4, M4V, MOV, 3GP, 3G2, F4V), Matroska (MKV, WebM), AVI (AVI, DivX), MPEG-TS (MTS,
+# M2TS), ASF (WMV, ASF), FLV, MPEG-PS (MPG, MPEG, VOB) and Ogg (OGV) demuxers. Raw elementary
+# streams (``mpegvideo``) are not on it.
+FORMAT_WHITELIST: Final = "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,mpegts,asf,flv,mpeg,ogg"
 OUTPUT_FORMAT_WHITELIST: Final = "mov,mp4,m4a,3gp,3g2,mj2"
 FRAME_FILE: Final = "frame.png"
 # Bounded thread counts keep thread stacks and arenas within RLIMIT_AS (see sandbox.py).

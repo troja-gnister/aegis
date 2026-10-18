@@ -126,12 +126,24 @@ def test_cover_art_is_not_the_video_stream_and_audio_only_is_unsupported() -> No
     ("mov,mp4,m4a,3gp,3g2,mj2", None, "h264", "aac", "mov"),
     ("mov,mp4,m4a,3gp,3g2,mj2", "3gp4", "h264", "aac", "3gp"),
     ("mov,mp4,m4a,3gp,3g2,mj2", "mp42", "h264", None, "mp4"),
+    # 3G2 (3GPP2) and F4V (Adobe) files are mov to ffprobe; only the brand tells them apart.
+    ("mov,mp4,m4a,3gp,3g2,mj2", "3g2a", "h263", "aac", "3gp"),
+    ("mov,mp4,m4a,3gp,3g2,mj2", "f4v ", "h264", "aac", "mp4"),
     ("matroska,webm", None, "vp9", "opus", "webm"),
     ("matroska,webm", None, "av1", None, "webm"),
     ("matroska,webm", None, "h264", "aac", "matroska"),
     ("avi", None, "mpeg4", "mp3", "avi"),
     ("mpegts", None, "h264", "ac3", "mpegts"),
-    ("flv", None, "h264", "aac", None),
+    # WMV and ASF, FLV, MPG and VOB (MPEG-PS), and OGV: the format name is not the extension.
+    ("asf", None, "wmv2", "wmav2", "asf"),
+    ("asf", None, "wmv3", "wmapro", "asf"),
+    ("flv", None, "flv1", "mp3", "flv"),
+    ("flv", None, "h264", "aac", "flv"),
+    ("mpeg", None, "mpeg1video", "mp2", "mpeg"),
+    ("mpeg", None, "mpeg2video", "ac3", "mpeg"),
+    ("ogg", None, "theora", "vorbis", "ogg"),
+    ("rm", None, "rv40", "cook", None),
+    ("mpegvideo", None, "mpeg2video", None, None),
 ])
 def test_container_names(
     format_name: str, brand: str | None, video: str, audio: str | None, expected: str | None,
@@ -194,6 +206,7 @@ def test_tools_read_only_the_passed_descriptor_through_whitelisted_demuxers() ->
             input_options(invalid)
     assert set(FORMAT_WHITELIST.split(",")) == {
         "mov", "mp4", "m4a", "3gp", "3g2", "mj2", "matroska", "webm", "avi", "mpegts",
+        "asf", "flv", "mpeg", "ogg",
     }
 
 

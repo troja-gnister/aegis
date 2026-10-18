@@ -22,7 +22,12 @@ from collections.abc import Sequence
 from typing import Final
 
 INVENTORY_PATH: Final = "/usr/share/aegis/media-tools.json"
-FFMPEG_DECODERS: Final = ("h264", "hevc", "vp8", "vp9", "av1", "mpeg4", "aac", "mp3", "opus")
+FFMPEG_DECODERS: Final = (
+    "h264", "hevc", "vp8", "vp9", "av1", "mpeg4", "aac", "mp3", "opus",
+    # The legacy formats: 3GP/3G2, WMV/ASF, FLV, MPG/VOB, OGV and DivX.
+    "h263", "msmpeg4", "wmv1", "wmv2", "wmv3", "vc1", "flv", "vp6f", "mpeg1video", "mpeg2video",
+    "theora", "amrnb", "amrwb", "wmav1", "wmav2", "wmapro", "mp2", "ac3", "vorbis",
+)
 FFMPEG_ENCODERS: Final = ("libx264", "aac", "png")
 _SAFE_ENVIRONMENT: Final = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LC_ALL": "C.UTF-8"}
 _CODEC_LINE: Final = re.compile(r"\s*[A-Z.]{6}\s+(\S+)\s")

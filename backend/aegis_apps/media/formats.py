@@ -16,8 +16,13 @@ from .enums import DerivativeExtension, DerivativeKind, MediaKind
 PHOTO_EXTENSIONS: Final = frozenset(
     {"jpg", "jpeg", "png", "webp", "gif", "heic", "heif", "avif", "bmp", "tif", "tiff"}
 )
+# Never "ts": TypeScript sources share it. Only the inline allowlist below plays as is in a
+# browser; every other video plays through an on-demand transcode.
 VIDEO_EXTENSIONS: Final = frozenset(
-    {"mp4", "m4v", "mov", "webm", "mkv", "avi", "3gp", "mts", "m2ts"}
+    {
+        "mp4", "m4v", "mov", "webm", "mkv", "avi", "3gp", "3g2", "mts", "m2ts",
+        "wmv", "asf", "flv", "f4v", "mpg", "mpeg", "vob", "ogv", "divx",
+    }
 )
 MEDIA_KIND_BY_EXTENSION: Final[Mapping[str, MediaKind]] = MappingProxyType(
     {

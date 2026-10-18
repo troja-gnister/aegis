@@ -135,7 +135,7 @@ test("real cursor paging beyond five windows and nested navigation restore", asy
   await expect(files(page).getByText("alice-only.txt", {exact: true})).toBeVisible();
   await expect(previous).toBeDisabled();
 
-  // 611 root entries are seven real 100-entry pages; the window keeps five.
+  // 612 root entries are seven real 100-entry pages; the window keeps five.
   for (let loaded = 2; loaded <= 7; loaded += 1) {
     const next = entriesResponse(page, (url) => url.searchParams.has("cursor"));
     await more.click();

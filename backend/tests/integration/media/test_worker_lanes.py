@@ -8,6 +8,7 @@ import os
 import stat
 import uuid
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -27,6 +28,7 @@ from django.utils import timezone
 
 from .worker_support import (
     MTIME_NS,
+    VIDEO_METADATA,
     WORKER_ID,
     Library,
     drive,
@@ -232,6 +234,48 @@ def test_a_short_discovery_interval_finds_files_indexed_after_a_pass(
     clock.advance(1.0)
     finish_pass()
     assert MediaAsset.objects.filter(pk=entry.pk).exists()
+
+
+def test_a_new_worker_backfills_legacy_videos_the_catalog_already_indexed(
+    library: Library, tmp_path: Path,
+) -> None:
+    """After an upgrade, the first pass finds them; their jobs pass the processor's own checks."""
+    # What ffprobe reports for each: the container is not the extension.
+    probed: dict[bytes, tuple[str, str, protocol.Container]] = {
+        b"album/old.wmv": ("wmv2", "wmav2", "asf"),
+        b"album/phone.3g2": ("h263", "amr_nb", "3gp"),
+        b"album/flash.flv": ("flv1", "mp3", "flv"),
+        b"album/home.mpg": ("mpeg1video", "mp2", "mpeg"),
+        b"album/open.ogv": ("theora", "vorbis", "ogg"),
+    }
+    entries = {library.file(path.removeprefix(b"album/")).pk: path for path in probed}
+    library.file(b"app.ts")
+    worker, processor, clock = make_worker(tmp_path)
+
+    def metadata(job: protocol.Job) -> dict[str, Any]:
+        video, audio, container = probed[job.input.path]
+        return {"metadata": replace(VIDEO_METADATA, video_codec=video, audio_codec=audio,
+                                    container=container)}
+
+    processor.behaviour = metadata
+    drive(worker, processor, clock, lambda: MediaAsset.objects.filter(
+        poster_state=StageState.READY).count() == len(probed))
+
+    # The fake processor decodes every job, refusing an extension that is not on its allowlist.
+    assert sorted((job.op, job.kind, job.input.path) for job in processor.served) == sorted(
+        ("backfill", "video", path) for path in probed
+    )
+    assert set(MediaAsset.objects.values_list("pk", flat=True)) == set(entries)
+    for asset in MediaAsset.objects.filter(pk__in=entries):
+        assert (asset.kind, asset.probe_state, asset.thumbnail_state, asset.poster_state) == (
+            "video", StageState.READY, StageState.READY, StageState.READY,
+        )
+        assert (asset.video_codec, asset.audio_codec, asset.container) == probed[
+            entries[asset.pk]
+        ]
+    assert set(MediaDerivative.objects.values_list("kind", "state")) == {
+        ("thumbnail", "ready"), ("poster", "ready"),
+    }
 
 
 def test_jobs_name_the_file_by_slot_and_raw_relative_path(

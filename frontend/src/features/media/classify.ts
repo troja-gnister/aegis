@@ -2,14 +2,17 @@ import type {EntryMedia, MediaKind} from "./types";
 
 /**
  * Extension allowlists from the media design (M4). `typeHint` on an entry is
- * its lowercase extension, never a MIME family such as "image".
+ * its lowercase extension, never a MIME family such as "image". They match the
+ * backend's (aegis_apps/media/formats.py); a backend test compares them.
  */
 export const PHOTO_EXTENSIONS = [
   "jpg", "jpeg", "png", "webp", "gif", "heic", "heif", "avif", "bmp", "tif", "tiff",
 ] as const;
 
+/** Never "ts": TypeScript sources share it. */
 export const VIDEO_EXTENSIONS = [
-  "mp4", "m4v", "mov", "webm", "mkv", "avi", "3gp", "mts", "m2ts",
+  "mp4", "m4v", "mov", "webm", "mkv", "avi", "3gp", "3g2", "mts", "m2ts",
+  "wmv", "asf", "flv", "f4v", "mpg", "mpeg", "vob", "ogv", "divx",
 ] as const;
 
 const photoExtensions: ReadonlySet<string> = new Set(PHOTO_EXTENSIONS);

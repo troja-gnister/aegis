@@ -91,7 +91,9 @@ Lane = Literal["interactive", "background"]
 Status = Literal["ok", "unsupported", "changed", "failed", "timeout"]
 OutputFormat = Literal["webp", "mp4"]
 CapturedSource = Literal["exif", "container"]
-Container = Literal["mp4", "mov", "3gp", "matroska", "webm", "avi", "mpegts"]
+Container = Literal[
+    "mp4", "mov", "3gp", "matroska", "webm", "avi", "mpegts", "asf", "flv", "mpeg", "ogg",
+]
 
 OPS: Final[tuple[Op, ...]] = (
     "probe", "thumbnail", "preview", "poster", "transcode", "backfill",
@@ -101,15 +103,19 @@ LANES: Final[tuple[Lane, ...]] = ("interactive", "background")
 STATUSES: Final[tuple[Status, ...]] = ("ok", "unsupported", "changed", "failed", "timeout")
 CAPTURED_SOURCES: Final[tuple[CapturedSource, ...]] = ("exif", "container")
 CONTAINERS: Final[tuple[Container, ...]] = (
-    "mp4", "mov", "3gp", "matroska", "webm", "avi", "mpegts",
+    "mp4", "mov", "3gp", "matroska", "webm", "avi", "mpegts", "asf", "flv", "mpeg", "ogg",
 )
 
 # M4 allowlists, keyed by the lowercase extension (the catalog's type_hint).
 PHOTO_EXTENSIONS: Final = frozenset(
     {"jpg", "jpeg", "png", "webp", "gif", "heic", "heif", "avif", "bmp", "tif", "tiff"}
 )
+# Never "ts": TypeScript sources share it.
 VIDEO_EXTENSIONS: Final = frozenset(
-    {"mp4", "m4v", "mov", "webm", "mkv", "avi", "3gp", "mts", "m2ts"}
+    {
+        "mp4", "m4v", "mov", "webm", "mkv", "avi", "3gp", "3g2", "mts", "m2ts",
+        "wmv", "asf", "flv", "f4v", "mpg", "mpeg", "vob", "ogv", "divx",
+    }
 )
 OP_KINDS: Final[Mapping[Op, frozenset[MediaKind]]] = MappingProxyType({
     "probe": frozenset({"photo", "video"}),

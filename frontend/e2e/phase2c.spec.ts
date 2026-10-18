@@ -23,7 +23,7 @@ const MEDIA_ELEMENTS = [
   'img[src*="/media/v1/"]', 'video[src*="/media/v1/"]', 'source[src*="/media/v1/"]',
   '[poster*="/media/v1/"]', '[srcset*="/media/v1/"]', 'a[href*="/media/v1/"]',
 ].join(", ");
-const ALICE_TEXT = /photo\.JPG|phone\.heic|clip\.mp4|clip-hevc\.mov|Alice files/;
+const ALICE_TEXT = /photo\.JPG|phone\.heic|clip\.mp4|clip-hevc\.mov|clip-legacy\.wmv|Alice files/;
 // The fixture's GPS position in DMS seconds and in decimal degrees, and any location wording.
 const COORDINATES = /56[.,]789|54[.,]321|12[.,]58|98[.,]13|°|latitude|longitude|\bGPS\b/i;
 const ALICE_PERMISSIONS = "7"; // BROWSE | PREVIEW | EXPORT, as seeded.
@@ -67,6 +67,7 @@ const SETTLED: Record<string, readonly ThumbnailState[]> = {
   "beach.jpg": ["ready"],
   "clip.mp4": ["ready"],
   "clip-hevc.mov": ["ready"],
+  "clip-legacy.wmv": ["ready"],
   // The header decodes but the scan data stops halfway: the thumbnail fails (and is retried).
   "corrupt.jpg": ["failed", "quarantined"],
 };
@@ -538,7 +539,7 @@ test("generated media gets thumbnails in Files and month groups in Photos", asyn
   for (const [prefix, names] of [
     ["photo", ["photo.JPG"]],
     ["phone", ["phone.heic"]],
-    ["clip", ["clip-hevc.mov", "clip.mp4"]],
+    ["clip", ["clip-hevc.mov", "clip-legacy.wmv", "clip.mp4"]],
   ] as const) {
     await showOnly(page, prefix);
     for (const name of names) await expectThumbnail(page, name);
@@ -708,6 +709,27 @@ test("videos: the viewer's choice, ranged delivery, transcodes, and playback whe
     }
   }
   await expectTranscodeDelivery(page, transcodeUrl);
+
+  // A legacy WMV (no capture time, so the oldest video): never inline and never offered to the
+  // browser as it is, whatever the browser, so the viewer always asks for the transcode.
+  const wmv = named(items, "clip-legacy.wmv");
+  const wmvBefore = await mediaDetails(page, wmv.id);
+  expect(wmvBefore.original.inlineUrl).toBeNull();
+  expect(wmvBefore.original.playbackType).toBeNull();
+  expect(wmvBefore.derivatives.poster?.state).toBe("ready");
+  await page.getByRole("button", {name: "Next video", exact: true}).click();
+  await expect(page).toHaveURL(new RegExp(`/view/${wmv.id}$`));
+  const wmvStage = page.getByTestId("video-stage");
+  const wmvVideo = wmvStage.locator("video");
+  const wmvUrl = await expectTranscodeChoice(page, wmvStage, wmv.id, wmvBefore.derivatives.transcode?.state, posts);
+  if (h264) {
+    await expect(wmvVideo).toHaveAttribute("src", wmvUrl);
+    await expectPlays(wmvVideo);
+    played = true;
+  } else {
+    await expectPlaybackUnavailable(wmvStage);
+  }
+  await expectTranscodeDelivery(page, wmvUrl);
   testInfo.annotations.push({type: "video-branch", description: `h264=${h264} hevc=${hevc} mov=${movSource}`});
   // The global teardown requires at least one browser of the run to have proved playback.
   await recordPlayback(testInfo, played);

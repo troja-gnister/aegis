@@ -8,7 +8,7 @@ import os
 import stat
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 from aegis_media_processor import protocol
@@ -35,6 +35,7 @@ from aegis_media_processor.protocol import (
     encode_job,
     encode_result,
     job_id_from_filename,
+    media_kind_for_path,
     output_magic_matches,
     params_document,
     read_regular_file,
@@ -177,6 +178,33 @@ def test_extension_allowlists_match_the_media_app() -> None:
 
     assert protocol.PHOTO_EXTENSIONS == formats.PHOTO_EXTENSIONS
     assert protocol.VIDEO_EXTENSIONS == formats.VIDEO_EXTENSIONS
+
+
+@pytest.mark.parametrize("path,kind", [
+    (b"clips/old.wmv", "video"), (b"clips/OLD.WMV", "video"), (b"clips/phone.3g2", "video"),
+    (b"clips/stream.asf", "video"), (b"clips/flash.flv", "video"), (b"clips/flash.f4v", "video"),
+    (b"clips/home.mpg", "video"), (b"clips/home.MPEG", "video"), (b"dvd/VTS_01_1.VOB", "video"),
+    (b"clips/open.ogv", "video"), (b"clips/movie.divx", "video"), (b"clips/a.b.mts", "video"),
+    (b"src/app.ts", None), (b"clips/voice.wma", None), (b"clips/voice.ogg", None),
+    (b"clips/wmv", None), (b"clips/.flv.txt", None), (b"clips/old.wmv\xff", None),
+])
+def test_media_kind_for_path_uses_the_lowercase_extension(path: bytes, kind: str | None) -> None:
+    assert media_kind_for_path(path) == kind
+
+
+def test_the_container_names_are_the_literal_type() -> None:
+    assert get_args(protocol.Container) == protocol.CONTAINERS
+    assert len(set(protocol.CONTAINERS)) == len(protocol.CONTAINERS)
+
+
+@pytest.mark.parametrize("container", protocol.CONTAINERS)
+def test_every_container_name_is_accepted_for_videos(container: str) -> None:
+    video_probe = job("probe", input=VIDEO, kind="video")
+    video = metadata(orientation=None, captured_at_source="container", duration_ms=12_345,
+                     video_codec="wmv2", audio_codec="wmav2", container=container,
+                     camera_make=None, camera_model=None)
+
+    assert decode_result(encode_result(ok(meta=video), video_probe), video_probe).metadata == video
 
 
 @pytest.mark.parametrize("slot", ["synthetic", "a", "photos-2024", "a" * 63])
@@ -417,7 +445,7 @@ def _metadata_mutations() -> list[tuple[str, dict[str, Any]]]:
         ("empty camera", {"camera_make": ""}),
         ("codec with dot", {"video_codec": "h.264"}),
         ("uppercase codec", {"audio_codec": "AAC"}),
-        ("unknown container", {"container": "flv"}),
+        ("unknown container", {"container": "rm"}),
         ("integer location flag", {"has_location": 1}),
         ("missing location flag", {"has_location": None}),
         ("photo with duration", {"duration_ms": 1000}),

@@ -72,7 +72,13 @@ INDEX_WAIT_SECONDS = 240
 # Distinctive coordinates: the browser journeys prove they never surface (spec M5).
 GPS_LATITUDE = (12.0, 34.0, 56.789)
 GPS_LONGITUDE = (98.0, 7.0, 54.321)
-VIDEO_FIXTURES = ("clip.mp4", "clip-hevc.mov")
+VIDEO_FIXTURES = ("clip.mp4", "clip-hevc.mov", "clip-legacy.wmv")
+# Each clip's container signature: the ISO base media file type box, or the ASF header GUID.
+_VIDEO_MAGIC = {
+    "clip.mp4": (4, b"ftyp"),
+    "clip-hevc.mov": (4, b"ftyp"),
+    "clip-legacy.wmv": (0, bytes.fromhex("3026b2758e66cf11a6d900aa0062ce6c")),
+}
 DIGEST_FIXTURE = "roots/alice/photo.JPG"
 MEDIA_IMAGE = "aegis-media"
 MEDIA_FIXTURE_LABEL = "aegis.test.media-fixtures"
@@ -91,6 +97,7 @@ MEDIA_SETTLED: dict[str, tuple[str, ...]] = {
     "beach.jpg": ("ready",),
     "clip.mp4": ("ready",),
     "clip-hevc.mov": ("ready",),
+    "clip-legacy.wmv": ("ready",),
     "corrupt.jpg": ("failed", "quarantined"),
 }
 _THUMBNAIL_STATES = ("pending", "ready", "failed", "unsupported", "quarantined")
@@ -98,9 +105,10 @@ _IMAGE_ID = re.compile(r"(?:sha256:)?[0-9a-f]{64}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 # Runs in the media image with no network, no mount and a read-only root, as the fixed
 # unprivileged user 10001:10001 (whatever UID the e2e build gave the image's files; it writes
-# only its private 1777 tmpfs): ffmpeg's lavfi sources encode two 2 s clips into /tmp, and the
+# only its private 1777 tmpfs): ffmpeg's lavfi sources encode three 2 s clips into /tmp, and the
 # clips leave only as one JSON document on stdout, which nothing else writes to. Single-threaded
-# encoders keep the task count within the container's bound on any host.
+# encoders keep the task count within the container's bound on any host. The WMV (WMV 8 and WMA
+# 2 in ASF) is a legacy format no browser plays: it always plays through a transcode.
 _VIDEO_SCRIPT = """\
 import base64
 import json
@@ -114,14 +122,15 @@ TONE = "sine=frequency=440:sample_rate=48000:duration=2"
 CLIPS = {
     "clip.mp4": [
         "-c:v", "libx264", "-preset", "veryfast", "-profile:v", "high", "-threads", "1",
-        "-metadata", "creation_time=2024-06-15T09:30:00Z", "-movflags", "+faststart",
-        "-f", "mp4",
+        "-c:a", "aac", "-metadata", "creation_time=2024-06-15T09:30:00Z",
+        "-movflags", "+faststart", "-f", "mp4",
     ],
     "clip-hevc.mov": [
         "-c:v", "libx265", "-tag:v", "hvc1",
         "-x265-params", "log-level=error:pools=1:frame-threads=1",
-        "-metadata", "creation_time=2023-11-20T18:00:00Z", "-f", "mov",
+        "-c:a", "aac", "-metadata", "creation_time=2023-11-20T18:00:00Z", "-f", "mov",
     ],
+    "clip-legacy.wmv": ["-c:v", "wmv2", "-threads", "1", "-c:a", "wmav2", "-f", "asf"],
 }
 directory = tempfile.mkdtemp(dir="/tmp")
 document = {}
@@ -131,7 +140,7 @@ for name, options in CLIPS.items():
         ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
          "-filter_threads", "1", "-f", "lavfi", "-i", PICTURE, "-f", "lavfi", "-i", TONE,
          "-map", "0:v", "-map", "1:a", "-pix_fmt", "yuv420p",
-         "-c:a", "aac", "-b:a", "48k", "-ac", "1", "-shortest", *options, target],
+         "-b:a", "48k", "-ac", "1", "-shortest", *options, target],
         check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, timeout=120,
     )
     with open(target, "rb") as handle:
@@ -820,9 +829,12 @@ def _decoded_videos(raw: bytes) -> dict[str, bytes]:
         }
     except (ValueError, TypeError, binascii.Error) as exc:
         raise ValueError("synthetic E2E media fixture output is invalid") from exc
-    for content in videos.values():
-        # Both are ISO base media files, whose first box is the file type box.
-        if not 1024 <= len(content) <= MAX_VIDEO_BYTES or content[4:8] != b"ftyp":
+    for name, content in videos.items():
+        offset, signature = _VIDEO_MAGIC[name]
+        if (
+            not 1024 <= len(content) <= MAX_VIDEO_BYTES
+            or content[offset:offset + len(signature)] != signature
+        ):
             raise ValueError("synthetic E2E media fixture output is invalid")
     return videos
 

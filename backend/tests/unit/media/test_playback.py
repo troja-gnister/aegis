@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from aegis_apps.media.formats import INLINE_ORIGINAL_CONTENT_TYPES, VIDEO_EXTENSIONS
 from aegis_apps.media.playback import playback_type
 
 
@@ -83,6 +84,12 @@ def test_playback_type_is_derived_conservatively(
         {"type_hint": "mkv", "container": "matroska"},
         {"type_hint": "avi", "container": "avi"},
         {"type_hint": "3gp", "container": "3gp"},
+        {"type_hint": "3g2", "container": "3gp", "video_codec": "h263"},
+        {"type_hint": "f4v", "container": "mp4"},
+        {"type_hint": "wmv", "container": "asf", "video_codec": "wmv2", "audio_codec": "wmav2"},
+        {"type_hint": "flv", "container": "flv", "video_codec": "flv1", "audio_codec": "mp3"},
+        {"type_hint": "mpg", "container": "mpeg", "video_codec": "mpeg1video"},
+        {"type_hint": "ogv", "container": "ogg", "video_codec": "theora"},
         {"type_hint": "jpg"},
         {"type_hint": None},
         {"type_hint": "webm", "container": "webm", "video_codec": "h264"},
@@ -93,3 +100,14 @@ def test_underivable_playback_is_null_so_the_client_transcodes(
     overrides: dict[str, object],
 ) -> None:
     assert _playback(**overrides) is None
+
+
+@pytest.mark.parametrize(
+    "type_hint", sorted(VIDEO_EXTENSIONS - INLINE_ORIGINAL_CONTENT_TYPES.keys()),
+)
+@pytest.mark.parametrize("container", ["mp4", "mov"])
+def test_videos_off_the_inline_allowlist_always_play_through_a_transcode(
+    type_hint: str, container: str,
+) -> None:
+    """Even an H.264 and AAC stream: the original is never served inline (WMV, FLV, MPG...)."""
+    assert _playback(type_hint=type_hint, container=container) is None

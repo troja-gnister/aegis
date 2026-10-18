@@ -17,6 +17,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
+from types import MappingProxyType
 from typing import Final, cast
 
 from PIL import ExifTags, ImageFile
@@ -51,6 +52,11 @@ _UNSET_TIMES: Final = frozenset({"1904-01-01T00:00:00", "1970-01-01T00:00:00"})
 _GPS_POSITION_TAGS: Final = frozenset({1, 2, 3, 4})  # latitude and longitude, and their refs
 _WEBM_VIDEO: Final = frozenset({"vp8", "vp9", "av1"})
 _WEBM_AUDIO: Final = frozenset({"opus", "vorbis"})
+# ffprobe format families recorded under their own name: AVI, MPEG-TS, ASF (WMV), FLV, MPEG-PS
+# (MPG, VOB) and Ogg.
+_PLAIN_CONTAINERS: Final[Mapping[str, Container]] = MappingProxyType({
+    "avi": "avi", "mpegts": "mpegts", "asf": "asf", "flv": "flv", "mpeg": "mpeg", "ogg": "ogg",
+})
 
 
 def camera_text(value: object) -> str | None:
@@ -236,11 +242,7 @@ def _container(
     if family == "matroska":
         webm = video in _WEBM_VIDEO and (audio is None or audio in _WEBM_AUDIO)
         return "webm" if webm else "matroska"
-    if family == "avi":
-        return "avi"
-    if family == "mpegts":
-        return "mpegts"
-    return None
+    return _PLAIN_CONTAINERS.get(family)
 
 
 def map_ffprobe(document: Mapping[str, object]) -> Metadata:

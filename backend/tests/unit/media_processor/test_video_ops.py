@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -388,3 +389,185 @@ def test_confined_children_decode_video_through_the_fd_protocol(
             ["result.json", *(output.filename for output in result.outputs)]
         )
     assert os.listdir(scratch / "work") == []
+
+
+# -- Legacy formats ------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class LegacyClip:
+    """A clip as an old phone, camera or encoder wrote it, and what its probe must report."""
+
+    options: tuple[str, ...]  # the encoders and the muxer
+    codecs: tuple[str, str, str]  # video codec, audio codec, container
+    size: tuple[int, int] = (320, 240)
+    captured: str | None = None
+
+
+CAPTURED = "2024-05-01T08:00:00Z"
+# Debian's ffmpeg has no WMV3 (WMV 9), VC-1 or AMR encoder, so those decoders get no fixture.
+# MPEG-1 and MPEG-2 need a standard frame rate, hence 25 fps for every clip.
+LEGACY_CLIPS: dict[bytes, LegacyClip] = {
+    b"legacy/phone.3g2": LegacyClip(
+        ("-c:v", "h263", "-c:a", "aac", "-ar", "16000", "-ac", "1", "-b:a", "32k",
+         "-metadata", f"creation_time={CAPTURED}", "-f", "3g2"),
+        ("h263", "aac", "3gp"), size=(176, 144), captured=CAPTURED,
+    ),
+    b"legacy/phone-mpeg4.3g2": LegacyClip(
+        ("-c:v", "mpeg4", "-c:a", "aac", "-f", "3g2"), ("mpeg4", "aac", "3gp"),
+    ),
+    b"legacy/old.wmv": LegacyClip(
+        ("-c:v", "wmv2", "-c:a", "wmav2", "-f", "asf"), ("wmv2", "wmav2", "asf"),
+    ),
+    b"legacy/stream.asf": LegacyClip(
+        ("-c:v", "wmv1", "-c:a", "wmav1", "-f", "asf"), ("wmv1", "wmav1", "asf"),
+    ),
+    b"legacy/flash.flv": LegacyClip(
+        ("-c:v", "flv", "-c:a", "libmp3lame", "-f", "flv"), ("flv1", "mp3", "flv"),
+    ),
+    b"legacy/flash-h264.flv": LegacyClip(
+        ("-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-f", "flv"),
+        ("h264", "aac", "flv"),
+    ),
+    b"legacy/flash.f4v": LegacyClip(
+        ("-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+         "-metadata", f"creation_time={CAPTURED}", "-f", "f4v"),
+        ("h264", "aac", "mp4"), captured=CAPTURED,
+    ),
+    b"legacy/home.mpg": LegacyClip(
+        ("-c:v", "mpeg1video", "-c:a", "mp2", "-f", "mpeg"), ("mpeg1video", "mp2", "mpeg"),
+    ),
+    b"legacy/home.mpeg": LegacyClip(
+        ("-c:v", "mpeg2video", "-c:a", "mp2", "-f", "mpeg"), ("mpeg2video", "mp2", "mpeg"),
+    ),
+    b"legacy/VTS_01_1.VOB": LegacyClip(
+        ("-c:v", "mpeg2video", "-c:a", "ac3", "-f", "vob"), ("mpeg2video", "ac3", "mpeg"),
+    ),
+    b"legacy/open.ogv": LegacyClip(
+        ("-c:v", "libtheora", "-c:a", "libvorbis", "-f", "ogg"), ("theora", "vorbis", "ogg"),
+    ),
+    b"legacy/movie.divx": LegacyClip(
+        ("-c:v", "mpeg4", "-vtag", "DX50", "-c:a", "libmp3lame", "-f", "avi"),
+        ("mpeg4", "mp3", "avi"),
+    ),
+}
+
+
+def make_legacy_clip(roots: Path, relative: bytes) -> str:
+    clip = LEGACY_CLIPS[relative]
+    path = os.fsdecode(source_path(roots, relative))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    width, height = clip.size
+    ffmpeg("-f", "lavfi", "-i", f"testsrc2=size={width}x{height}:rate=25:duration=2",
+           "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+           "-map", "0:v", "-map", "1:a", *clip.options, path)
+    return path
+
+
+def expect_h264_aac_mp4(path: Path, size: tuple[int, int]) -> None:
+    data = path.read_bytes()
+    assert output_magic_matches("mp4", data[:12])
+    assert 0 <= data.find(b"moov") < data.find(b"mdat")
+    probed = ffprobe_json(str(path))
+    assert [
+        (s["codec_name"], s["profile"], s["pix_fmt"], s["width"], s["height"])
+        for s in probed["streams"] if s["codec_type"] == "video"
+    ] == [("h264", "High", "yuv420p", *size)]
+    assert [s["codec_name"] for s in probed["streams"] if s["codec_type"] == "audio"] == ["aac"]
+
+
+@pytest.mark.parametrize("relative", list(LEGACY_CLIPS), ids=lambda path: path.decode())
+def test_legacy_formats_are_probed_get_posters_and_transcode(
+    tmp_path: Path, roots: Path, relative: bytes,
+) -> None:
+    """3G2, WMV, ASF, FLV, F4V, MPG, MPEG, VOB, OGV and DivX, through the real tools."""
+    clip = LEGACY_CLIPS[relative]
+    make_legacy_clip(roots, relative)
+
+    backfill, directory = run_job(tmp_path, roots, make_job(roots, relative, "backfill",
+                                                            limits=LIMITS))
+    transcode, transcoded = run_job(tmp_path, roots, make_job(roots, relative, "transcode",
+                                                              limits=LIMITS))
+
+    assert backfill.status == "ok", backfill
+    metadata = backfill.metadata
+    assert metadata is not None
+    assert (metadata.video_codec, metadata.audio_codec, metadata.container) == clip.codecs
+    assert (metadata.width, metadata.height) == clip.size
+    assert metadata.duration_ms is not None and 1800 <= metadata.duration_ms <= 2300
+    assert metadata.captured_at == clip.captured
+    assert metadata.has_location is False
+    assert [(o.name, o.width, o.height) for o in backfill.outputs] == [
+        ("thumbnail", *clip.size), ("poster", *clip.size),
+    ]
+    for output in backfill.outputs:
+        data = (directory / output.filename).read_bytes()
+        assert len(data) == output.bytes and output_magic_matches("webp", data[:12])
+    assert transcode.status == "ok", transcode
+    (output,) = transcode.outputs
+    assert (output.name, output.format, output.width, output.height) == (
+        "transcode", "mp4", *clip.size,
+    )
+    assert (transcoded / "transcode.mp4").stat().st_size == output.bytes
+    expect_h264_aac_mp4(transcoded / "transcode.mp4", clip.size)
+    assert os.listdir(transcoded) == ["transcode.mp4"]
+
+
+def test_confined_children_decode_every_legacy_format(tmp_path: Path, roots: Path) -> None:
+    """The real loop (Landlock, seccomp, ``fd:``) backfills and transcodes each legacy clip."""
+    from aegis_media_processor.loop import Processor
+    from aegis_media_processor.protocol import MAX_RESULT_BYTES, read_regular_file, write_job
+
+    for relative in LEGACY_CLIPS:
+        make_legacy_clip(roots, relative)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    operations: tuple[Op, ...] = ("backfill", "transcode")
+    jobs = [
+        make_job(roots, relative, op, limits=LIMITS)
+        for relative in LEGACY_CLIPS for op in operations
+    ]
+
+    with Processor(str(scratch), str(roots), 2) as processor:
+        processor.prepare()
+        for job in jobs:
+            write_job(str(scratch / "inbox"), job)
+        processor.run(until_idle=True)
+
+    for job in jobs:
+        clip = LEGACY_CLIPS[job.input.path]
+        directory = scratch / "done" / job.id
+        result = decode_result(read_regular_file(str(directory / "result.json"),
+                                                 MAX_RESULT_BYTES), job)
+        assert result.status == "ok", (job.input.path, job.op, result)
+        if job.op == "backfill":
+            assert result.metadata is not None
+            assert (result.metadata.video_codec, result.metadata.audio_codec,
+                    result.metadata.container) == clip.codecs
+            assert [o.name for o in result.outputs] == ["thumbnail", "poster"]
+        else:
+            assert [(o.name, o.width, o.height) for o in result.outputs] == [
+                ("transcode", *clip.size),
+            ]
+            expect_h264_aac_mp4(directory / "transcode.mp4", clip.size)
+    assert os.listdir(scratch / "work") == []
+
+
+def test_a_raw_mpeg_elementary_stream_is_not_demuxed(tmp_path: Path, roots: Path) -> None:
+    """``mpegvideo`` is not whitelisted: a raw stream named .mpg fails like an undecodable file.
+
+    MPG files are MPEG-PS (or MPEG-1 system) streams; raw MPEG video uses .m1v and .m2v.
+    """
+    path = os.fsdecode(source_path(roots, b"legacy/raw.mpg"))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    ffmpeg("-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25:duration=1",
+           "-c:v", "mpeg1video", "-f", "mpeg1video", path)
+
+    cases: tuple[tuple[Op, str], ...] = (
+        ("probe", "decode_failed"), ("backfill", "decode_failed"), ("transcode", "tool_failed"),
+    )
+    for op, code in cases:
+        result, directory = run_job(tmp_path, roots, make_job(roots, b"legacy/raw.mpg", op,
+                                                              limits=LIMITS))
+        assert (result.status, result.safe_error_code) == ("failed", code), (op, result)
+        assert os.listdir(directory) == []

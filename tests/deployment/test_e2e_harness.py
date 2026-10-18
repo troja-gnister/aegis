@@ -142,6 +142,15 @@ def _clip(brand: bytes) -> bytes:
     return b"\x00\x00\x00\x18ftyp" + brand + b"\x00" * 2048
 
 
+def _asf_clip() -> bytes:
+    return bytes.fromhex("3026b2758e66cf11a6d900aa0062ce6c") + b"\x00" * 2048
+
+
+def _clips() -> dict[str, bytes]:
+    return {"clip.mp4": _clip(b"isom"), "clip-hevc.mov": _clip(b"qt  "),
+            "clip-legacy.wmv": _asf_clip()}
+
+
 def _clip_output(clips: dict[str, bytes]) -> bytes:
     return json.dumps({
         name: base64.b64encode(content).decode("ascii") for name, content in clips.items()
@@ -193,7 +202,7 @@ def test_media_fixtures_add_the_clips_from_a_mountless_offline_container(
 ) -> None:
     monkeypatch.setenv("AEGIS_CONTAINER_ENGINE", "docker")
     path = private_e2e_directory()
-    clips = {"clip.mp4": _clip(b"isom"), "clip-hevc.mov": _clip(b"qt  ")}
+    clips = _clips()
     commands: list[list[str]] = []
     try:
         SUPPORT["prepare"](path)
@@ -249,26 +258,30 @@ def test_media_fixtures_add_the_clips_from_a_mountless_offline_container(
         SUPPORT["cleanup"](path)
 
 
-@pytest.mark.parametrize("failure", ("rendered", "returncode", "output", "magic", "large",
-                                     "timeout"))
+@pytest.mark.parametrize("failure", ("rendered", "returncode", "output", "magic", "asf-magic",
+                                     "large", "timeout"))
 def test_media_fixtures_refuse_late_runs_failures_and_invalid_clips_and_remove_the_container(
     monkeypatch: pytest.MonkeyPatch, failure: str,
 ) -> None:
     monkeypatch.setenv("AEGIS_CONTAINER_ENGINE", "docker")
     path = private_e2e_directory()
-    clips = {"clip.mp4": _clip(b"isom"), "clip-hevc.mov": _clip(b"qt  ")}
+    clips = _clips()
     output = _clip_output(clips)
     if failure == "output":
         output = _clip_output({"clip.mp4": clips["clip.mp4"]})
     elif failure == "magic":
         output = _clip_output({**clips, "clip.mp4": b"\x00" * 4096})
+    elif failure == "asf-magic":
+        # Each clip is checked against its own container: an MP4 is not a WMV.
+        output = _clip_output({**clips, "clip-legacy.wmv": _clip(b"isom")})
     elif failure == "large":
         # Above the bound, so a clip can never reach Phase 2A's 1 MB size filter.
         output = _clip_output({**clips, "clip.mp4": _clip(b"isom") + b"\x00" * (256 << 10)})
     commands: list[list[str]] = []
     messages = {
         "rendered": "out of order", "returncode": "generation failed",
-        "output": "output is invalid", "magic": "output is invalid", "large": "output is invalid",
+        "output": "output is invalid", "magic": "output is invalid",
+        "asf-magic": "output is invalid", "large": "output is invalid",
         "timeout": "generation failed",
     }
     try:
@@ -315,7 +328,7 @@ def test_media_wait_is_bounded_counts_states_and_publishes_only_fixed_refusals(
             SUPPORT["media_wait"](path)
         # Counts per fixed state only: never a name, a value or a credential.
         assert capsys.readouterr().err == (
-            "AEGIS_E2E media-wait states=pending:2,ready:4,missing:1\n"
+            "AEGIS_E2E media-wait states=pending:2,ready:5,missing:1\n"
         )
         assert SUPPORT["refusal_annotation"]("media-wait", raised.value) == (
             "::error title=e2e-support media-wait::"

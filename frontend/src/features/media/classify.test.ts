@@ -10,7 +10,8 @@ describe("media classification", () => {
       "jpg", "jpeg", "png", "webp", "gif", "heic", "heif", "avif", "bmp", "tif", "tiff",
     ]);
     expect([...VIDEO_EXTENSIONS]).toEqual([
-      "mp4", "m4v", "mov", "webm", "mkv", "avi", "3gp", "mts", "m2ts",
+      "mp4", "m4v", "mov", "webm", "mkv", "avi", "3gp", "3g2", "mts", "m2ts",
+      "wmv", "asf", "flv", "f4v", "mpg", "mpeg", "vob", "ogv", "divx",
     ]);
   });
 
@@ -26,10 +27,14 @@ describe("media classification", () => {
     expect(classifyExtension(".JPG")).toBe("photo");
     expect(classifyExtension("HeIc")).toBe("photo");
     expect(classifyExtension(".M2TS")).toBe("video");
+    expect(classifyExtension(".WMV")).toBe("video");
+    expect(classifyExtension("3G2")).toBe("video");
   });
 
   it.each([
     ["image"], ["video"], ["pdf"], ["txt"], ["raw"], ["cr2"], ["mp3"], ["jpgx"], ["xjpg"], [""], ["."],
+    // TypeScript sources and audio-only containers are not videos.
+    ["ts"], ["tsx"], ["wma"], ["ogg"], ["m4a"],
   ])("never classifies %j, including MIME family words, as media", (extension) => {
     expect(classifyExtension(extension)).toBeNull();
   });
@@ -42,6 +47,7 @@ describe("media classification", () => {
   it("classifies only regular files by extension", () => {
     expect(mediaKindOf({kind: "file", typeHint: "jpg", media: null})).toBe("photo");
     expect(mediaKindOf({kind: "file", typeHint: "mov", media: null})).toBe("video");
+    expect(mediaKindOf({kind: "file", typeHint: "wmv", media: null})).toBe("video");
     expect(mediaKindOf({kind: "directory", typeHint: "jpg", media: null})).toBeNull();
     expect(mediaKindOf({kind: "symlink", typeHint: "mp4", media: null})).toBeNull();
     expect(mediaKindOf({kind: "special", typeHint: "png", media: null})).toBeNull();
