@@ -9,6 +9,7 @@ from aegis_apps.media.delivery import if_none_match_hits, strong_etag
 from aegis_apps.media.links import (
     MediaLinks,
     derivative_url,
+    download_url,
     entry_media,
     fingerprint_token,
     original_url,
@@ -153,6 +154,55 @@ def test_derivative_url_refuses_unknown_kinds_and_fingerprints() -> None:
         derivative_url(ENTRY, "thumbnail", "F" * 64, namespace=NAMESPACE, root_epoch=1)
     with pytest.raises(ValueError):
         original_url(ENTRY, "download", namespace=NAMESPACE, root_epoch=1)  # type: ignore[arg-type]
+
+
+EXPORT_LINKS = MediaLinks(namespace=NAMESPACE, root_epoch=7, preview=False, export=True)
+
+
+def test_download_url_is_the_attachment_url_of_an_available_regular_file() -> None:
+    assert download_url(ENTRY, kind="file", available=True, links=EXPORT_LINKS) == (
+        f"/media/v1/originals/{ENTRY}?d=attachment&n={NAMESPACE}&e=7"
+    )
+    assert download_url(
+        ENTRY, kind="file", available=True, links=EXPORT_LINKS,
+    ) == original_url(ENTRY, "attachment", namespace=NAMESPACE, root_epoch=7)
+
+
+@pytest.mark.parametrize(
+    ("kind", "available", "links"),
+    [
+        # EXPORT is required; PREVIEW never stands in for it.
+        ("file", True, LINKS),
+        ("file", True, dataclasses.replace(EXPORT_LINKS, export=False, preview=True)),
+        # Unavailable files: missing, inaccessible, unsupported or a stale chain.
+        ("file", False, EXPORT_LINKS),
+        # Only regular files have bytes to send.
+        ("directory", True, EXPORT_LINKS),
+        ("symlink", True, EXPORT_LINKS),
+        ("special", True, EXPORT_LINKS),
+        (None, True, EXPORT_LINKS),
+        ("FILE", True, EXPORT_LINKS),
+    ],
+)
+def test_download_url_needs_export_and_an_available_regular_file(
+    kind: object, available: bool, links: MediaLinks,
+) -> None:
+    assert download_url(ENTRY, kind=kind, available=available, links=links) is None
+
+
+def test_download_url_fails_closed_on_truthy_non_booleans_and_bad_inputs() -> None:
+    assert download_url(
+        ENTRY, kind="file", available=1, links=EXPORT_LINKS,  # type: ignore[arg-type]
+    ) is None
+    with pytest.raises(ValueError):
+        download_url(
+            str(ENTRY), kind="file", available=True, links=EXPORT_LINKS,  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError):
+        download_url(
+            ENTRY, kind="file", available=True,
+            links=dataclasses.replace(EXPORT_LINKS, namespace="a&d=inline"),
+        )
 
 
 def test_rfc3339_requires_aware_timestamps() -> None:

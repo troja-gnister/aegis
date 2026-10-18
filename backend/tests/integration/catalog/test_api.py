@@ -302,6 +302,8 @@ def test_details_are_allowlisted_and_query_parameters_are_rejected(api_catalog: 
         "sourceState": "present",
         "version": "0",
         "media": None,
+        # The direct grant has no EXPORT.
+        "downloadUrl": None,
         "parentId": str(api_catalog.anchor.pk),
         "ancestors": [{"id": str(api_catalog.anchor.pk), "displayName": ""}],
         "ancestorsTruncated": False,

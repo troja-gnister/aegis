@@ -20,6 +20,8 @@ from uuid import UUID
 from django.db.models import F
 from django.utils.crypto import salted_hmac
 
+from aegis_apps.catalog.domain import EntryKind
+
 from .enums import DerivativeKind, MediaKind, SortSource, StageState
 from .keys import is_hex_digest
 
@@ -101,6 +103,24 @@ def original_url(
     return (
         f"{DELIVERY_PREFIX}/originals/{entry_id}"
         f"?d={disposition}&n={namespace}&e={root_epoch}"
+    )
+
+
+def download_url(
+    entry_id: UUID, *, kind: object, available: bool, links: MediaLinks,
+) -> str | None:
+    """The attachment URL of an original, or ``None``.
+
+    Every regular file may be downloaded with EXPORT while it is available (present, with
+    current source and navigation chains); directories, links and special entries never.
+    Entry details and media details issue this same URL. It names no file version: each
+    request is authorized again against the current catalog, and an interrupted download
+    resumes through the gateway's validators (spec M6).
+    """
+    if kind != EntryKind.FILE or available is not True or not links.export:
+        return None
+    return original_url(
+        entry_id, "attachment", namespace=links.namespace, root_epoch=links.root_epoch,
     )
 
 

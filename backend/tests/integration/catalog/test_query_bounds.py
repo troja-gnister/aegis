@@ -143,7 +143,7 @@ def test_wire_fields_and_index_status_preserve_integer_precision(browse_fixture:
     assert status["degradedDirectories"] == "2"
     assert status["lastCompletedAt"] == instant.isoformat()
     assert set(browse_fixture.details(entry.pk)) == set(summary) | {
-        "parentId", "ancestors", "ancestorsTruncated",
+        "downloadUrl", "parentId", "ancestors", "ancestorsTruncated",
     }
 
 

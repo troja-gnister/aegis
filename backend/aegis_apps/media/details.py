@@ -8,6 +8,7 @@ from typing import Any, Final
 from uuid import UUID
 
 from aegis_apps.catalog.authorization import CatalogNotFound, entry_context
+from aegis_apps.catalog.domain import EntryKind
 from aegis_apps.catalog.queries import media_links
 from aegis_apps.identity.models import User
 from aegis_apps.operations.enums import JobKind, JobState, WorkerRole
@@ -16,7 +17,14 @@ from aegis_apps.operations.models import Job
 from . import selectors
 from .enums import DerivativeKind, DerivativeState, MediaKind, StageState
 from .formats import DERIVATIVE_KINDS_BY_MEDIA_KIND, original_content_type
-from .links import MediaLinks, derivative_url, fingerprint_token, original_url, rfc3339_utc
+from .links import (
+    MediaLinks,
+    derivative_url,
+    download_url,
+    fingerprint_token,
+    original_url,
+    rfc3339_utc,
+)
 from .playback import playback_type
 
 ACTIVE_JOB_STATES: Final = (JobState.QUEUED, JobState.RUNNING, JobState.RETRY_WAIT)
@@ -133,11 +141,6 @@ def details_payload(
         inline_url = original_url(
             entry_id, "inline", namespace=links.namespace, root_epoch=links.root_epoch,
         )
-    download_url = None
-    if links.export and entry.available:
-        download_url = original_url(
-            entry_id, "attachment", namespace=links.namespace, root_epoch=links.root_epoch,
-        )
     playback = None
     if media_kind == MediaKind.VIDEO and inline_url is not None:
         playback = playback_type(
@@ -159,7 +162,10 @@ def details_payload(
         "original": {
             "contentType": original_content_type(entry.type_hint, inline=False),
             "inlineUrl": inline_url,
-            "downloadUrl": download_url,
+            # The same URL entry details issue for every downloadable file.
+            "downloadUrl": download_url(
+                entry_id, kind=EntryKind.FILE, available=entry.available, links=links,
+            ),
             "playbackType": playback,
         },
         "permissions": {"preview": links.preview, "export": links.export},

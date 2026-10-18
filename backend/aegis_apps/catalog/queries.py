@@ -15,7 +15,7 @@ from django.db.models.expressions import RawSQL
 from django.db.models.functions import Coalesce
 
 from aegis_apps.identity.models import User
-from aegis_apps.media.links import MEDIA_ANNOTATIONS, MEDIA_FIELDS, MediaLinks
+from aegis_apps.media.links import MEDIA_ANNOTATIONS, MEDIA_FIELDS, MediaLinks, download_url
 from aegis_apps.roots.manifest import ManifestError, configured_manifest
 from aegis_apps.roots.permissions import Permission
 from aegis_apps.roots.selectors import authorized_roots
@@ -934,8 +934,16 @@ def entry_details(user: User, entry_id: UUID, namespace: str) -> dict[str, objec
                             })
                         else:
                             truncated = True
+            links = media_links(context)
+            summary = entry_summary(row, available=available, links=links)
             return {
-                **entry_summary(row, available=available, links=media_links(context)),
+                **summary,
+                # "present" in the summary means present with current source and
+                # navigation chains, the state in which delivery serves the original.
+                "downloadUrl": download_url(
+                    row["id"], kind=row["kind"], available=summary["sourceState"] == "present",
+                    links=links,
+                ),
                 "parentId": str(row["logical_parent_id"]) if row["logical_parent_id"] else None,
                 "ancestors": list(reversed(ancestors)), "ancestorsTruncated": truncated,
             }
