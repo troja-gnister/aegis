@@ -375,8 +375,14 @@ test("Download original saves a document's exact bytes; its URL resumes in the s
   expect((await restarted.body()).equals(DOCUMENT_BYTES)).toBe(true);
 
   // The URL is bound to the session: after sign-out a resume is refused like a fresh request.
+  // The app shows the sign-in form at once; the server ends the session when the logout
+  // request completes.
+  const loggedOut = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === "/api/v1/auth/logout" && response.request().method() === "POST");
   await page.getByRole("button", {name: "Sign out"}).click();
   await expect(page.getByRole("heading", {name: "Sign in"})).toBeVisible();
+  expect((await loggedOut).status()).toBe(204);
+  await expect.poll(async () => (await page.request.get("/api/v1/auth/session")).status()).toBe(401);
   for (const request of [{}, resume]) {
     const refused = await page.request.get(href, {headers: request});
     expect(refused.status()).toBe(404);
