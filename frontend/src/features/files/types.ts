@@ -59,6 +59,11 @@ export type DirectoryPage = {
 };
 
 export type EntryDetails = EntrySummary & {
+  /**
+   * The original's same-origin attachment URL, for Download. Set only with EXPORT and
+   * only for a regular file that is present with current folders; null otherwise.
+   */
+  downloadUrl: string | null;
   parentId: string | null;
   ancestors: {id: string; displayName: string}[];
   ancestorsTruncated: boolean;

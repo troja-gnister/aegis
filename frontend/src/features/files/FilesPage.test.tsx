@@ -227,7 +227,7 @@ describe("FilesPage", () => {
         return HttpResponse.json(pageResponse(parent, parent ? [] : [directory, file]));
       }),
       http.get(`/api/v1/entries/${file.id}`, () => HttpResponse.json({
-        ...file, parentId: FIXTURE_ROOT_ID, ancestors: [], ancestorsTruncated: false,
+        ...file, parentId: FIXTURE_ROOT_ID, ancestors: [], downloadUrl: null, ancestorsTruncated: false,
       })),
     );
     await renderFiles();
@@ -509,7 +509,7 @@ describe("FilesPage", () => {
         return HttpResponse.json(pageResponse(null, [file], "ready", url));
       }),
       http.get(`/api/v1/entries/${file.id}`, () => HttpResponse.json({
-        ...file, parentId: FIXTURE_ROOT_ID, ancestors: [], ancestorsTruncated: false,
+        ...file, parentId: FIXTURE_ROOT_ID, ancestors: [], downloadUrl: null, ancestorsTruncated: false,
       })),
     );
     await renderFiles();
@@ -798,7 +798,7 @@ describe("FilesPage", () => {
       http.get(`/api/v1/entries/${file.id}`, async ({request}) => {
         detailsSignal = request.signal;
         await detailsGate;
-        return HttpResponse.json({...file, parentId: FIXTURE_ROOT_ID, ancestors: [], ancestorsTruncated: false});
+        return HttpResponse.json({...file, parentId: FIXTURE_ROOT_ID, ancestors: [], downloadUrl: null, ancestorsTruncated: false});
       }),
     );
     await renderFiles();
@@ -925,7 +925,7 @@ describe("FilesPage", () => {
       }),
       http.get(`/api/v1/entries/${file.id}`, () => {
         detailRequests += 1;
-        return HttpResponse.json({...file, parentId: FIXTURE_ROOT_ID, ancestors: [], ancestorsTruncated: false});
+        return HttpResponse.json({...file, parentId: FIXTURE_ROOT_ID, ancestors: [], downloadUrl: null, ancestorsTruncated: false});
       }),
     );
     // Start in a directory route so directory navigation reuses the same FilesPage instance.
@@ -1039,7 +1039,7 @@ describe("FilesPage root-wide scope", () => {
       entriesHandler(requests),
       http.get(`/api/v1/entries/${top.id}`, () => HttpResponse.json({
         ...top, parentId: FIXTURE_ROOT_ID, ancestors: [{id: FIXTURE_ROOT_ID, displayName: ""}],
-        ancestorsTruncated: false,
+        downloadUrl: null, ancestorsTruncated: false,
       })),
     );
     await renderFiles();
@@ -1174,7 +1174,7 @@ describe("FilesPage root-wide scope", () => {
       entriesHandler([]),
       http.get(`/api/v1/entries/${photo.id}`, () => HttpResponse.json({
         ...photo, parentId: PARENT_ID, ancestors: [{id: FIXTURE_ROOT_ID, displayName: ""}],
-        ancestorsTruncated: false,
+        downloadUrl: null, ancestorsTruncated: false,
       })),
     );
     await renderFiles();

@@ -8,7 +8,7 @@ import {
 } from "../../api/validate";
 import {assertAuthority, authorityBoundRequest} from "../auth/authority";
 import {capturePrivateState} from "../auth/cache";
-import {validatedEntryMedia} from "../media/validate";
+import {validatedDownloadUrl, validatedEntryMedia} from "../media/validate";
 import type {
   BrowseInput,
   BrowseScope,
@@ -188,9 +188,16 @@ function validatedDirectoryPage(
 }
 
 function validatedEntryDetails(value: unknown): EntryDetails {
-  const fields = objectWithKeys(value, [...SUMMARY_KEYS, "ancestors", "ancestorsTruncated", "parentId"]);
+  const fields = objectWithKeys(value, [
+    ...SUMMARY_KEYS, "ancestors", "ancestorsTruncated", "downloadUrl", "parentId",
+  ]);
   const summaryFields = Object.fromEntries(SUMMARY_KEYS.map((key) => [key, fields[key]]));
   const summary = validatedSummary(summaryFields);
+  const downloadUrl = validatedDownloadUrl(fields.downloadUrl, summary.id);
+  // Only a present regular file has an original to download.
+  if (downloadUrl !== null && (summary.kind !== "file" || summary.sourceState !== "present")) {
+    invalidResponse();
+  }
   if (!Array.isArray(fields.ancestors) || fields.ancestors.length > 64 ||
       typeof fields.ancestorsTruncated !== "boolean") invalidResponse();
   const ancestors = fields.ancestors.map((ancestor) => {
@@ -200,6 +207,7 @@ function validatedEntryDetails(value: unknown): EntryDetails {
   if (new Set(ancestors.map((ancestor) => ancestor.id)).size !== ancestors.length) invalidResponse();
   return {
     ...summary,
+    downloadUrl,
     parentId: fields.parentId === null ? null : uuid(fields.parentId),
     ancestors,
     ancestorsTruncated: fields.ancestorsTruncated,

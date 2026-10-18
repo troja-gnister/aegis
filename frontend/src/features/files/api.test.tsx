@@ -354,6 +354,7 @@ describe("file API guards", () => {
     server.use(
       http.get(`/api/v1/entries/${ENTRY_ID}`, () => HttpResponse.json({
         ...summary(),
+        downloadUrl: null,
         parentId: DIRECTORY_ID,
         ancestors: [{id: DIRECTORY_ID, displayName: ""}],
         ancestorsTruncated: false,
@@ -376,10 +377,69 @@ describe("file API guards", () => {
     });
   });
 
+  it("accepts the same-origin attachment URL of a present file in details", async () => {
+    const downloadUrl = `/media/v1/originals/${ENTRY_ID}?d=attachment&n=${NAMESPACE}&e=7`;
+    server.use(http.get(`/api/v1/entries/${ENTRY_ID}`, () => HttpResponse.json({
+      ...summary(), downloadUrl, parentId: DIRECTORY_ID, ancestors: [], ancestorsTruncated: false,
+    })));
+
+    await expect(fetchEntry(ENTRY_ID, new AbortController().signal)).resolves.toMatchObject({
+      id: ENTRY_ID, downloadUrl,
+    });
+  });
+
+  it.each([
+    ["a missing field", {downloadUrl: undefined}],
+    ["a non-string", {downloadUrl: 7}],
+    ["an empty string", {downloadUrl: ""}],
+    ["another entry's URL", {downloadUrl: `/media/v1/originals/${DIRECTORY_ID}?d=attachment&n=a&e=7`}],
+    ["an inline URL", {downloadUrl: `/media/v1/originals/${ENTRY_ID}?d=inline&n=a&e=7`}],
+    ["a derivative URL", {downloadUrl: `/media/v1/derivatives/${ENTRY_ID}/preview?f=${"a".repeat(32)}&n=a&e=7`}],
+    ["a URL without the namespace", {downloadUrl: `/media/v1/originals/${ENTRY_ID}?d=attachment&e=7`}],
+    ["a URL with an empty epoch", {downloadUrl: `/media/v1/originals/${ENTRY_ID}?d=attachment&n=a&e=`}],
+    ["another origin", {downloadUrl: `https://files.invalid/media/v1/originals/${ENTRY_ID}?d=attachment&n=a&e=7`}],
+    ["a protocol-relative URL", {downloadUrl: `//files.invalid/media/v1/originals/${ENTRY_ID}?d=attachment&n=a&e=7`}],
+    ["a fragment", {downloadUrl: `/media/v1/originals/${ENTRY_ID}?d=attachment&n=a&e=7#x`}],
+    ["a dot segment", {downloadUrl: `/media/v1/originals/../originals/${ENTRY_ID}?d=attachment&n=a&e=7`}],
+    ["a directory's URL", {kind: "directory", typeHint: null, size: null}],
+    ["a symbolic link's URL", {kind: "symlink"}],
+    ["a missing file's URL", {sourceState: "missing"}],
+    ["an inaccessible file's URL", {sourceState: "inaccessible"}],
+  ])("rejects details whose download URL is %s", async (_name, overrides) => {
+    const changes: Record<string, unknown> = overrides;
+    const body: Record<string, unknown> = {
+      ...summary(),
+      downloadUrl: `/media/v1/originals/${ENTRY_ID}?d=attachment&n=a&e=7`,
+      parentId: DIRECTORY_ID,
+      ancestors: [],
+      ancestorsTruncated: false,
+      ...changes,
+    };
+    if ("downloadUrl" in changes && changes.downloadUrl === undefined) delete body.downloadUrl;
+    server.use(http.get(`/api/v1/entries/${ENTRY_ID}`, () => HttpResponse.json(body)));
+
+    await expect(fetchEntry(ENTRY_ID, new AbortController().signal)).rejects.toMatchObject({status: 502});
+  });
+
+  it("accepts details without a download URL for every kind and state", async () => {
+    for (const [kind, sourceState] of [
+      ["file", "present"], ["file", "missing"], ["directory", "present"], ["special", "unsupported"],
+    ] as const) {
+      server.use(http.get(`/api/v1/entries/${ENTRY_ID}`, () => HttpResponse.json({
+        ...summary(), kind, sourceState, downloadUrl: null, parentId: null, ancestors: [],
+        ancestorsTruncated: false,
+      })));
+      await expect(fetchEntry(ENTRY_ID, new AbortController().signal)).resolves.toMatchObject({
+        kind, sourceState, downloadUrl: null,
+      });
+    }
+  });
+
   it("rejects more than 64 ancestors and malformed scan/status bodies", async () => {
     server.use(
       http.get(`/api/v1/entries/${ENTRY_ID}`, () => HttpResponse.json({
         ...summary(),
+        downloadUrl: null,
         parentId: DIRECTORY_ID,
         ancestors: Array.from({length: 65}, () => ({id: DIRECTORY_ID, displayName: "A"})),
         ancestorsTruncated: true,
@@ -397,6 +457,8 @@ describe("file API guards", () => {
     const otherId = "44444444-4444-4444-8444-444444444444";
     server.use(http.get(`/api/v1/entries/${ENTRY_ID}`, () => HttpResponse.json({
       ...summary(otherId),
+      // Even its own entry's download URL: the whole body names another entry.
+      downloadUrl: `/media/v1/originals/${otherId}?d=attachment&n=${NAMESPACE}&e=7`,
       parentId: DIRECTORY_ID,
       ancestors: [],
       ancestorsTruncated: false,

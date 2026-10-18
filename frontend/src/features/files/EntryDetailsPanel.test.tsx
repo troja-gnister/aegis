@@ -34,6 +34,7 @@ function details(overrides: Record<string, unknown> = {}) {
     sourceState: "present",
     version: "9223372036854775807",
     media: null,
+    downloadUrl: null,
     parentId: PARENT_ID,
     ancestors: [
       {id: FIXTURE_ROOT_ID, displayName: ""},
@@ -91,8 +92,11 @@ async function renderPanel(entryId = ENTRY_ID, options: PanelOptions = {}) {
   return {queryClient, ...view};
 }
 
+/** A described photo with EXPORT: the entry details carry its attachment URL. */
 function mediaEntry(overrides: Record<string, unknown> = {}) {
-  return details({media: entryMediaFixture(ENTRY_ID), ...overrides});
+  return details({
+    media: entryMediaFixture(ENTRY_ID), downloadUrl: originalUrlFor(ENTRY_ID, "attachment"), ...overrides,
+  });
 }
 
 function serveMedia(entry: Record<string, unknown>, media: Record<string, unknown> | (() => Response)) {
@@ -160,7 +164,7 @@ describe("EntryDetailsPanel", () => {
     expect(await screen.findByText(message)).toBeVisible();
   });
 
-  it("exposes only a close control, never a viewer, editor, download or destructive action", async () => {
+  it("exposes only a close control without EXPORT, never a viewer, editor or destructive action", async () => {
     server.use(http.get(`/api/v1/entries/${ENTRY_ID}`, () => HttpResponse.json(details())));
     await renderPanel();
     await screen.findByRole("heading", {name: "Holiday album.jpg"});
@@ -168,7 +172,10 @@ describe("EntryDetailsPanel", () => {
     expect(screen.queryByRole("link")).not.toBeInTheDocument();
     expect(screen.queryByText(/thumbnail/i)).not.toBeInTheDocument();
     // A .jpg the media catalog has not described yet.
-    expect(screen.getByText(/not available for this file yet/i)).toBeVisible();
+    expect(screen.getByText(
+      "Originals remain read only. Opening and preview are not available for this file yet.",
+    )).toBeVisible();
+    expect(screen.getByText("Your access to this file does not include downloading it.")).toBeVisible();
     expect(screen.queryByText(/not available in this version/i)).not.toBeInTheDocument();
   });
 
@@ -178,7 +185,66 @@ describe("EntryDetailsPanel", () => {
     ));
     await renderPanel();
     await screen.findByRole("heading", {name: "Notes.pdf"});
-    expect(screen.getByText(/not available in this version/i)).toBeVisible();
+    expect(screen.getByText("Originals remain read only. Opening and preview are not available in this version."))
+      .toBeVisible();
+  });
+
+  it("offers Download original for any file with a download URL, as a same-origin attachment link", async () => {
+    let mediaRequests = 0;
+    server.use(
+      http.get(`/api/v1/entries/${ENTRY_ID}`, () => HttpResponse.json(details({
+        displayName: "Quarterly report.pdf", typeHint: "pdf", downloadUrl: originalUrlFor(ENTRY_ID, "attachment"),
+      }))),
+      http.get(`/api/v1/entries/${ENTRY_ID}/media`, () => {
+        mediaRequests += 1;
+        return HttpResponse.json(mediaDetailsBody(ENTRY_ID));
+      }),
+    );
+    await renderPanel();
+
+    const download = await screen.findByRole("link", {name: "Download original"});
+    expect(download).toHaveAttribute("href", originalUrlFor(ENTRY_ID, "attachment"));
+    expect(download).toHaveAttribute("download", "");
+    expect(download.getAttribute("href")).not.toMatch(/^(blob:|data:|https?:)/);
+    expect(screen.getAllByRole("link")).toHaveLength(1);
+    expect(screen.getByText("Originals remain read only. Opening and preview are not available in this version."))
+      .toBeVisible();
+    expect(screen.queryByText(/does not include downloading/i)).not.toBeInTheDocument();
+    // A non-media file needs no second request for its download.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(mediaRequests).toBe(0);
+  });
+
+  it("offers Download for a photo the media catalog has not described yet", async () => {
+    server.use(http.get(`/api/v1/entries/${ENTRY_ID}`, () =>
+      HttpResponse.json(details({downloadUrl: originalUrlFor(ENTRY_ID, "attachment")})),
+    ));
+    await renderPanel();
+    expect(await screen.findByRole("link", {name: "Download original"})).toHaveAttribute(
+      "href", originalUrlFor(ENTRY_ID, "attachment"),
+    );
+    expect(screen.getByText(
+      "Originals remain read only. Opening and preview are not available for this file yet.",
+    )).toBeVisible();
+  });
+
+  it.each([
+    ["directory", "present", /opening, preview and download are not available in this version/i],
+    ["symlink", "present", /never followed/i],
+    ["special", "present", /metadata only/i],
+    ["file", "missing", /missing when last indexed/i],
+    ["file", "inaccessible", /currently inaccessible/i],
+    ["file", "unsupported", /not supported for content access/i],
+  ])("offers no Download and no access note for a %s entry in state %s", async (kind, sourceState, explanation) => {
+    server.use(http.get(`/api/v1/entries/${ENTRY_ID}`, () =>
+      HttpResponse.json(details({kind, sourceState, displayName: "Unavailable entry", typeHint: null})),
+    ));
+    await renderPanel();
+    await screen.findByRole("heading", {name: "Unavailable entry"});
+    expect(screen.getAllByText(explanation)[0]).toBeVisible();
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+    // The state explains the missing Download; it is not a permission matter.
+    expect(screen.queryByText(/does not include downloading/i)).not.toBeInTheDocument();
   });
 
   it("cancels the in-flight details request when closed", async () => {
@@ -359,20 +425,38 @@ describe("EntryDetailsPanel media details", () => {
     expect(within(section).queryByText("Camera", {selector: "dt"})).not.toBeInTheDocument();
   });
 
-  it("offers Download as an attachment link only with EXPORT", async () => {
+  it("offers one Download, from the entry details, as an attachment link only with EXPORT", async () => {
     serveMedia(mediaEntry(), mediaDetailsBody(ENTRY_ID, {permissions: {preview: true, export: true}}));
     const {unmount} = await renderPanel();
 
-    const download = await screen.findByRole("link", {name: "Download original"});
-    expect(download).toHaveAttribute("href", originalUrlFor(ENTRY_ID, "attachment"));
-    expect(download).toHaveAttribute("download");
-    expect(download.getAttribute("href")).not.toMatch(/^blob:/);
+    await screen.findByRole("link", {name: "Open photo"});
+    // The media details carry the same URL; the panel shows it once.
+    const downloads = screen.getAllByRole("link", {name: "Download original"});
+    expect(downloads).toHaveLength(1);
+    expect(downloads[0]).toHaveAttribute("href", originalUrlFor(ENTRY_ID, "attachment"));
+    expect(downloads[0]).toHaveAttribute("download");
+    expect(downloads[0]!.getAttribute("href")).not.toMatch(/^blob:/);
     unmount();
 
-    serveMedia(mediaEntry(), mediaDetailsBody(ENTRY_ID, {permissions: {preview: true, export: false}}));
+    serveMedia(
+      mediaEntry({downloadUrl: null}),
+      mediaDetailsBody(ENTRY_ID, {permissions: {preview: true, export: false}}),
+    );
     await renderPanel();
     await screen.findByRole("link", {name: "Open photo"});
     expect(screen.queryByRole("link", {name: "Download original"})).not.toBeInTheDocument();
+  });
+
+  it("keeps Download when the media details cannot be loaded", async () => {
+    serveMedia(
+      mediaEntry(),
+      () => HttpResponse.json({type: "catalog_not_found", title: "Catalog item not found"}, {status: 404}),
+    );
+    await renderPanel();
+    expect(await screen.findByText("Media details are not available for this file.")).toBeVisible();
+    expect(screen.getByRole("link", {name: "Download original"})).toHaveAttribute(
+      "href", originalUrlFor(ENTRY_ID, "attachment"),
+    );
   });
 
   it("opens the viewer route with opaque context in history state only with PREVIEW", async () => {
@@ -410,7 +494,10 @@ describe("EntryDetailsPanel media details", () => {
   });
 
   it("hides Open and Download without PREVIEW or EXPORT and says why", async () => {
-    serveMedia(mediaEntry(), mediaDetailsBody(ENTRY_ID, {permissions: {preview: false, export: false}}));
+    serveMedia(
+      mediaEntry({downloadUrl: null}),
+      mediaDetailsBody(ENTRY_ID, {permissions: {preview: false, export: false}}),
+    );
     await renderPanel();
     await screen.findByText("Dimensions", {selector: "dt"});
     expect(screen.queryByRole("link")).not.toBeInTheDocument();
@@ -429,7 +516,8 @@ describe("EntryDetailsPanel media details", () => {
   it("offers no Open without the opener's viewer context", async () => {
     serveMedia(mediaEntry(), mediaDetailsBody(ENTRY_ID));
     await renderPanel(ENTRY_ID, {viewerContext: undefined});
-    await screen.findByRole("link", {name: "Download original"});
+    await screen.findByText("Dimensions", {selector: "dt"});
+    expect(screen.getByRole("link", {name: "Download original"})).toBeVisible();
     expect(screen.queryByRole("link", {name: /^Open/})).not.toBeInTheDocument();
   });
 
@@ -445,7 +533,7 @@ describe("EntryDetailsPanel media details", () => {
   });
 
   it("hides Open when the original is missing and no preview is ready", async () => {
-    serveMedia(mediaEntry({sourceState: "missing"}), mediaDetailsBody(ENTRY_ID));
+    serveMedia(mediaEntry({sourceState: "missing", downloadUrl: null}), mediaDetailsBody(ENTRY_ID));
     await renderPanel();
     expect(await screen.findByText("The original is not available right now, so this photo cannot be opened."))
       .toBeVisible();
@@ -453,7 +541,7 @@ describe("EntryDetailsPanel media details", () => {
   });
 
   it("still opens a missing original whose preview is ready", async () => {
-    serveMedia(mediaEntry({sourceState: "missing"}), mediaDetailsBody(ENTRY_ID, {
+    serveMedia(mediaEntry({sourceState: "missing", downloadUrl: null}), mediaDetailsBody(ENTRY_ID, {
       derivatives: {
         thumbnail: {state: "ready", url: derivativeUrlFor(ENTRY_ID, "thumbnail")},
         preview: {state: "ready", url: derivativeUrlFor(ENTRY_ID, "preview")},

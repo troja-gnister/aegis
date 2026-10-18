@@ -236,6 +236,13 @@
   overflow-wrap: anywhere;
 }
 
+.entry-details__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-block-start: 1rem;
+}
+
 .entry-details__location {
   display: flex;
   flex-wrap: wrap;

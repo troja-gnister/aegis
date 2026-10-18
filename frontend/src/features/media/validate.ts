@@ -152,6 +152,15 @@ export function originalPath(entryId: string): string {
   return `/media/v1/originals/${entryId}`;
 }
 
+/**
+ * An original's attachment URL (Download) for the entry `entryId`, or null: the
+ * canonical same-origin path with `d=attachment` and the server's namespace and epoch.
+ * Entry details and media details carry the same URL.
+ */
+export function validatedDownloadUrl(value: unknown, entryId: string): string | null {
+  return mediaUrl(value, originalPath(entryId), originalParameters("attachment"));
+}
+
 const ENTRY_MEDIA_KEYS = [
   "durationMs", "height", "kind", "sortDate", "sortDateSource", "thumbnail", "thumbnailUrl", "width",
 ] as const;
@@ -229,7 +238,7 @@ function validatedOriginal(
   const fields = objectWithKeys(value, ["contentType", "downloadUrl", "inlineUrl", "playbackType"]);
   if (typeof fields.contentType !== "string" || !CONTENT_TYPE.test(fields.contentType)) invalidResponse();
   const inlineUrl = mediaUrl(fields.inlineUrl, originalPath(entryId), originalParameters("inline"));
-  const downloadUrl = mediaUrl(fields.downloadUrl, originalPath(entryId), originalParameters("attachment"));
+  const downloadUrl = validatedDownloadUrl(fields.downloadUrl, entryId);
   if ((inlineUrl !== null && !permissions.preview) || (downloadUrl !== null && !permissions.export)) {
     invalidResponse();
   }

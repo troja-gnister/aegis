@@ -448,7 +448,7 @@ describe("Viewer in the directory context", () => {
         degradedDirectories: "0", updatedAt: "2026-09-21T12:00:00Z", lastCompletedAt: "2026-09-21T12:00:00Z",
       })),
       http.get(`/api/v1/entries/${photo.id}`, () => HttpResponse.json({
-        ...photo, parentId: null, ancestors: [{id: FIXTURE_ROOT_ID, displayName: ""}], ancestorsTruncated: false,
+        ...photo, parentId: null, ancestors: [{id: FIXTURE_ROOT_ID, displayName: ""}], downloadUrl: null, ancestorsTruncated: false,
       })),
       mediaHandler({videos: new Set([clip.id])}),
     );
@@ -498,7 +498,7 @@ describe("Viewer in the directory context", () => {
         degradedDirectories: "0", updatedAt: "2026-09-21T12:00:00Z", lastCompletedAt: "2026-09-21T12:00:00Z",
       })),
       http.get(`/api/v1/entries/${photo.id}`, () => HttpResponse.json({
-        ...photo, parentId: null, ancestors: [{id: FIXTURE_ROOT_ID, displayName: ""}], ancestorsTruncated: false,
+        ...photo, parentId: null, ancestors: [{id: FIXTURE_ROOT_ID, displayName: ""}], downloadUrl: null, ancestorsTruncated: false,
       })),
       mediaHandler({videos: new Set([clip.id])}),
     );
@@ -620,7 +620,7 @@ describe("Viewer in the search context", () => {
       rootsHandler(),
       mediaHandler(),
       http.get(`/api/v1/entries/${photo.id}`, () => HttpResponse.json({
-        ...photo, parentId: PARENT_ID, ancestors: [], ancestorsTruncated: false,
+        ...photo, parentId: PARENT_ID, ancestors: [], downloadUrl: null, ancestorsTruncated: false,
       })),
       http.get(`/api/v1/roots/${FIXTURE_ROOT_ID}/entries`, () => {
         requests += 1;
@@ -714,7 +714,7 @@ describe("Viewer toolbar and accessibility", () => {
       rootsHandler(),
       mediaHandler(),
       http.get(`/api/v1/entries/${entryId}`, () =>
-        HttpResponse.json({...timelineItemBody(7), ancestors: [], ancestorsTruncated: false})),
+        HttpResponse.json({...timelineItemBody(7), ancestors: [], downloadUrl: null, ancestorsTruncated: false})),
     );
     await renderViewer([viewerPath(FIXTURE_ROOT_ID, entryId)]);
 
@@ -734,7 +734,7 @@ describe("Viewer toolbar and accessibility", () => {
       mediaHandler(),
       http.get(`/api/v1/entries/${entryId}`, () => {
         const body = timelineItemBody(1);
-        return HttpResponse.json({...body, ancestors: [], ancestorsTruncated: false});
+        return HttpResponse.json({...body, ancestors: [], downloadUrl: null, ancestorsTruncated: false});
       }),
     );
     const foreignState = viewerLocationState(timelineItemId(2), {
@@ -759,7 +759,7 @@ describe("Viewer and logout", () => {
       mediaHandler(),
       http.get(`/api/v1/entries/${entryId}`, () => {
         const body = timelineItemBody(4);
-        return HttpResponse.json({...body, ancestors: [], ancestorsTruncated: false});
+        return HttpResponse.json({...body, ancestors: [], downloadUrl: null, ancestorsTruncated: false});
       }),
     );
     const queryClient = new QueryClient({defaultOptions: {queries: {retry: false}}});

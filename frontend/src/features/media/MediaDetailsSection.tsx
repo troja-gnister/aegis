@@ -25,7 +25,7 @@ export type MediaDetailsSectionProps = {
   viewerContext?: MediaViewerContext;
   /** Called when Open is activated, before the viewer route is entered. */
   onOpenMedia?(entryId: string): void;
-  /** False inside the viewer, whose toolbar already offers Download. Defaults to true. */
+  /** False inside the viewer, which is already open. Defaults to true. */
   showActions?: boolean;
 };
 
@@ -70,26 +70,20 @@ function MediaActions({entry, details, viewerContext, onOpenMedia}: {
 }) {
   const canOpen = canOpenInViewer(details, entry.sourceState);
   const viewerState = canOpen && viewerContext ? viewerLocationState(entry.id, viewerContext) : null;
-  const downloadUrl = details.permissions.export ? details.original.downloadUrl : null;
   const note = accessNote(details, canOpen, entry.sourceState);
   const kind = MEDIA_KIND_LABEL[details.kind].toLowerCase();
   return (
     <>
-      {viewerState !== null || downloadUrl !== null ? (
+      {viewerState !== null ? (
         <div className="media-details__actions">
-          {viewerState !== null ? (
-            <Link
-              className="file-page-control file-page-control--primary interactive"
-              to={viewerPath(entry.rootId, entry.id)}
-              state={viewerState}
-              onClick={() => onOpenMedia?.(entry.id)}
-            >
-              Open {kind}
-            </Link>
-          ) : null}
-          {downloadUrl !== null ? (
-            <a className="file-page-control interactive" href={downloadUrl} download>Download original</a>
-          ) : null}
+          <Link
+            className="file-page-control file-page-control--primary interactive"
+            to={viewerPath(entry.rootId, entry.id)}
+            state={viewerState}
+            onClick={() => onOpenMedia?.(entry.id)}
+          >
+            Open {kind}
+          </Link>
         </div>
       ) : null}
       {note !== null ? <p className="notice">{note}</p> : null}
@@ -108,7 +102,9 @@ function mediaError(error: unknown): string {
  * Photo and video details for a media entry: dimensions, the capture time
  * (labeled "Captured", shown in its recorded offset and never filled from the
  * file modified time), camera and duration, plus Open (PREVIEW, when the
- * viewer can show it) and Download (EXPORT).
+ * viewer can show it). Download (EXPORT) belongs to the details panel, which
+ * offers it for every file from the entry details' `downloadUrl`; the viewer's
+ * toolbar offers the same URL from the media details.
  */
 export function MediaDetailsSection({entry, viewerContext, onOpenMedia, showActions = true}: MediaDetailsSectionProps) {
   const headingId = useId();

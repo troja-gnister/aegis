@@ -72,11 +72,24 @@ function ModifiedValue({modifiedNs}: {modifiedNs: string | null}) {
 
 function readOnlyText(entry: EntryDetails): string {
   if (entry.media !== null) return "Originals remain read only.";
+  if (entry.kind !== "file") {
+    return "Originals remain read only. Opening, preview and download are not available in this version.";
+  }
   // A photo or video the media catalog has not described yet.
   if (mediaKindOf(entry) !== null) {
-    return "Originals remain read only. Opening, preview and download are not available for this file yet.";
+    return "Originals remain read only. Opening and preview are not available for this file yet.";
   }
-  return "Originals remain read only. Opening, preview and download are not available in this version.";
+  return "Originals remain read only. Opening and preview are not available in this version.";
+}
+
+/**
+ * Why a present file offers no Download: only a missing EXPORT grant leaves a present
+ * file without a URL (the informational notes explain every unavailable state). For
+ * photos and videos the media section's access note covers it instead.
+ */
+function downloadNote(entry: EntryDetails): string | null {
+  if (entry.kind !== "file" || entry.sourceState !== "present" || entry.downloadUrl !== null) return null;
+  return entry.media === null ? "Your access to this file does not include downloading it." : null;
 }
 
 function detailsError(error: unknown): string {
@@ -110,6 +123,7 @@ export function EntryDetailsPanel({entryId, onClose, viewerContext, onOpenMedia,
   // Placeholder data is never shown: a different entry ID is a different query.
   const entry = query.data?.id === entryId ? query.data : undefined;
   const notes = entry ? informationalNotes(entry) : [];
+  const accessNote = entry ? downloadNote(entry) : null;
   const typeText = entry ? (entry.typeHint === null ? "No extension" : `.${entry.typeHint}`) : "";
 
   return (
@@ -157,6 +171,15 @@ export function EntryDetailsPanel({entryId, onClose, viewerContext, onOpenMedia,
               onOpenMedia={onOpenMedia}
             />
           ) : null}
+          {entry.downloadUrl !== null ? (
+            <div className="entry-details__actions">
+              {/* A same-origin attachment: the browser keeps the session cookie and the name. */}
+              <a className="file-page-control interactive" href={entry.downloadUrl} download>
+                Download original
+              </a>
+            </div>
+          ) : null}
+          {accessNote !== null ? <p className="notice">{accessNote}</p> : null}
           {notes.map((note) => <p key={note} className="notice">{note}</p>)}
           <ol className="entry-details__location" aria-label="Location">
             {entry.ancestorsTruncated ? <li>… earlier folders omitted</li> : null}

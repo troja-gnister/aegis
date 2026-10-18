@@ -11,6 +11,13 @@ import {test} from "./safe-test";
 test.describe.configure({timeout: 180_000});
 
 const ENTRIES_PATH = /^\/api\/v1\/roots\/[0-9a-f-]{36}\/entries$/;
+const ORIGINAL_ATTACHMENT =
+  /^\/media\/v1\/originals\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\?d=attachment&n=[0-9A-Za-z]+&e=[0-9]+$/;
+// The harness's synthetic document (scripts/e2e_support.py): a non-media file with a
+// non-ASCII name, delivered as an opaque attachment.
+const DOCUMENT_NAME = "résumé.pdf";
+const DOCUMENT_BYTES = Buffer.from("Synthetic document bytes\n", "utf8");
+const DOCUMENT_DISPOSITION = `attachment; filename="r_sum_.pdf"; filename*=UTF-8''r%C3%A9sum%C3%A9.pdf`;
 
 function isEntries(url: URL): boolean {
   return ENTRIES_PATH.test(url.pathname);
@@ -293,7 +300,10 @@ test("details, inert links and keyboard dialog focus at phone widths", async ({p
   await expect(details.getByText(".txt", {exact: true})).toBeVisible();
   await expect(details.getByText("24 bytes", {exact: true})).toBeVisible();
   await expect(details.getByText("Filesystem modification time, not a capture time.")).toBeVisible();
-  await expect(details.getByRole("link")).toHaveCount(0);
+  // Alice's grant includes EXPORT: the panel's one link downloads the original.
+  await expect(details.getByRole("link")).toHaveCount(1);
+  await expect(details.getByRole("link", {name: "Download original", exact: true}))
+    .toHaveAttribute("href", ORIGINAL_ATTACHMENT);
   await details.getByRole("button", {name: "Close details"}).click();
   await expect(details).toHaveCount(0);
   await expect(fileRow(page, "alice-only.txt")).toBeFocused();
@@ -314,6 +324,65 @@ test("details, inert links and keyboard dialog focus at phone widths", async ({p
   await expect(details.getByText(/Links are recorded as metadata and never followed/)).toBeVisible();
   await expect(page.getByText("sibling-secret.txt")).toHaveCount(0);
   await expectPhoneLayout(page);
+});
+
+test("Download original saves a document's exact bytes; its URL resumes in the session and ends with it", async ({page}) => {
+  await signIn(page, "alice", requiredSecret("E2E_ALICE_PASSWORD"));
+  await openRoot(page, "Alice files");
+  await filterBy(page, (dialog) => dialog.getByLabel(".pdf", {exact: true}).check());
+  await expectOnlyRows(page, [DOCUMENT_NAME]);
+  await fileRow(page, DOCUMENT_NAME).click();
+  const details = page.getByRole("region", {name: "File details"});
+  await expect(details.getByRole("heading", {name: DOCUMENT_NAME})).toBeFocused();
+  const link = details.getByRole("link", {name: "Download original", exact: true});
+  await expect(link).toHaveAttribute("download", "");
+  await expect(link).toHaveAttribute("href", ORIGINAL_ATTACHMENT);
+  const href = (await link.getAttribute("href"))!;
+
+  // A real click: the browser downloads the attachment with the session's own cookie.
+  const started = page.waitForEvent("download");
+  await link.click();
+  const download = await started;
+  expect(download.suggestedFilename()).toBe(DOCUMENT_NAME);
+  const chunks: Buffer[] = [];
+  for await (const chunk of await download.createReadStream()) chunks.push(chunk as Buffer);
+  expect(Buffer.concat(chunks).equals(DOCUMENT_BYTES)).toBe(true);
+  expect(await download.failure()).toBeNull();
+  // The page stays where it was.
+  await expect(details.getByRole("heading", {name: DOCUMENT_NAME})).toBeVisible();
+
+  // The same URL from the context's cookie jar: exact bytes, safe headers, the gateway's validator.
+  const full = await page.request.get(href);
+  expect(full.status()).toBe(200);
+  const headers = full.headers();
+  expect(headers["content-disposition"]).toBe(DOCUMENT_DISPOSITION);
+  expect(headers["content-type"]).toBe("application/octet-stream");
+  expect(headers["cache-control"]).toBe("private, no-store");
+  expect(headers["x-content-type-options"]).toBe("nosniff");
+  expect((await full.body()).equals(DOCUMENT_BYTES)).toBe(true);
+  const etag = headers["etag"] ?? "";
+  expect(etag).toMatch(/^"[0-9a-f]+-[0-9a-f]+"$/);
+
+  // Resuming in the session: the validator still matches, so only the rest is sent.
+  const resume = {Range: "bytes=10-", "If-Range": etag};
+  const resumed = await page.request.get(href, {headers: resume});
+  expect(resumed.status()).toBe(206);
+  expect(resumed.headers()["content-range"]).toBe(`bytes 10-${DOCUMENT_BYTES.length - 1}/${DOCUMENT_BYTES.length}`);
+  expect((await resumed.body()).equals(DOCUMENT_BYTES.subarray(10))).toBe(true);
+  // A validator from other bytes restarts the download with the whole file.
+  const restarted = await page.request.get(href, {headers: {...resume, "If-Range": '"0-0"'}});
+  expect(restarted.status()).toBe(200);
+  expect((await restarted.body()).equals(DOCUMENT_BYTES)).toBe(true);
+
+  // The URL is bound to the session: after sign-out a resume is refused like a fresh request.
+  await page.getByRole("button", {name: "Sign out"}).click();
+  await expect(page.getByRole("heading", {name: "Sign in"})).toBeVisible();
+  for (const request of [{}, resume]) {
+    const refused = await page.request.get(href, {headers: request});
+    expect(refused.status()).toBe(404);
+    expect(refused.headers()["cache-control"]).toBe("private, no-store");
+    expect(await refused.text()).toBe("Not found\n");
+  }
 });
 
 test("stale cursor is refused by the server and Start from the beginning restarts at page one", async ({page}) => {
