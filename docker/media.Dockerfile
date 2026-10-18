@@ -39,6 +39,10 @@ RUN apt-get update \
     && groupadd --gid 10001 aegis \
     && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin aegis \
     && install -d -o "$AEGIS_UID" -g "$AEGIS_GID" -m 0770 /srv/aegis/scratch
+# The base image ships the standard library without bytecode, so every job's decoding child
+# (python -I -B) would recompile the modules it imports. -B only stops writing bytecode.
+RUN python -m compileall -q -j 0 --invalidation-mode checked-hash -x /site-packages/ \
+    /usr/local/lib/python3.13
 WORKDIR /app/backend
 
 FROM runtime AS media-test
