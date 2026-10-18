@@ -51,7 +51,7 @@ import time
 import uuid
 from collections.abc import Sequence
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, cast
 
 from aegisctl.container_engine import container_command, sanitized_environment, selected_engine
 from aegisctl.container_launch import controlled_container_argv
@@ -286,7 +286,7 @@ class Browser(threading.Thread):
                             cursor=None,
                         )
                     self.latencies.append(time.monotonic() - started)
-                    entries = page["entries"]
+                    entries = cast(list[dict[str, Any]], page["entries"])
                     folders = [entry["id"] for entry in entries if entry["kind"] == "directory"]
                     if entries and self.rng.random() < 0.3:
                         started = time.monotonic()
@@ -526,7 +526,8 @@ def _measure(arguments: argparse.Namespace, image: str, workdir: Path, tree: Pat
 
         from tests.support.database_roles import managed_role_database
 
-        old = setup_databases(verbosity=0, interactive=False, aliases={"default"},
+        # Django reads only the aliases' names; its stubs ask for a mapping.
+        old = setup_databases(verbosity=0, interactive=False, aliases=dict.fromkeys(["default"]),
                               serialized_aliases=set())
         try:
             with managed_role_database() as database:
