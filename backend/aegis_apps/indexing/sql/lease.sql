@@ -67,12 +67,29 @@ BEGIN
             SET degraded_directories=degraded_directories+exhausted_directories,
             updated_at=database_now WHERE root_id=root.id;
     END IF;
-    SELECT * INTO work FROM public.indexing_directorywork WHERE run_id=p_run_id
-        AND attempt < max_directory_attempts AND available_at <= database_now
+    -- The earliest claimable directory by (available_at, id): the first pending row in the
+    -- claim index's order, or the first expired attempt (a handful at most). An OR over both
+    -- states would sort the run's whole pending frontier on every claim. The locking read
+    -- repeats the full predicate, so a row changed since the candidate read is not claimed.
+    SELECT * INTO work FROM public.indexing_directorywork WHERE id=(
+        SELECT candidate.id FROM (
+            (SELECT id, available_at FROM public.indexing_directorywork
+              WHERE run_id=p_run_id AND state='pending' AND attempt < max_directory_attempts
+                AND available_at <= database_now
+              ORDER BY available_at, id LIMIT 1)
+            UNION ALL
+            (SELECT id, available_at FROM public.indexing_directorywork
+              WHERE run_id=p_run_id AND state IN ('reading','finalizing')
+                AND attempt < max_directory_attempts AND available_at <= database_now
+                AND lease_expires_at + pg_catalog.make_interval(secs=>CASE WHEN attempt=1
+                    THEN first_retry_seconds ELSE second_retry_seconds END) <= database_now
+              ORDER BY available_at, id LIMIT 1)
+        ) AS candidate ORDER BY candidate.available_at, candidate.id LIMIT 1)
+        AND run_id=p_run_id AND attempt < max_directory_attempts AND available_at <= database_now
         AND (state='pending' OR (state IN ('reading','finalizing')
             AND lease_expires_at + pg_catalog.make_interval(secs=>CASE WHEN attempt=1
                 THEN first_retry_seconds ELSE second_retry_seconds END) <= database_now))
-        ORDER BY available_at, id LIMIT 1 FOR UPDATE SKIP LOCKED;
+        FOR UPDATE SKIP LOCKED;
     IF NOT FOUND THEN RETURN NULL; END IF;
     SELECT * INTO directory FROM public.catalog_catalogentry WHERE id=work.directory_id FOR UPDATE;
     IF NOT FOUND OR directory.root_id <> root.id OR directory.kind <> 'directory' THEN RETURN NULL; END IF;
