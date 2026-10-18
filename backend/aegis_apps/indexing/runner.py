@@ -72,40 +72,61 @@ class DatabaseLane:
         self._pool.shutdown(wait=True, cancel_futures=True)
 
 
+# The bounded parent walk of one directory: each step joins the previous row's source parent
+# in the same root, never a root or a descendant tree, and the walk stops after the deepest
+# chain a reader accepts (MAX_COMPONENTS components, then the anchor).
+_SOURCE_CHAIN = """
+WITH RECURSIVE chain AS (
+    SELECT 0 AS depth, entry.id, entry.source_parent_id, entry.source_revision,
+           entry.source_parent_revision, entry.kind, entry.source_state, entry.raw_name
+      FROM catalog_catalogentry AS entry
+     WHERE entry.id = %(directory)s AND entry.root_id = %(root)s
+    UNION ALL
+    SELECT chain.depth + 1, parent.id, parent.source_parent_id, parent.source_revision,
+           parent.source_parent_revision, parent.kind, parent.source_state, parent.raw_name
+      FROM chain JOIN catalog_catalogentry AS parent
+        ON parent.id = chain.source_parent_id AND parent.root_id = %(root)s
+     WHERE chain.depth < %(limit)s
+)
+SELECT id, source_parent_id, source_revision, source_parent_revision, kind, source_state,
+       raw_name
+  FROM chain ORDER BY depth
+"""
+
+
 def source_components(lease: ScanLease) -> tuple[bytes, ...]:
     """Resolve only the bounded, same-root source chain with captured revisions."""
-    from aegis_apps.catalog.models import CatalogEntry
     from aegis_apps.catalog.names import source_name
 
+    with connection.cursor() as cursor:
+        cursor.execute(_SOURCE_CHAIN, {
+            "directory": lease.directory_id, "root": lease.root_id, "limit": MAX_COMPONENTS,
+        })
+        rows = cursor.fetchall()
     current = lease.directory_id
     expected_revision: int | None = lease.parent_revision
     components: list[bytes] = []
     seen = set()
     size = 0
-    while len(components) <= MAX_COMPONENTS:
-        if current in seen or expected_revision is None:
+    # One statement; the rows then meet the checks of a row-at-a-time walk, in its order.
+    for entry_id, parent_id, revision, parent_revision, kind, state, raw_name in rows:
+        if entry_id != current or current in seen or expected_revision is None:
             raise UnsupportedTraversal
         seen.add(current)
-        # One bounded row at a time: never materialize a root or a descendant tree.
-        row = CatalogEntry.objects.filter(pk=current, root_id=lease.root_id).values(
-            "source_parent_id", "source_revision", "source_parent_revision",
-            "kind", "source_state", "raw_name",
-        ).first()
-        if (row is None or row["kind"] != "directory" or row["source_state"] != "present"
-                or row["source_revision"] != expected_revision):
+        if kind != "directory" or state != "present" or revision != expected_revision:
             raise UnsupportedTraversal
-        if row["source_parent_id"] is None:
-            if bytes(row["raw_name"]) != b"":
+        if parent_id is None:
+            if bytes(raw_name) != b"":
                 raise UnsupportedTraversal
             return tuple(reversed(components))
-        raw = bytes(row["raw_name"])
+        raw = bytes(raw_name)
         source_name(raw)
         size += len(raw)
         if size > MAX_COMPONENT_BYTES or len(components) == MAX_COMPONENTS:
             raise UnsupportedTraversal
         components.append(raw)
-        current = row["source_parent_id"]
-        expected_revision = row["source_parent_revision"]
+        current = parent_id
+        expected_revision = parent_revision
     raise UnsupportedTraversal
 
 

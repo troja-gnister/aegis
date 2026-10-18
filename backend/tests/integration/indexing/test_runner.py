@@ -89,6 +89,30 @@ def test_component_bytes_are_bounded_without_truncation(
         source_components(replace(lease, directory_id=parent.pk))
 
 
+@pytest.mark.parametrize("depth", [255, 256, 257])
+def test_source_chain_is_one_statement_bounded_at_the_reader_depth(
+    scan_fixture: ScanFixture, entry_factory: Callable[..., CatalogEntry], depth: int,
+) -> None:
+    from aegis_apps.indexing.reader import MAX_COMPONENTS
+    from django.test.utils import CaptureQueriesContext
+
+    lease = scan_fixture.claim()
+    parent = CatalogEntry.objects.get(pk=lease.directory_id)
+    for _ in range(depth):
+        parent = entry_factory(root=scan_fixture.root, raw=b"d", parent=parent, kind="directory")
+    CatalogEntry.objects.filter(root=scan_fixture.root, raw_name=b"d").update(
+        source_parent_revision=0,
+    )
+    with (scan_fixture.database.as_django_role("aegis_indexer"),
+          CaptureQueriesContext(connection) as captured):
+        if depth > MAX_COMPONENTS:
+            with pytest.raises(UnsupportedTraversal):
+                source_components(replace(lease, directory_id=parent.pk))
+        else:
+            assert source_components(replace(lease, directory_id=parent.pk)) == (b"d",) * depth
+    assert len(captured) == 1
+
+
 def test_database_lane_is_bounded_and_has_actual_indexer_login(role_database: RoleDatabase) -> None:
     from aegis_apps.indexing.runner import DatabaseLane
 
